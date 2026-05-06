@@ -363,7 +363,8 @@ def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
 
 
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
-         stderr_log_path: Optional[pathlib.Path] = None) -> tuple[int, str, str]:
+         stderr_log_path: Optional[pathlib.Path] = None,
+         pid_file_path: Optional[pathlib.Path] = None) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
@@ -373,6 +374,12 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     If `stderr_log_path` is set, the child's stderr is also tee'd line-by-line
     to that file (append mode) — useful for post-hoc forensics on long agent
     turns where the live trace is otherwise lost.
+
+    If `pid_file_path` is set, the child's PID is written there at startup
+    and the file is removed when the call returns. External tools can read
+    the file + `kill -0 <pid>` to tell apart "duet is alive, agent thinking"
+    vs "agent crashed silently". Critical for agents like `claude -p` that
+    emit no stderr during their long API call.
     """
     mirror = sys.stderr if (LIVE_STREAM and sys.stderr.isatty()) else None
     out_chunks: list[str] = []
@@ -401,6 +408,16 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         except FileNotFoundError:
             return 127, "", f"[duet] command not found: {cmd[0]}"
         _register_proc(proc)
+        if pid_file_path is not None:
+            try:
+                pid_file_path.parent.mkdir(parents=True, exist_ok=True)
+                # Write atomically so a poller never reads a half-written PID.
+                tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
+                tmp.write_text(f"{proc.pid}\n")
+                os.replace(tmp, pid_file_path)
+            except OSError as e:
+                print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
+                      file=sys.stderr)
         t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, out_chunks), daemon=True)
         t_err = threading.Thread(target=_stream_reader,
                                  args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX, stderr_file),
@@ -435,12 +452,18 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                 stderr_file.close()
             except Exception:
                 pass
+        if pid_file_path is not None:
+            try:
+                pid_file_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
                 reasoning: Optional[str] = None,
-                stderr_log_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+                stderr_log_path: Optional[pathlib.Path] = None,
+                pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id)."""
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
@@ -466,7 +489,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd += ["--model", agent.model]
     cmd += agent.extra_args
     rc, out, err = _run(cmd, cwd=eff_cwd, stdin=None, timeout=timeout,
-                        stderr_log_path=stderr_log_path)
+                        stderr_log_path=stderr_log_path,
+                        pid_file_path=pid_file_path)
     if rc != 0:
         raise RuntimeError(f"claude exited {rc}\nstderr:\n{err}")
     try:
@@ -480,7 +504,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
 def call_codex(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, sandbox: str, timeout: int, dry: bool,
                first_turn: bool, reasoning: Optional[str] = None,
-               stderr_log_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+               stderr_log_path: Optional[pathlib.Path] = None,
+               pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id). Codex resume tracking uses --last."""
     eff_cwd = agent.cwd_override or cwd
     if dry:
@@ -525,7 +550,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         cmd = ["codex", "exec", "resume", "--last", *options, full_prompt]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
     rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout,
-                        stderr_log_path=stderr_log_path)
+                        stderr_log_path=stderr_log_path,
+                        pid_file_path=pid_file_path)
     if rc != 0:
         raise RuntimeError(f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…")
     # We don't reliably parse codex's session id; treat presence of "last"-resume as our state marker.
@@ -537,16 +563,21 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
                turn_label: Optional[str] = None) -> str:
     sys_prompt = agent.system_prompt(cfg.sentinel)
     reasoning = effective_reasoning(agent, cfg.reasoning)
-    # Per-turn stderr log lands in the run dir for forensics, sortable by
-    # turn number. Skipped if caller didn't provide both run_dir and label.
+    # Per-turn stderr log + pid file land in the run dir for forensics +
+    # liveness checks, sortable by turn number. The pid file is the only
+    # reliable signal for "is the agent still alive?" when stderr goes
+    # silent (claude -p emits nothing during its API call).
     log_path: Optional[pathlib.Path] = None
+    pid_path: Optional[pathlib.Path] = None
     if run_dir is not None and turn_label is not None:
         log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
+        pid_path = run_dir / f"turn-{turn_label}-{agent.name}.pid"
     if agent.backend == "claude":
         text, new_sid = call_claude(agent, sys_prompt, message, cfg.cwd,
                                     cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
                                     reasoning=reasoning,
-                                    stderr_log_path=log_path)
+                                    stderr_log_path=log_path,
+                                    pid_file_path=pid_path)
         agent.session_id = new_sid
         return text
     if agent.backend == "codex":
@@ -554,7 +585,8 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
                                    cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
                                    first_turn=first_turn_for_agent,
                                    reasoning=reasoning,
-                                   stderr_log_path=log_path)
+                                   stderr_log_path=log_path,
+                                   pid_file_path=pid_path)
         agent.session_id = new_sid
         return text
     raise SystemExit(f"unknown backend '{agent.backend}'")
@@ -731,8 +763,13 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = "force_stop"
             break
         speaker = cfg.agents[speaker_idx]
-        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) ---")
         t0 = time.time()
+        # Print BEFORE the subprocess starts so the terminal user sees
+        # something happen instantly. claude -p emits nothing on stderr
+        # during its API call; without this banner the user thinks duet hung.
+        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
+              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
+        sys.stdout.flush()
         try:
             reply = call_agent(speaker, last_msg, cfg,
                                first_turn_for_agent=not seen_first_turn[speaker.name],
@@ -867,6 +904,79 @@ def load_yaml_or_json(path: pathlib.Path) -> dict:
     return json.loads(text)
 
 
+# ---------- run-status (`duet --status <run_dir>`) ----------
+
+def _pid_alive(pid: int) -> bool:
+    """True if the OS process still exists. Uses signal 0 (no-op probe)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # PID exists but is owned by someone else — still "alive" for us.
+        return True
+
+
+def print_run_status(run_dir: pathlib.Path) -> int:
+    """Print a one-shot health summary for a duet run. Returns shell exit code:
+    0 = run finished cleanly, 1 = still running, 2 = stuck/crashed, 3 = error.
+    """
+    run_dir = run_dir.expanduser().resolve()
+    if not run_dir.is_dir():
+        print(f"[duet] no such run dir: {run_dir}", file=sys.stderr)
+        return 3
+    state_path = run_dir / "state.json"
+    state: dict = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text())
+        except json.JSONDecodeError as e:
+            print(f"[duet] state.json malformed: {e}", file=sys.stderr)
+            return 3
+    finished = state.get("finished_reason")
+    print(f"[duet] {run_dir}")
+    print(f"  turns_used:      {state.get('turns_used', '?')}")
+    print(f"  finished_reason: {finished!r}")
+
+    # Find the in-flight turn via .pid file (only present while a turn runs).
+    pid_files = sorted(run_dir.glob("turn-*.pid"))
+    if pid_files:
+        pid_file = pid_files[-1]
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            pid = None
+        # Filename: turn-<label>-<agent>.pid
+        stem = pid_file.stem  # turn-02-claude-planner
+        started_at = dt.datetime.fromtimestamp(pid_file.stat().st_mtime)
+        elapsed = (dt.datetime.now() - started_at).total_seconds()
+        alive = _pid_alive(pid) if pid is not None else False
+        print(f"  in-flight turn: {stem}")
+        print(f"    pid:          {pid}  (alive: {alive})")
+        print(f"    started:      {started_at.isoformat(timespec='seconds')}  "
+              f"({int(elapsed)}s ago)")
+        # Heartbeat from the matching stderr log
+        log = run_dir / f"{stem}.stderr.log"
+        if log.exists():
+            log_age = (dt.datetime.now()
+                       - dt.datetime.fromtimestamp(log.stat().st_mtime)).total_seconds()
+            print(f"    last stderr:  {int(log_age)}s ago "
+                  f"({log.stat().st_size} bytes)")
+        if not alive:
+            print("    ⚠ pid file present but process is gone — turn likely "
+                  "crashed or was killed without cleanup")
+            return 2
+        return 1
+    # No pid files. Either run hasn't started or has finished.
+    if finished:
+        print(f"  done. transcript: {state.get('transcript_path', run_dir / 'transcript.md')}")
+        return 0
+    print("  no in-flight turn AND no finished_reason — run may have died "
+          "between turns, or hasn't started yet")
+    return 2
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
@@ -910,11 +1020,22 @@ def main() -> int:
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
                          "(minimal → low) and adds high/max prompt nudges.")
+    ap.add_argument("--status", metavar="RUN_DIR", default=None,
+                    help="don't run a duet — instead print a one-shot health "
+                         "summary of an existing run dir (e.g. runs/<id>/) "
+                         "and exit. Shows in-flight turn, pid + alive status, "
+                         "elapsed time, last stderr write age. Exit codes: "
+                         "0=done, 1=running, 2=stuck/crashed, 3=error.")
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
                          "By default, duet prints Codex's live progress as it works.")
     ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
     args = ap.parse_args()
+
+    # `--status` is read-only: print run health and exit. Skip everything below.
+    if args.status:
+        return print_run_status(pathlib.Path(args.status))
+
     if args.worktree and args.worktree_path:
         ap.error("--worktree and --worktree-path are mutually exclusive")
 
