@@ -6,5 +6,9 @@ duet/
 .DS_Store
 *.swp
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Future per-run outputs at the root level (none today)
 runs/
