@@ -33,6 +33,14 @@
 #         a browser to see the dashboard with the recommended winner.
 
 cwd: .                            # the duet/ folder
+
+# Claude's --add-dir defaults to cwd only. This task writes ../DECISION_v2.md
+# and reads ../REQUIREMENTS.md / ../DECISION.md, so we explicitly grant the
+# parent. Without this, claude refuses paths outside cwd and the run
+# deadlocks with the planner unable to write the deliverables.
+add_dirs:
+  - ..
+
 max_turns: 14                     # ~7 batches of 3 repos + synthesis turns
 sentinel: "<<<LGTM>>>"
 per_turn_timeout: 1800            # 30 min/turn (gh + claude synthesis can be heavy)

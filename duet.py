@@ -59,9 +59,13 @@ ROLE_PROMPTS = {
     "planner": (
         "You are the PLANNER half of a duet. Read the partner agent's latest "
         "message and propose or refine a plan. Be concrete: file names, "
-        "functions, edge cases. Do NOT write the full implementation. "
-        "When you believe the work is fully done and reviewed, end your reply "
-        "with {SENTINEL} on its own line."
+        "functions, edge cases. You may also write or edit non-code "
+        "deliverables yourself when the task asks for them — synthesis "
+        "documents, reports, comparison matrices, configuration, README "
+        "updates, dashboards, etc. What you should NOT do is write production "
+        "feature code (that's the coder's job). When you believe the work is "
+        "fully done and reviewed, end your reply with {SENTINEL} on its own "
+        "line."
     ),
     "coder": (
         "You are the CODER half of a duet. Read the partner agent's latest "
@@ -183,6 +187,11 @@ class DuetConfig:
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
     worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
                                                   # default = <run_dir>/wt (durable, gitignored)
+    add_dirs: list[pathlib.Path] = dataclasses.field(default_factory=list)
+                                                  # extra `--add-dir` paths for claude — needed
+                                                  # when the task reads/writes outside cwd
+                                                  # (e.g. ../DECISION.md). Without these claude
+                                                  # silently refuses paths outside cwd.
     reasoning: Optional[str] = None           # default reasoning effort for both agents
 
 
@@ -463,7 +472,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
                 reasoning: Optional[str] = None,
                 stderr_log_path: Optional[pathlib.Path] = None,
-                pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+                pid_file_path: Optional[pathlib.Path] = None,
+                add_dirs: Optional[list[pathlib.Path]] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id)."""
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
@@ -483,6 +493,11 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
            "--permission-mode", perm_mode,
            *reasoning_args,
            "--add-dir", str(eff_cwd)]
+    # Extra read/write roots for tasks that span outside cwd (e.g. writing
+    # ../DECISION_v2.md from a cwd-scoped run). Without these, claude refuses
+    # paths outside its allowlist with a generic permission error.
+    for d in (add_dirs or []):
+        cmd += ["--add-dir", str(d)]
     if agent.session_id:
         cmd += ["--resume", agent.session_id]
     if agent.model:
@@ -577,7 +592,8 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
                                     cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
                                     reasoning=reasoning,
                                     stderr_log_path=log_path,
-                                    pid_file_path=pid_path)
+                                    pid_file_path=pid_path,
+                                    add_dirs=cfg.add_dirs)
         agent.session_id = new_sid
         return text
     if agent.backend == "codex":
@@ -1015,6 +1031,12 @@ def main() -> int:
                          "Each run lands at <PATH>/<run_id>/. Default: <runs_dir>/<run_id>/wt/, "
                          "which is durable across reboots and OS temp-dir cleaners. "
                          "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
+    ap.add_argument("--add-dir", action="append", metavar="PATH", default=[],
+                    dest="add_dirs",
+                    help="extra path claude is allowed to read/write outside cwd. "
+                         "Repeatable. Without this, tasks that touch ../foo or "
+                         "absolute paths outside --cwd silently fail with a "
+                         "permission error. YAML key: `add_dirs:` (list).")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
                          "`-c model_reasoning_effort=<v>` except for medium "
@@ -1068,6 +1090,10 @@ def main() -> int:
                            if args.worktree_root
                            else (pathlib.Path(raw["worktree_root"]).expanduser().resolve()
                                  if raw.get("worktree_root") else None)),
+            add_dirs=[
+                pathlib.Path(d).expanduser().resolve()
+                for d in (args.add_dirs or raw.get("add_dirs", []))
+            ],
             reasoning=args.reasoning or raw.get("reasoning"),
         )
         # CLI overrides for resume
@@ -1104,6 +1130,7 @@ def main() -> int:
                            if args.worktree_path else None),
             worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()
                            if args.worktree_root else None),
+            add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
             reasoning=args.reasoning,
         )
 
