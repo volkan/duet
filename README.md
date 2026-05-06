@@ -114,9 +114,20 @@ Press Enter to accept; type anything to inject a synthetic human-feedback turn a
 ```
 runs/
   20260506-194122/
-    transcript.md   # full conversation, human-readable
-    state.json      # task, agents, session_ids, history, finished_reason
+    transcript.md                            # full conversation, human-readable
+    state.json                               # task, agents, session_ids, history, finished_reason
+    turn-01-codex-coder.stderr.log           # live stderr from each agent invocation
+    turn-02-claude-reviewer.stderr.log       # (one file per turn — codex's thinking, tool calls,
+    …                                        #  claude's progress; same lines you see scrolling on
+                                             #  the terminal during the run, persisted for forensics)
 ```
+
+The per-turn `*.stderr.log` files capture exactly what duet mirrors live to
+your terminal during each agent invocation — codex's reasoning steps and
+tool calls, claude's progress markers, etc. Useful when an agent does
+something subtle in a 10-minute turn and you want to retrace it later.
+`turn-00-extract-*` is the optional seed-extraction call when resuming a
+prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn.
 
 `state.json` includes both agents' final session ids so you can re-run later:
 

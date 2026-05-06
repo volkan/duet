@@ -327,8 +327,15 @@ LIVE_STREAM = True
 LIVE_PREFIX = "  │ "  # box-drawing prefix on every streamed line
 
 
-def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = ""):
-    """Drain a pipe line-by-line, capture into `sink`, optionally mirror live."""
+def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
+                   tee_to=None):
+    """Drain a pipe line-by-line, capture into `sink`, optionally mirror live and/or tee to file.
+
+    `mirror_to` is a writable text stream (typically sys.stderr) that the
+    line is echoed to with `prefix`. `tee_to` is an open file handle that
+    receives the raw line — used to persist the live stream for post-hoc
+    forensics. Either or both may be None.
+    """
     try:
         for line in iter(stream.readline, ""):
             sink.append(line)
@@ -338,6 +345,12 @@ def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = ""):
                     mirror_to.flush()
                 except Exception:
                     pass
+            if tee_to is not None:
+                try:
+                    tee_to.write(line)
+                    tee_to.flush()
+                except Exception:
+                    pass
     finally:
         try:
             stream.close()
@@ -345,57 +358,85 @@ def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = ""):
             pass
 
 
-def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int) -> tuple[int, str, str]:
+def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
+         stderr_log_path: Optional[pathlib.Path] = None) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
     to our stderr line-by-line as it's produced. stdout is always captured
     silently — duet logs the final answer to the transcript afterwards.
+
+    If `stderr_log_path` is set, the child's stderr is also tee'd line-by-line
+    to that file (append mode) — useful for post-hoc forensics on long agent
+    turns where the live trace is otherwise lost.
     """
     mirror = sys.stderr if (LIVE_STREAM and sys.stderr.isatty()) else None
     out_chunks: list[str] = []
     err_chunks: list[str] = []
-    try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(cwd),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,  # line-buffered
-            start_new_session=True,
-        )
-    except FileNotFoundError:
-        return 127, "", f"[duet] command not found: {cmd[0]}"
-    _register_proc(proc)
-    t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, out_chunks), daemon=True)
-    t_err = threading.Thread(target=_stream_reader, args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX), daemon=True)
-    t_out.start(); t_err.start()
-
-    try:
-        if stdin is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(stdin)
-            except BrokenPipeError:
-                pass
-        if proc.stdin is not None:
-            proc.stdin.close()
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _signal_proc_tree(proc, signal.SIGTERM)
+    stderr_file = None
+    if stderr_log_path is not None:
         try:
-            proc.wait(timeout=2)
+            stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_file = open(stderr_log_path, "a", encoding="utf-8", buffering=1)
+            stderr_file.write(
+                f"\n# {dt.datetime.now().isoformat(timespec='seconds')} :: "
+                f"{' '.join(cmd[:3])}{' …' if len(cmd) > 3 else ''}\n"
+            )
+        except OSError as e:
+            print(f"[duet] warn: stderr log open failed ({stderr_log_path}): {e}",
+                  file=sys.stderr)
+            stderr_file = None
+    try:
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(cwd),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,  # line-buffered
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            return 127, "", f"[duet] command not found: {cmd[0]}"
+        _register_proc(proc)
+        t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, out_chunks), daemon=True)
+        t_err = threading.Thread(target=_stream_reader,
+                                 args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX, stderr_file),
+                                 daemon=True)
+        t_out.start(); t_err.start()
+
+        try:
+            if stdin is not None and proc.stdin is not None:
+                try:
+                    proc.stdin.write(stdin)
+                except BrokenPipeError:
+                    pass
+            if proc.stdin is not None:
+                proc.stdin.close()
+            proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _signal_proc_tree(proc, signal.SIGKILL)
-            proc.wait()
-        t_out.join(timeout=2); t_err.join(timeout=2)
-        return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
+            _signal_proc_tree(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                _signal_proc_tree(proc, signal.SIGKILL)
+                proc.wait()
+            t_out.join(timeout=2); t_err.join(timeout=2)
+            return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
+        finally:
+            _unregister_proc(proc)
+        t_out.join(timeout=5); t_err.join(timeout=5)
+        return proc.returncode, "".join(out_chunks), "".join(err_chunks)
     finally:
-        _unregister_proc(proc)
-    t_out.join(timeout=5); t_err.join(timeout=5)
-    return proc.returncode, "".join(out_chunks), "".join(err_chunks)
+        if stderr_file is not None:
+            try:
+                stderr_file.close()
+            except Exception:
+                pass
 
 
 def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
-                reasoning: Optional[str] = None) -> tuple[str, Optional[str]]:
+                reasoning: Optional[str] = None,
+                stderr_log_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id)."""
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
@@ -420,7 +461,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     if agent.model:
         cmd += ["--model", agent.model]
     cmd += agent.extra_args
-    rc, out, err = _run(cmd, cwd=eff_cwd, stdin=None, timeout=timeout)
+    rc, out, err = _run(cmd, cwd=eff_cwd, stdin=None, timeout=timeout,
+                        stderr_log_path=stderr_log_path)
     if rc != 0:
         raise RuntimeError(f"claude exited {rc}\nstderr:\n{err}")
     try:
@@ -433,7 +475,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
 
 def call_codex(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, sandbox: str, timeout: int, dry: bool,
-               first_turn: bool, reasoning: Optional[str] = None) -> tuple[str, Optional[str]]:
+               first_turn: bool, reasoning: Optional[str] = None,
+               stderr_log_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id). Codex resume tracking uses --last."""
     eff_cwd = agent.cwd_override or cwd
     if dry:
@@ -469,27 +512,37 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         # parallel codex sessions in the same cwd while a duet is running.
         cmd = ["codex", "exec", "resume", "--last", *options, full_prompt]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
-    rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout)
+    rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout,
+                        stderr_log_path=stderr_log_path)
     if rc != 0:
         raise RuntimeError(f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…")
     # We don't reliably parse codex's session id; treat presence of "last"-resume as our state marker.
     return out.rstrip(), agent.session_id or "codex-current"
 
 
-def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool) -> str:
+def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool,
+               *, run_dir: Optional[pathlib.Path] = None,
+               turn_label: Optional[str] = None) -> str:
     sys_prompt = agent.system_prompt(cfg.sentinel)
     reasoning = effective_reasoning(agent, cfg.reasoning)
+    # Per-turn stderr log lands in the run dir for forensics, sortable by
+    # turn number. Skipped if caller didn't provide both run_dir and label.
+    log_path: Optional[pathlib.Path] = None
+    if run_dir is not None and turn_label is not None:
+        log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
     if agent.backend == "claude":
         text, new_sid = call_claude(agent, sys_prompt, message, cfg.cwd,
                                     cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
-                                    reasoning=reasoning)
+                                    reasoning=reasoning,
+                                    stderr_log_path=log_path)
         agent.session_id = new_sid
         return text
     if agent.backend == "codex":
         text, new_sid = call_codex(agent, sys_prompt, message, cfg.cwd,
                                    cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
                                    first_turn=first_turn_for_agent,
-                                   reasoning=reasoning)
+                                   reasoning=reasoning,
+                                   stderr_log_path=log_path)
         agent.session_id = new_sid
         return text
     raise SystemExit(f"unknown backend '{agent.backend}'")
@@ -540,7 +593,7 @@ def converged(text: str, sentinel: str) -> bool:
     return False
 
 
-def derive_seed(cfg: DuetConfig) -> str:
+def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
     """Figure out the first message to send to the partner agent."""
     if cfg.kickoff:
         return cfg.kickoff
@@ -548,7 +601,9 @@ def derive_seed(cfg: DuetConfig) -> str:
     a0 = cfg.agents[0]
     if a0.session_id:
         print(f"[duet] extracting latest message from {a0.backend} session {a0.session_id[:8]}…")
-        return call_agent(a0, EXTRACT_LATEST_PROMPT, cfg, first_turn_for_agent=False)
+        return call_agent(a0, EXTRACT_LATEST_PROMPT, cfg,
+                          first_turn_for_agent=False,
+                          run_dir=run_dir, turn_label="00-extract")
     if cfg.task:
         return cfg.task
     raise SystemExit("nothing to start the conversation with — supply --task, "
@@ -650,7 +705,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
 
-    seed = derive_seed(cfg)
+    seed = derive_seed(cfg, run_dir=run_dir)
     log(cfg.agents[0].name, cfg.agents[0].role, seed, kind="seed")
     seen_first_turn[cfg.agents[0].name] = True
     last_msg = seed
@@ -668,7 +723,8 @@ def run_duet(cfg: DuetConfig) -> dict:
         t0 = time.time()
         try:
             reply = call_agent(speaker, last_msg, cfg,
-                               first_turn_for_agent=not seen_first_turn[speaker.name])
+                               first_turn_for_agent=not seen_first_turn[speaker.name],
+                               run_dir=run_dir, turn_label=f"{turn:02d}")
         except Exception as e:
             reply = f"[duet] AGENT ERROR: {e}"
             stop.request(f"agent_error: {e}")
@@ -755,9 +811,12 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
         last_msg = line
+        forced_turn = len(history) + 1
         try:
             reply = call_agent(next_speaker, last_msg, cfg,
-                               first_turn_for_agent=not seen_first_turn[next_speaker.name])
+                               first_turn_for_agent=not seen_first_turn[next_speaker.name],
+                               run_dir=transcript_path.parent,
+                               turn_label=f"{forced_turn:02d}-forced")
         except Exception as e:
             reply = f"[duet] AGENT ERROR: {e}"
         seen_first_turn[next_speaker.name] = True
