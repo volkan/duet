@@ -1,0 +1,40 @@
+# Example config for duet — pass with `duet.py --config duet.example.yaml`.
+# Two agents take turns. Each keeps its own session across turns.
+
+cwd: ~/code/myrepo
+max_turns: 10
+sentinel: "<<<LGTM>>>"
+per_turn_timeout: 900
+runs_dir: runs
+sandbox: workspace-write
+permission_mode: acceptEdits
+dry_run: false
+
+# Optional: skip the kickoff stage by giving an explicit first message.
+# kickoff: "Implement the plan we agreed on; write tests; run them."
+
+# Optional: a generic task; only used if neither agent has a session_id and
+# no kickoff is provided.
+task: |
+  Refactor the auth module to use JWTs.
+  Keep backward compatibility; add tests.
+
+agents:
+  - name: claude-lead
+    backend: claude
+    role: planner
+    # session_id: 106c1c57-ca42-473f-b2f1-1ea764f78c46   # paste from prior `claude` session
+    # model: claude-sonnet-4-6
+
+  - name: codex-partner
+    backend: codex
+    role: coder
+    # model: gpt-5
+    # Codex 0.128+ with --sandbox workspace-write defaults to approval=never;
+    # leave extra_args empty. If your version still prompts, uncomment one:
+    #   extra_args: ["--full-auto"]   # older builds
+    #   extra_args: ["--yolo"]        # community alias
+    extra_args: []
+    # role_prompt: |
+    #   You are a senior engineer. Be terse. Apply edits. Run tests.
+    #   Emit {SENTINEL} on its own line when done.

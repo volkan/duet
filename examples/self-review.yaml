@@ -1,0 +1,196 @@
+# Self-review of duet.py — Claude reviews, Codex patches, until LGTM.
+#
+# Run from ~/workspace/agent2agent/duet/:
+#   chmod +x duet.py
+#   ./duet.py --config examples/self-review.yaml
+#
+# What happens:
+#   1. claude-reviewer (lead) reads duet.py, lists specific issues with
+#      file:line references and a P0/P1/P2 severity. No fixes proposed.
+#   2. codex-coder (partner, in a fresh git worktree on branch duet/<run_id>)
+#      picks up the review, applies concrete patches to duet.py inside the
+#      worktree, runs a quick syntax check, summarises what changed.
+#   3. claude-reviewer reads the appended diff (auto-attached to codex's
+#      reply by --worktree), either escalates a new issue or emits
+#      <<<LGTM>>> on its own line to converge.
+#   4. Loop hits convergence or max_turns. Worktree is left intact so you
+#      can review/merge/drop manually — duet prints the exact commands.
+#
+# Safety: --worktree means codex edits a *copy* of duet/, never the
+# running source. You merge intentionally at the end.
+
+cwd: .                         # the duet/ folder itself
+max_turns: 8
+sentinel: "<<<LGTM>>>"
+per_turn_timeout: 1200          # 20 min/turn (review+patch can be slow)
+runs_dir: runs
+
+# Codex sandbox: workspace-write so it can edit files in its worktree.
+sandbox: workspace-write
+permission_mode: acceptEdits    # claude can read freely
+
+worktree: true
+worktree_for: partner           # codex runs in the throwaway worktree
+reasoning: high                 # max-effort thinking on both sides
+
+task: |
+  Review duet.py for correctness, robustness, and code quality. Focus areas
+  (in priority order):
+
+  P0 — correctness/safety:
+    - subprocess deadlocks: are stdin/stdout/stderr pipes always drained?
+    - signal handling: is a SIGINT during `git worktree add` or
+      `subprocess.communicate` handled cleanly? does a second Ctrl-C
+      really exit hard?
+    - codex `exec resume --last` race: what if a parallel codex session
+      was started in the same cwd between turns? does --worktree fully
+      eliminate this, or only partially?
+    - Claude session_id rotation: are we always re-reading and reusing the
+      latest session_id from each JSON response? what if it's null?
+    - convergence sentinel false positives: can an agent emit a markdown
+      code-fence that lands a bare line containing the sentinel?
+    - --add-dir vs --cd: does claude actually accept --add-dir for the
+      worktree path? are paths POSIX-safe (spaces, unicode)?
+
+  P0 — REASONING FLAG IMPLEMENTATION (verify against PRIMARY sources):
+
+    The reviewer MUST audit the reasoning-effort plumbing end-to-end and
+    confirm it matches the actual CLIs' real flag/value names. This is
+    the section where you should reach for `gh` (GitHub CLI) and the
+    chrome-devtools MCP if web-search snippets aren't enough — the
+    duet.py constants below are only as right as the docs we read.
+
+    Things to verify in duet.py:
+      a) `REASONING_LEVELS` covers exactly the duet user-facing values
+         (minimal, low, medium, high, max) — no typos, no missing entries.
+      b) `CLAUDE_REASONING_PROMPT_PREFIX[max]` actually contains the word
+         "ultrathink" verbatim, and `[high]` contains the phrase "think
+         hard". Claude Code documents these as the keywords that
+         allocate larger thinking budgets at runtime — confirm by reading
+         primary docs (see verification recipe below).
+      c) `CODEX_REASONING_MAP[max]` resolves to "xhigh" (Codex's actual
+         highest documented value), not "max". Confirm against the
+         openai/codex repo.
+      d) The codex command line in `call_codex` actually emits
+         `-c model_reasoning_effort=<value>` with the *mapped* Codex
+         value, NOT the duet value. (We tested this in dry-run by
+         monkey-patching _run; reviewer should re-verify by reading
+         lines around the `reasoning_args` block.)
+      e) Medium is treated as "no override" so we don't waste a flag —
+         confirm that behavior is intentional and documented.
+      f) Per-agent `reasoning_effort` overrides the cfg-level
+         `reasoning` (see `effective_reasoning`). Confirm this works in
+         the YAML loader path too, not just CLI-flag path.
+      g) `--reasoning` is exposed as a CLI flag with the right `choices`
+         list, AND parsed from YAML config (`raw.get("reasoning")`).
+      h) README's reasoning row in the flags table accurately states the
+         translation behavior.
+
+    Verification recipe (the reviewer may run / ask the partner to run):
+
+      # Codex's documented reasoning values (look for "xhigh"):
+      gh repo view openai/codex
+      gh api repos/openai/codex/contents/docs --jq '.[].name'
+      gh api repos/openai/codex/contents/docs/config.md --jq '.content' \
+        | base64 -d | grep -A 3 -i 'reasoning_effort\|model_reasoning_effort'
+      # If config.md doesn't cover it:
+      gh search code 'model_reasoning_effort' --repo openai/codex --limit 20
+
+      # Claude Code's "think"/"ultrathink" keyword behavior:
+      gh repo view anthropics/claude-code
+      gh search code 'ultrathink' --repo anthropics/claude-code --limit 10
+      # OR via the chrome-devtools MCP if you need to render the docs page:
+      #   navigate_page → https://docs.claude.com/en/docs/claude-code (and look up
+      #   "thinking" / "ultrathink" in the search bar).
+
+      # Final cross-check: dry-run duet with each level and confirm the
+      # constructed cmd is right. From inside the worktree:
+      cd /path/to/worktree
+      python3 - <<'PY'
+      import sys, json, importlib.util, pathlib
+      spec = importlib.util.spec_from_file_location('d','./duet.py')
+      m = importlib.util.module_from_spec(spec); sys.modules['d']=m
+      spec.loader.exec_module(m)
+      cap=[]
+      m._run = lambda cmd,*,cwd,stdin,timeout: (
+          cap.append(list(cmd)) or
+          (0, json.dumps({'result':'ok','session_id':'s'}), '') if cmd[0]=='claude'
+          else (0,'ok','')
+      )
+      a_cl = m.Agent(name='c', backend='claude', role='planner')
+      a_cx = m.Agent(name='x', backend='codex', role='coder')
+      for lvl in m.REASONING_LEVELS:
+          cap.clear()
+          m.call_claude(a_cl,'sys','msg', pathlib.Path('.'),'acceptEdits',60,dry=False,reasoning=lvl)
+          claude_prompt = cap[-1][cap[-1].index('--append-system-prompt')+1]
+          cap.clear()
+          m.call_codex(a_cx,'sys','msg', pathlib.Path('.'),'workspace-write',60,dry=False,first_turn=True,reasoning=lvl)
+          codex_has_c = '-c' in cap[-1]
+          codex_val = cap[-1][cap[-1].index('-c')+1] if codex_has_c else '(none)'
+          print(f'{lvl:>8}: claude_prefix={claude_prompt[:30]!r:35} codex_arg={codex_val}')
+      PY
+
+    Expected output of that one-liner:
+
+       minimal: claude_prefix='sys'                       codex_arg=model_reasoning_effort=minimal
+           low: claude_prefix='sys'                       codex_arg=model_reasoning_effort=low
+        medium: claude_prefix='sys'                       codex_arg=(none)
+          high: claude_prefix='think hard and reason s…'  codex_arg=model_reasoning_effort=high
+           max: claude_prefix='ultrathink — reason exh…'  codex_arg=model_reasoning_effort=xhigh
+
+    If any row mismatches, that's a P0. Fix in duet.py, re-run, until
+    all five rows are correct.
+
+  P1 — robustness:
+    - error handling for missing `git`, missing `claude`, missing `codex`,
+      missing `gh` (only relevant for the P0-reasoning verification step),
+      malformed claude JSON, codex stderr-only failures.
+    - timeout handling: what happens to the worktree if a turn times out?
+    - state.json: is it written atomically? does a crash mid-write corrupt
+      it? what about the transcript?
+    - prompt injection: an agent could include "<<<LGTM>>>" inside its
+      reply text for legitimate reasons. is the regex anchoring strict
+      enough?
+
+  P2 — code quality / docs:
+    - README claims vs implementation drift (esp. the reasoning row).
+    - dead code, unused imports, type-hint gaps.
+    - argparse help strings clarity.
+
+  Tools available to both agents:
+    - All standard shell commands inside the worktree.
+    - `gh` (GitHub CLI) for primary-source doc verification — preferred
+      over web search snippets.
+    - chrome-devtools MCP (if the user has Chrome running with
+      --remote-debugging-port enabled) for navigating live docs pages.
+      If Chrome isn't running, fall back to `gh` and `WebFetch`.
+
+  Process:
+    - Lead (reviewer): on each turn, list ONLY the issues you found, with
+      file:line refs and severity. Don't write code. For reasoning-flag
+      issues specifically, quote the exact source line that disagrees
+      with primary docs. Be terse.
+    - Partner (coder): apply concrete patches to duet.py in your worktree.
+      Run the verification one-liner above to confirm all five reasoning
+      levels build the right cmd. Run `python3 -c "import ast;
+      ast.parse(open('duet.py').read())"` to confirm the file still
+      parses. Summarise the diff.
+    - Reviewer reads the auto-appended diff and either flags new issues
+      or emits <<<LGTM>>> on its own line if everything looks clean and
+      the verification one-liner output matches the expected table above.
+
+agents:
+  - name: claude-reviewer
+    backend: claude
+    role: reviewer
+
+  - name: codex-coder
+    backend: codex
+    role: coder
+    # Codex 0.128+ with --sandbox workspace-write already defaults to
+    # approval=never, so no extra flag is needed. If your codex still
+    # prompts for approval, uncomment and pick the right flag for your
+    # version (`codex exec --help`):
+    #   extra_args: ["--full-auto"]   # older builds (deprecated in 0.128)
+    #   extra_args: ["--yolo"]        # community alias on some forks
+    extra_args: []

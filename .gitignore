@@ -1,0 +1,6 @@
+# duet ignores
+runs/                   # per-run transcripts + state.json — noise, not source
+__pycache__/
+*.pyc
+.DS_Store
+*.swp

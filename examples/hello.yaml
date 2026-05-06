@@ -1,0 +1,59 @@
+# Minimal smoke test — prove the plumbing works end-to-end before running
+# anything serious.
+#
+# Run from ~/workspace/agent2agent/duet/:
+#   ./duet.py --config examples/hello.yaml
+#
+# Two turns total. No worktree, no reasoning override, no edits to disk.
+# Codex says hello, Claude confirms, both emit <<<LGTM>>>.
+#
+# What you should see in your terminal:
+#   - "[duet] run dir: runs/<ts>"
+#   - "--- Turn 1 :: codex-partner ---" then Codex's live stderr (its
+#     progress / thinking) streamed with a "  │ " prefix as it works
+#   - Codex's final stdout message printed after the turn ends
+#   - "--- Turn 2 :: claude-lead ---" then Claude's reply
+#   - Either turn emits <<<LGTM>>> on its own line → loop exits
+#   - "force> " prompt — press Enter to wrap
+
+cwd: .
+max_turns: 2
+sentinel: "<<<LGTM>>>"
+per_turn_timeout: 120          # 2 min/turn — plenty for a 1-line answer
+runs_dir: runs
+
+sandbox: read-only             # no edits needed; safest setting
+permission_mode: plan          # claude in plan mode = read but don't write
+
+# No worktree — too small to bother
+worktree: false
+# No reasoning override — default is fine for a hello-world
+
+dry_run: false                 # real run
+
+task: |
+  Smoke test. Reply with EXACTLY this template, then a newline, then
+  the sentinel on its own line:
+
+      hello from <your agent name>; 2 + 2 = 4; today's UTC date is <YYYY-MM-DD>.
+
+  Then on the next line:
+      <<<LGTM>>>
+
+  Do not write any files. Do not run any tools beyond reading the date.
+  Just produce the one-line answer + sentinel and stop.
+
+agents:
+  # agents[0] = LEAD: provides the seed message (here: the task itself).
+  - name: claude-host
+    backend: claude
+    role: planner
+
+  # agents[1] = PARTNER: speaks FIRST in the loop so you see codex's live
+  # progress streamed to your terminal immediately. (Lead replies in turn 2.)
+  - name: codex-helper
+    backend: codex
+    role: coder
+    # If your codex needs an auto-approval flag, uncomment one:
+    # extra_args: ["--full-auto"]
+    # extra_args: ["--yolo"]
