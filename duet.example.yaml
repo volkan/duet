@@ -37,11 +37,15 @@ agents:
     backend: codex
     role: coder
     # model: gpt-5
-    # Codex 0.128+ with --sandbox workspace-write defaults to approval=never;
-    # leave extra_args empty. If your version still prompts, uncomment one:
-    #   extra_args: ["--full-auto"]   # older builds
-    #   extra_args: ["--yolo"]        # community alias
-    extra_args: []
+    # Codex 0.128+ with --sandbox workspace-write defaults to approval=never.
+    # If your version still prompts, prepend "--full-auto" (older builds) or
+    # "--yolo" (community alias) to extra_args.
+    #
+    # `sandbox_workspace_write.network_access=true` opts into outbound network
+    # from inside codex's sandbox (it's blocked by default). Most useful tasks
+    # need it — `gh`, `curl`, `npm install`, `pip install`, anything that
+    # reaches a remote service. Remove the entry to keep strict isolation.
+    extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
     # role_prompt: |
     #   You are a senior engineer. Be terse. Apply edits. Run tests.
     #   Emit {SENTINEL} on its own line when done.

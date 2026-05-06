@@ -88,6 +88,33 @@ Roles ship with: `planner`, `coder`, `reviewer`. Override via `role_prompt` in Y
 - **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`, subsequent calls are `codex exec resume --last` in the same `--cd`. Codex doesn't expose a session id we can pin, so it uses "most recent in cwd". **Don't run other codex sessions in that cwd while a duet is running** — they'd compete for `--last`. `--worktree` gives duet's Codex agent its own cwd, but a parallel Codex session launched inside that same worktree can still race.
 
+## Codex network access
+
+duet runs Codex with `--sandbox workspace-write` by default (configurable via `--sandbox` / YAML `sandbox:`). That sandbox **blocks outbound network by default** as a security feature — DNS, HTTPS, anything. So `gh`, `curl`, `npm install`, `pip install`, web APIs, etc. all fail from inside codex turns unless you opt in. Symptom looks like:
+
+```
+error connecting to api.github.com
+check your internet connection or https://githubstatus.com
+```
+
+To enable network for a run, pass codex this config override via the codex agent's `extra_args` in your YAML:
+
+```yaml
+agents:
+  - name: codex-partner
+    backend: codex
+    role: coder
+    extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
+```
+
+`duet.example.yaml` ships with this on. Remove the entry to keep strict network isolation (e.g. for analysis-only or air-gapped runs).
+
+The other two sandbox modes:
+- **`read-only`** — read-only filesystem, no network. Good for review/analysis runs.
+- **`danger-full-access`** — filesystem + network unrestricted. Rarely the right choice when `workspace-write + network_access=true` covers the same surface but keeps writes scoped.
+
+Source: [`[sandbox_workspace_write] network_access`](https://github.com/openai/codex) in codex-rs.
+
 ## Stop conditions
 
 | trigger | result |
