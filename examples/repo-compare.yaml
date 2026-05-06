@@ -18,16 +18,19 @@
 #   2. codex-researcher (partner, runs in a worktree) executes a strict
 #      gh recipe per repo: `gh repo view --json` for metadata,
 #      `gh api repos/<owner>/<repo>/readme` for the README, optionally
-#      `gh repo clone` if deeper inspection is needed. Returns a JSON
-#      block per repo with: stars, license, pushedAt, language,
-#      readme_first_200_lines, plus a structured H1–H8/S1–S9 score.
+#      `gh repo clone` if deeper inspection is needed. Returns one fenced
+#      JSON block per repo with: owner, repo, stars, forks, license,
+#      pushedAt, language, h1..h8, s1..s9, evidence{} (per-cell quotes).
 #   3. claude-planner accumulates scores into a markdown matrix and
-#      requests the next batch. After all repos, it writes
-#      ../DECISION_v2.md with: the new matrix, a delta-vs-DECISION.md
-#      changelog (which cells flipped and why), and a final
-#      recommendation. Then emits <<<LGTM>>> on its own line.
+#      requests the next batch. After all repos, it writes:
+#        - ../DECISION_v2.md   — markdown report (matrix + delta + reco)
+#        - ../DECISION_v2.html — visual dashboard with winner card, score
+#          bars, and the same matrix as a sortable table. Self-contained
+#          (inline SVG + CSS, no external CDNs).
+#      Then emits <<<LGTM>>> on its own line.
 #
-# Output: ../DECISION_v2.md alongside the existing DECISION.md.
+# Output: ../DECISION_v2.md and ../DECISION_v2.html — open the HTML in
+#         a browser to see the dashboard with the recommended winner.
 
 cwd: .                            # the duet/ folder
 max_turns: 14                     # ~7 batches of 3 repos + synthesis turns
@@ -43,10 +46,14 @@ reasoning: high                   # both sides; codex gets -c model_reasoning_ef
                                   # claude gets --effort high plus a prompt nudge
 
 task: |
-  Goal: produce ../DECISION_v2.md — an updated comparison matrix of agent-to-agent
-  harness candidates, scored against ../REQUIREMENTS.md using `gh` as the
-  PRIMARY source (real stars, license, last commit, full README), with duet
-  included.
+  Goal: produce TWO deliverables comparing agent-to-agent harness candidates,
+  scored against ../REQUIREMENTS.md using `gh` as the PRIMARY source (real
+  stars, license, last commit, full README), with duet included:
+
+    1. ../DECISION_v2.md   — markdown report (matrix + delta + recommendation)
+    2. ../DECISION_v2.html — single-file dashboard you can open in a browser:
+                             winner hero card, score bars per repo, the
+                             matrix as a sortable table, color-coded cells.
 
   ## Inputs the lead must read first
 
@@ -110,11 +117,53 @@ task: |
   - Lead accumulates into a running matrix (paste each round's progress
     into the transcript so the run is debuggable).
   - After all 12 repos, lead writes ../DECISION_v2.md with three sections:
-      1. Final matrix (markdown table, fit /17 column).
+      1. Final matrix (markdown table, with a /17 total column).
       2. Delta vs DECISION.md (which cells flipped, with one-line reason).
       3. Recommendation (keep duet / switch / hybrid) — must be consistent
          with the new evidence, not the old.
+  - Lead ALSO writes ../DECISION_v2.html — see "HTML deliverable" below.
   - Lead then emits <<<LGTM>>> on its own line.
+
+  ## HTML deliverable (../DECISION_v2.html)
+
+  A single self-contained file (no external CDNs, no JS frameworks) that a
+  human can open in a browser to grok the comparison at a glance. Required
+  sections, in order:
+
+    1. **Winner card** at the top:
+       - Repo name (owner/repo) as a heading
+       - Total score (e.g. "14.5 / 17")
+       - One-sentence rationale (the same recommendation logic from the
+         markdown's section 3)
+       - Quick-fact strip: stars, license, last push, language
+
+    2. **Score-bars chart** — one horizontal bar per repo, sorted by total
+       score descending. Each bar split visually into hard (H1–H8) vs
+       soft (S1–S9) segments so you can see WHICH side of the score
+       dominates. Bars done in inline SVG (no Chart.js / D3 / external
+       libs). Width proportional to /17. The winner row gets a subtle
+       highlight (border or background tint).
+
+    3. **Full matrix table**:
+       - Rows = repos (sorted same as the bar chart)
+       - Columns = h1..h8, s1..s9, total
+       - Cell content = the emoji (✅/🟡/❌/❓) plus tooltip with the
+         evidence quote (use HTML `title=""` attribute for the tooltip;
+         no JS needed).
+       - Color-coded cell backgrounds: green / yellow / red / grey.
+       - The header row should make columns clickable for sort (a tiny
+         inline `<script>` of plain JS is OK if needed; keep it under
+         ~30 lines and embedded in the file).
+
+    4. **Delta section** — a compact list of "cells that flipped vs
+       DECISION.md", each as one line: `OWNER/REPO H3: ✅ → 🟡 (reason)`.
+
+    5. Footer with the run's date and a link back to ../DECISION_v2.md.
+
+  Style: clean, readable, dark-mode friendly via `prefers-color-scheme`.
+  Embed all CSS in a `<style>` block at the top. No `<link>` to remote
+  stylesheets, no `<script src="...">` to remote JS. The file must work
+  fully offline — that's the test.
 
   ## Failure modes to handle
 
@@ -125,6 +174,12 @@ task: |
     `gh repo clone` to a temp dir and read the actual file.
   - License field null: don't guess — mark S6 as ❓ unless you can find
     LICENSE in the contents listing.
+  - "error connecting to api.github.com" on EVERY gh call: codex's
+    sandbox is blocking outbound network. The `extra_args` below should
+    already opt in via `-c sandbox_workspace_write.network_access=true`;
+    if it's still failing, the partner should STOP, report the symptom
+    to the lead, and the run should be aborted (Ctrl-C) — no point
+    filling the matrix with ❓.
 
   ## Out of scope (do NOT do these)
 
@@ -132,7 +187,6 @@ task: |
   - Don't run any of the candidate harnesses — just read.
   - Don't edit DECISION.md (the original); write the new one as
     ../DECISION_v2.md.
-  - Don't include scoring for the duet ../research1/research2 leftovers.
 
 agents:
   - name: claude-planner
@@ -142,15 +196,18 @@ agents:
   - name: codex-researcher
     backend: codex
     role: coder
-    # Codex 0.128+ defaults to approval=never with --sandbox workspace-write.
-    # Uncomment if older codex still prompts:
-    #   extra_args: ["--full-auto"]
+    # extra_args build order — append more flags to the list below if needed:
     #
-    # Codex's `workspace-write` sandbox BLOCKS outbound network by default
-    # (security default). This config NEEDS api.github.com via `gh`, so we
-    # opt in here. Scope: this run only — not user-global. Reference:
-    # `[sandbox_workspace_write] network_access = true` in
-    # https://github.com/openai/codex (codex-rs/skills/.../codex-network.md).
+    # 1. `-c sandbox_workspace_write.network_access=true` — REQUIRED here.
+    #    `gh` needs api.github.com; codex's workspace-write sandbox blocks
+    #    outbound network by default (security default). Removing this entry
+    #    will make every gh call fail with
+    #    "error connecting to api.github.com". See
+    #    `[sandbox_workspace_write] network_access` in openai/codex.
+    #
+    # 2. `--full-auto` or `--yolo` — only for older codex builds that still
+    #    prompt for approval despite --sandbox workspace-write. Codex 0.128+
+    #    defaults to approval=never; nothing to add for current builds.
     extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
     role_prompt: |
       You are a research data-gatherer. Use ONLY `gh` CLI for repo
