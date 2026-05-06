@@ -158,7 +158,11 @@ class Agent:
         if tmpl is None:
             raise SystemExit(f"unknown role '{self.role}' for agent '{self.name}' — "
                              "supply role_prompt to override")
-        return tmpl.format(SENTINEL=sentinel)
+        # str.replace, not str.format — role prompts often contain literal
+        # `{...}` (JSON schema, code samples, jq patterns). format() would
+        # parse those as format fields and crash with "unexpected '{' in
+        # field name". replace handles them as plain text.
+        return tmpl.replace("{SENTINEL}", sentinel)
 
 
 @dataclasses.dataclass
