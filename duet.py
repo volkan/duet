@@ -498,22 +498,30 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             reasoning_args = ["-c", f"model_reasoning_effort={codex_value}"]
     # Codex's `exec` parses options BEFORE the positional prompt in modern
     # builds, and some flags (e.g. --ask-for-approval) have come and gone
-    # across versions. We keep the default flag set conservative
-    # (--sandbox + --cd + --skip-git-repo-check) and expose `extra_args` on
-    # the agent so users can add their version's approval/auto flag — e.g.
-    # extra_args: ["--full-auto"] or ["--yolo"] if those exist in their
-    # codex CLI.
-    common_opts = ["--sandbox", sandbox, "--cd", str(eff_cwd), "--skip-git-repo-check"]
+    # across versions. We keep the default flag set conservative.
+    # `extra_args` lets users add their version's approval/auto flag (e.g.
+    # `["--full-auto"]` or `["--yolo"]`) and config overrides (`-c …`).
+    #
+    # IMPORTANT: `codex exec resume` accepts a SUBSET of `codex exec`'s
+    # flags. In particular, `--sandbox` and `--cd` are exec-only — they
+    # carry over from the resumed session and codex's clap parser rejects
+    # them on resume with "unexpected argument '--sandbox' found". So we
+    # split: exec_only_opts are passed only on the first call.
+    shared_opts = ["--skip-git-repo-check"]
     if agent.model:
-        common_opts += ["--model", agent.model]
+        shared_opts += ["--model", agent.model]
     # All options BEFORE the positional prompt — modern codex's clap parser
     # rejects flags after the prompt.
-    options = [*common_opts, *reasoning_args, *agent.extra_args]
     if first_turn or not agent.session_id:
+        exec_only_opts = ["--sandbox", sandbox, "--cd", str(eff_cwd)]
+        options = [*exec_only_opts, *shared_opts, *reasoning_args, *agent.extra_args]
         cmd = ["codex", "exec", *options, full_prompt]
     else:
         # Resume the most recent codex session in this cwd. Caveat: don't run
         # parallel codex sessions in the same cwd while a duet is running.
+        # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
+        # directory for `--last`'s lookup. sandbox carries over from session.
+        options = [*shared_opts, *reasoning_args, *agent.extra_args]
         cmd = ["codex", "exec", "resume", "--last", *options, full_prompt]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
     rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout,
