@@ -78,7 +78,7 @@ With a YAML config:
 | `--worktree` | run the partner agent in a throwaway git worktree on a fresh `duet/<run_id>` branch; the worktree is left intact at the end |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
-| `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>`; `max` is translated to `xhigh` (Codex's highest). **Claude:** prepends `think hard` (high) or `ultrathink` (max) to its system prompt — Claude Code maps these phrases to larger thinking budgets at runtime |
+| `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
 
 Roles ship with: `planner`, `coder`, `reviewer`. Override via `role_prompt` in YAML config to define new ones.
@@ -86,7 +86,7 @@ Roles ship with: `planner`, `coder`, `reviewer`. Override via `role_prompt` in Y
 ## How session memory works
 
 - **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
-- **Codex**: first call is `codex exec`, subsequent calls are `codex exec resume --last` in the same `--cd`. Codex doesn't expose a session id we can pin, so it uses "most recent in cwd". **Don't run other codex sessions in that cwd while a duet is running** — they'd compete for `--last`.
+- **Codex**: first call is `codex exec`, subsequent calls are `codex exec resume --last` in the same `--cd`. Codex doesn't expose a session id we can pin, so it uses "most recent in cwd". **Don't run other codex sessions in that cwd while a duet is running** — they'd compete for `--last`. `--worktree` gives duet's Codex agent its own cwd, but a parallel Codex session launched inside that same worktree can still race.
 
 ## Stop conditions
 
@@ -96,7 +96,7 @@ Roles ship with: `planner`, `coder`, `reviewer`. Override via `role_prompt` in Y
 | `--turns` reached | `reason=max_turns` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
-| per-turn timeout | turn rc=124, error inserted, loop continues |
+| per-turn timeout | turn rc=124, error inserted, loop stops with `reason=force_stop` |
 
 ## "force" prompt
 
@@ -156,5 +156,5 @@ If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No cra
 ## Limits / future
 
 - No automatic resume of a prior duet run yet (session ids are saved but you re-pass them manually).
-- Same-cwd Codex parallelism is unsafe (`codex exec resume --last` races) — `--worktree` actually fixes this, since each worktree is a different cwd.
-- Transcript captures full agent text; if an agent quotes the sentinel inside example code, regex anchoring (own-line only) prevents false positives, but a sufficiently mischievous agent could still trigger early. Acceptable for development use.
+- Same-cwd Codex parallelism is unsafe (`codex exec resume --last` races). `--worktree` isolates duet's Codex cwd from the host repo, but don't start another Codex session inside the same worktree while the run is active.
+- Transcript captures full agent text. Sentinel detection requires the sentinel on its own line outside fenced markdown code blocks, but a sufficiently mischievous agent could still trigger early. Acceptable for development use.

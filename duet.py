@@ -22,7 +22,8 @@ Each agent keeps its own session across turns:
   - Claude: `claude -p --resume <session_id> --output-format json` — we capture
     `session_id` from the JSON wrapper and reuse it.
   - Codex:  first turn `codex exec ...`, subsequent turns `codex exec resume --last`
-    in the same cwd (caveat: don't run other codex sessions in that cwd in parallel).
+    in the same cwd (caveat: don't run other codex sessions in that cwd in parallel;
+    use `--worktree` to isolate duet's Codex cwd from the host repo).
 
 Transcript is always logged to runs/<ts>/transcript.md for humans, but each
 prompt sent to an agent is just the latest counterpart message — keeping
@@ -89,13 +90,14 @@ EXTRACT_LATEST_PROMPT = (
 
 # User-facing reasoning levels accepted by --reasoning / `reasoning:` in YAML.
 # These are the *duet abstraction*; per-backend translation happens below so
-# the user doesn't have to remember that Codex's highest is `xhigh` while
-# Claude responds to the keyword `ultrathink` in its system prompt.
+# the user doesn't have to remember backend-specific names like Codex's `xhigh`
+# or Claude's lack of a `minimal` effort value.
 REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"]
 
-# Claude Code maps "think" / "think hard" / "ultrathink" phrases to
-# progressively larger thinking budgets at runtime. We prepend the right
-# nudge to the system prompt based on the duet level.
+# Claude Code exposes thinking control through `--effort`. We still add small
+# prompt nudges for high/max because they are useful natural-language guidance,
+# and `ultrathink` is a recognized one-turn in-context nudge in current Claude
+# Code. The CLI flag below is the authoritative effort control.
 CLAUDE_REASONING_PROMPT_PREFIX = {
     "minimal": "",
     "low":     "",
@@ -103,6 +105,17 @@ CLAUDE_REASONING_PROMPT_PREFIX = {
     "high":    "think hard and reason step-by-step before answering. Cover edge cases.\n\n",
     "max":     "ultrathink — reason exhaustively before answering. Enumerate edge "
                "cases, alternatives, and risks. Do not skim.\n\n",
+}
+
+# Claude Code `--effort` accepts low, medium, high, xhigh, max. The duet
+# abstraction has `minimal` for Codex, so Claude gets its lowest documented
+# level for that user-facing value.
+CLAUDE_REASONING_MAP = {
+    "minimal": "low",
+    "low":     "low",
+    "medium":  "medium",
+    "high":    "high",
+    "max":     "max",
 }
 
 # Codex CLI takes a config override `-c model_reasoning_effort=<value>`.
@@ -115,6 +128,12 @@ CODEX_REASONING_MAP = {
     "high":    "high",
     "max":     "xhigh",
 }
+
+
+def validate_reasoning(value: Optional[str], context: str) -> None:
+    if value is not None and value not in REASONING_LEVELS:
+        choices = "|".join(REASONING_LEVELS)
+        raise SystemExit(f"bad reasoning value for {context}: {value!r}; expected {choices}")
 
 
 def effective_reasoning(agent: Agent, cfg_reasoning: Optional[str]) -> Optional[str]:
@@ -132,7 +151,7 @@ class Agent:
     session_id: Optional[str] = None  # tracked across turns
     extra_args: list[str] = dataclasses.field(default_factory=list)
     cwd_override: Optional[pathlib.Path] = None  # set when this agent runs in a git worktree
-    reasoning_effort: Optional[str] = None  # "minimal"|"medium"|"high"|"max" — overrides cfg.reasoning
+    reasoning_effort: Optional[str] = None  # one of REASONING_LEVELS; overrides cfg.reasoning
 
     def system_prompt(self, sentinel: str) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
@@ -162,6 +181,47 @@ class DuetConfig:
                                                   # default = <run_dir>/wt (durable, gitignored)
     reasoning: Optional[str] = None           # default reasoning effort for both agents
 
+
+# ---------- active child process tracking ----------
+
+_ACTIVE_PROCS: set[subprocess.Popen] = set()
+_ACTIVE_PROCS_LOCK = threading.Lock()
+
+
+def _register_proc(proc: subprocess.Popen) -> None:
+    with _ACTIVE_PROCS_LOCK:
+        _ACTIVE_PROCS.add(proc)
+
+
+def _unregister_proc(proc: subprocess.Popen) -> None:
+    with _ACTIVE_PROCS_LOCK:
+        _ACTIVE_PROCS.discard(proc)
+
+
+def _signal_proc_tree(proc: subprocess.Popen, sig: int) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(proc.pid, sig)
+        else:
+            proc.send_signal(sig)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _terminate_active_processes(sig: int = signal.SIGKILL) -> None:
+    with _ACTIVE_PROCS_LOCK:
+        procs = list(_ACTIVE_PROCS)
+    for proc in procs:
+        _signal_proc_tree(proc, sig)
+
+
 # ---------- git worktree helpers ----------
 
 def is_git_repo(path: pathlib.Path) -> bool:
@@ -187,12 +247,33 @@ def setup_worktree(repo_path: pathlib.Path, branch_name: str,
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         raise RuntimeError(f"worktree destination already exists: {dest}")
-    r = subprocess.run(
-        ["git", "-C", str(repo_path), "worktree", "add", "-b", branch_name, str(dest)],
-        capture_output=True, text=True, timeout=30,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {r.stderr.strip()}")
+    cmd = ["git", "-C", str(repo_path), "worktree", "add", "-b", branch_name, str(dest)]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("git not found on PATH")
+    _register_proc(proc)
+    try:
+        try:
+            _, err = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            _signal_proc_tree(proc, signal.SIGTERM)
+            try:
+                _, err = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                _signal_proc_tree(proc, signal.SIGKILL)
+                _, err = proc.communicate()
+            raise RuntimeError(f"git worktree add timed out: {err.strip()}")
+    finally:
+        _unregister_proc(proc)
+    if proc.returncode != 0:
+        raise RuntimeError(f"git worktree add failed: {err.strip()}")
     return dest
 
 
@@ -218,6 +299,25 @@ def git_diff_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
         return "[duet] git diff timed out"
 
 
+def write_text_atomic(path: pathlib.Path, text: str) -> None:
+    """Write text through a same-directory temp file, then atomically replace."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+def append_text_atomic(path: pathlib.Path, text: str) -> None:
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
+    write_text_atomic(path, prior + text)
+
+
 # ---------- subprocess wrappers ----------
 
 # Module-level: when True, _run forwards subprocess stderr to the user's
@@ -226,7 +326,8 @@ def git_diff_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
 LIVE_STREAM = True
 LIVE_PREFIX = "  │ "  # box-drawing prefix on every streamed line
 
-def _stream_reader(stream, sink: list, mirror_to=None, prefix: str = ""):
+
+def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = ""):
     """Drain a pipe line-by-line, capture into `sink`, optionally mirror live."""
     try:
         for line in iter(stream.readline, ""):
@@ -252,13 +353,18 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     silently — duet logs the final answer to the transcript afterwards.
     """
     mirror = sys.stderr if (LIVE_STREAM and sys.stderr.isatty()) else None
-    proc = subprocess.Popen(
-        cmd, cwd=str(cwd),
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1,  # line-buffered
-    )
-    out_chunks: list = []
-    err_chunks: list = []
+    out_chunks: list[str] = []
+    err_chunks: list[str] = []
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,  # line-buffered
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        return 127, "", f"[duet] command not found: {cmd[0]}"
+    _register_proc(proc)
     t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, out_chunks), daemon=True)
     t_err = threading.Thread(target=_stream_reader, args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX), daemon=True)
     t_out.start(); t_err.start()
@@ -273,10 +379,16 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             proc.stdin.close()
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        _signal_proc_tree(proc, signal.SIGTERM)
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            _signal_proc_tree(proc, signal.SIGKILL)
+            proc.wait()
         t_out.join(timeout=2); t_err.join(timeout=2)
         return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
+    finally:
+        _unregister_proc(proc)
     t_out.join(timeout=5); t_err.join(timeout=5)
     return proc.returncode, "".join(out_chunks), "".join(err_chunks)
 
@@ -288,6 +400,10 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
         system_prompt = CLAUDE_REASONING_PROMPT_PREFIX.get(reasoning, "") + system_prompt
+    reasoning_args: list[str] = []
+    if reasoning:
+        claude_value = CLAUDE_REASONING_MAP.get(reasoning, reasoning)
+        reasoning_args = ["--effort", claude_value]
     if dry:
         new_sid = agent.session_id or f"dry-claude-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
@@ -297,6 +413,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
            "--output-format", "json",
            "--append-system-prompt", system_prompt,
            "--permission-mode", perm_mode,
+           *reasoning_args,
            "--add-dir", str(eff_cwd)]
     if agent.session_id:
         cmd += ["--resume", agent.session_id]
@@ -310,7 +427,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         payload = json.loads(out)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
     except json.JSONDecodeError:
-        return out.rstrip(), agent.session_id
+        snippet = out[:500].strip()
+        raise RuntimeError(f"claude returned malformed JSON output: {snippet!r}")
 
 
 def call_codex(agent: Agent, system_prompt: str, message: str,
@@ -391,7 +509,8 @@ def _install_sigint(stop: StopFlag) -> None:
     def handler(signum, frame):
         if stop.requested:
             print("\n[duet] second SIGINT — exiting hard.", file=sys.stderr)
-            sys.exit(130)
+            _terminate_active_processes(signal.SIGKILL)
+            os._exit(130)
         print("\n[duet] SIGINT received — finishing current turn, then stopping. "
               "Press Ctrl-C again to abort immediately.", file=sys.stderr)
         stop.request("SIGINT")
@@ -399,11 +518,26 @@ def _install_sigint(stop: StopFlag) -> None:
 
 
 def converged(text: str, sentinel: str) -> bool:
-    return bool(re.search(rf"^\s*{re.escape(sentinel)}\s*$", text, re.M))
-
-
-def _agent_seen_set() -> dict[str, bool]:
-    return {}
+    sentinel_re = re.compile(rf"^\s*{re.escape(sentinel)}\s*$")
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for line in text.splitlines():
+        m = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if m:
+            marker = m.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_char = marker[0]
+                fence_len = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_len:
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
+            continue
+        if not in_fence and sentinel_re.match(line):
+            return True
+    return False
 
 
 def derive_seed(cfg: DuetConfig) -> str:
@@ -430,9 +564,9 @@ def run_duet(cfg: DuetConfig) -> dict:
     # the host repo's POV. Idempotent — only written once per runs_dir.
     gi = cfg.runs_dir / ".gitignore"
     if not gi.exists():
-        gi.write_text("# auto-created by duet — ignores all run artifacts\n"
-                      "# (transcripts, state.json, worktrees) so they don't\n"
-                      "# pollute the host repo. Safe to delete or edit.\n*\n")
+        write_text_atomic(gi, "# auto-created by duet — ignores all run artifacts\n"
+                              "# (transcripts, state.json, worktrees) so they don't\n"
+                              "# pollute the host repo. Safe to delete or edit.\n*\n")
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = cfg.runs_dir / run_id
     run_dir.mkdir()
@@ -450,7 +584,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         nonlocal transcript
         head = f"\n## {speaker} ({role}) — {kind}\n\n"
         transcript += head + text + "\n"
-        transcript_path.write_text(transcript)
+        write_text_atomic(transcript_path, transcript)
 
     print(f"[duet] run dir: {run_dir}")
     if cfg.agents[0].session_id:
@@ -500,6 +634,22 @@ def run_duet(cfg: DuetConfig) -> dict:
                 print(f"[duet] WARNING: worktree setup failed: {e}. Continuing without.", file=sys.stderr)
                 wt_path = None
 
+    if stop.requested:
+        state = {
+            "task": cfg.task,
+            "cwd": str(cfg.cwd),
+            "turns_used": 0,
+            "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
+                        "session_id": a.session_id} for a in cfg.agents],
+            "history": history,
+            "finished_reason": "force_stop",
+            "transcript_path": str(transcript_path),
+            "worktree": str(wt_path) if wt_path else None,
+            "worktree_branch": wt_branch,
+        }
+        write_text_atomic(state_path, json.dumps(state, indent=2))
+        return state
+
     seed = derive_seed(cfg)
     log(cfg.agents[0].name, cfg.agents[0].role, seed, kind="seed")
     seen_first_turn[cfg.agents[0].name] = True
@@ -536,7 +686,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         log(speaker.name, speaker.role, reply)
         history.append({"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                         "len_chars": len(reply), "session_id": speaker.session_id})
-        state_path.write_text(json.dumps({
+        write_text_atomic(state_path, json.dumps({
             "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
             "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
                         "session_id": a.session_id} for a in cfg.agents],
@@ -571,7 +721,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     }
     state["worktree"] = str(wt_path) if wt_path else None
     state["worktree_branch"] = wt_branch
-    state_path.write_text(json.dumps(state, indent=2))
+    write_text_atomic(state_path, json.dumps(state, indent=2))
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
     print(f"[duet] resumable session ids — "
           + ", ".join(f"{a.name}={a.session_id}" for a in cfg.agents if a.session_id))
@@ -603,8 +753,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         next_speaker = cfg.agents[speaker_idx]
         # Append a human note to transcript
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
-        with open(transcript_path, "a") as f:
-            f.write(head + line + "\n")
+        append_text_atomic(transcript_path, head + line + "\n")
         last_msg = line
         try:
             reply = call_agent(next_speaker, last_msg, cfg,
@@ -612,8 +761,10 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         except Exception as e:
             reply = f"[duet] AGENT ERROR: {e}"
         seen_first_turn[next_speaker.name] = True
-        with open(transcript_path, "a") as f:
-            f.write(f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n")
+        append_text_atomic(
+            transcript_path,
+            f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
+        )
         history.append({"turn": len(history) + 1, "agent": next_speaker.name,
                         "forced": True, "len_chars": len(reply),
                         "session_id": next_speaker.session_id})
@@ -685,14 +836,16 @@ def main() -> int:
                          "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
-                         "`-c model_reasoning_effort=<v>` (max → xhigh, Codex's "
-                         "highest). Claude: prepends a 'think hard' (high) or "
-                         "'ultrathink' (max) nudge to its system prompt.")
+                         "`-c model_reasoning_effort=<v>` except for medium "
+                         "(max → xhigh). Claude: passes `--effort <v>` "
+                         "(minimal → low) and adds high/max prompt nudges.")
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
                          "By default, duet prints Codex's live progress as it works.")
     ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
     args = ap.parse_args()
+    if args.worktree and args.worktree_path:
+        ap.error("--worktree and --worktree-path are mutually exclusive")
 
     # Live-stream subprocess stderr unless --quiet
     global LIVE_STREAM
@@ -761,6 +914,12 @@ def main() -> int:
                            if args.worktree_root else None),
             reasoning=args.reasoning,
         )
+
+    validate_reasoning(cfg.reasoning, "config reasoning")
+    for agent in cfg.agents:
+        validate_reasoning(agent.reasoning_effort, f"agent {agent.name} reasoning_effort")
+    if cfg.worktree and cfg.worktree_path:
+        raise SystemExit("--worktree and --worktree-path/worktree_path are mutually exclusive")
 
     # Sanity: are CLIs on PATH?
     if not cfg.dry_run:

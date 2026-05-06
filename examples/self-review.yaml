@@ -31,7 +31,7 @@ permission_mode: acceptEdits    # claude can read freely
 
 worktree: true
 worktree_for: partner           # codex runs in the throwaway worktree
-reasoning: high                 # max-effort thinking on both sides
+reasoning: high                 # high reasoning on both sides
 
 task: |
   Review duet.py for correctness, robustness, and code quality. Focus areas
@@ -65,25 +65,28 @@ task: |
          (minimal, low, medium, high, max) — no typos, no missing entries.
       b) `CLAUDE_REASONING_PROMPT_PREFIX[max]` actually contains the word
          "ultrathink" verbatim, and `[high]` contains the phrase "think
-         hard". Claude Code documents these as the keywords that
-         allocate larger thinking budgets at runtime — confirm by reading
-         primary docs (see verification recipe below).
+         hard". These are prompt nudges only. Claude Code's authoritative
+         effort control is `--effort`; primary docs currently say
+         "ultrathink" is a one-turn in-context nudge and that "think hard"
+         is ordinary prompt text.
       c) `CODEX_REASONING_MAP[max]` resolves to "xhigh" (Codex's actual
          highest documented value), not "max". Confirm against the
          openai/codex repo.
-      d) The codex command line in `call_codex` actually emits
+      d) `CLAUDE_REASONING_MAP[minimal]` resolves to "low", and
+         `call_claude` actually emits `--effort <mapped value>`.
+      e) The codex command line in `call_codex` actually emits
          `-c model_reasoning_effort=<value>` with the *mapped* Codex
          value, NOT the duet value. (We tested this in dry-run by
          monkey-patching _run; reviewer should re-verify by reading
          lines around the `reasoning_args` block.)
-      e) Medium is treated as "no override" so we don't waste a flag —
-         confirm that behavior is intentional and documented.
-      f) Per-agent `reasoning_effort` overrides the cfg-level
+      f) Codex medium is treated as "no override" so we don't waste a flag;
+         Claude medium is explicit because Claude's default varies by model.
+      g) Per-agent `reasoning_effort` overrides the cfg-level
          `reasoning` (see `effective_reasoning`). Confirm this works in
          the YAML loader path too, not just CLI-flag path.
-      g) `--reasoning` is exposed as a CLI flag with the right `choices`
+      h) `--reasoning` is exposed as a CLI flag with the right `choices`
          list, AND parsed from YAML config (`raw.get("reasoning")`).
-      h) README's reasoning row in the flags table accurately states the
+      i) README's reasoning row in the flags table accurately states the
          translation behavior.
 
     Verification recipe (the reviewer may run / ask the partner to run):
@@ -96,12 +99,11 @@ task: |
       # If config.md doesn't cover it:
       gh search code 'model_reasoning_effort' --repo openai/codex --limit 20
 
-      # Claude Code's "think"/"ultrathink" keyword behavior:
-      gh repo view anthropics/claude-code
-      gh search code 'ultrathink' --repo anthropics/claude-code --limit 10
-      # OR via the chrome-devtools MCP if you need to render the docs page:
-      #   navigate_page → https://docs.claude.com/en/docs/claude-code (and look up
-      #   "thinking" / "ultrathink" in the search bar).
+      # Claude Code's documented effort flag and ultrathink behavior:
+      #   https://code.claude.com/docs/en/cli-reference
+      #   https://code.claude.com/docs/en/model-config
+      # Look for `--effort`, the supported effort levels, and the
+      # "Use ultrathink for one-off deep reasoning" section.
 
       # Final cross-check: dry-run duet with each level and confirm the
       # constructed cmd is right. From inside the worktree:
@@ -112,31 +114,35 @@ task: |
       m = importlib.util.module_from_spec(spec); sys.modules['d']=m
       spec.loader.exec_module(m)
       cap=[]
-      m._run = lambda cmd,*,cwd,stdin,timeout: (
-          cap.append(list(cmd)) or
-          (0, json.dumps({'result':'ok','session_id':'s'}), '') if cmd[0]=='claude'
-          else (0,'ok','')
-      )
+      def fake_run(cmd, *, cwd, stdin, timeout):
+          cap.append(list(cmd))
+          if cmd[0] == 'claude':
+              return (0, json.dumps({'result':'ok','session_id':'s'}), '')
+          return (0, 'ok', '')
+      m._run = fake_run
       a_cl = m.Agent(name='c', backend='claude', role='planner')
       a_cx = m.Agent(name='x', backend='codex', role='coder')
       for lvl in m.REASONING_LEVELS:
           cap.clear()
           m.call_claude(a_cl,'sys','msg', pathlib.Path('.'),'acceptEdits',60,dry=False,reasoning=lvl)
-          claude_prompt = cap[-1][cap[-1].index('--append-system-prompt')+1]
+          claude_cmd = cap[-1]
+          claude_prompt = claude_cmd[claude_cmd.index('--append-system-prompt')+1]
+          claude_effort = claude_cmd[claude_cmd.index('--effort')+1] if '--effort' in claude_cmd else '(none)'
           cap.clear()
           m.call_codex(a_cx,'sys','msg', pathlib.Path('.'),'workspace-write',60,dry=False,first_turn=True,reasoning=lvl)
-          codex_has_c = '-c' in cap[-1]
-          codex_val = cap[-1][cap[-1].index('-c')+1] if codex_has_c else '(none)'
-          print(f'{lvl:>8}: claude_prefix={claude_prompt[:30]!r:35} codex_arg={codex_val}')
+          codex_cmd = cap[-1]
+          codex_has_c = '-c' in codex_cmd
+          codex_val = codex_cmd[codex_cmd.index('-c')+1] if codex_has_c else '(none)'
+          print(f'{lvl:>8}: claude_prefix={claude_prompt[:30]!r:35} claude_effort={claude_effort:6} codex_arg={codex_val}')
       PY
 
     Expected output of that one-liner:
 
-       minimal: claude_prefix='sys'                       codex_arg=model_reasoning_effort=minimal
-           low: claude_prefix='sys'                       codex_arg=model_reasoning_effort=low
-        medium: claude_prefix='sys'                       codex_arg=(none)
-          high: claude_prefix='think hard and reason s…'  codex_arg=model_reasoning_effort=high
-           max: claude_prefix='ultrathink — reason exh…'  codex_arg=model_reasoning_effort=xhigh
+       minimal: claude_prefix='sys'                               claude_effort=low    codex_arg=model_reasoning_effort=minimal
+           low: claude_prefix='sys'                               claude_effort=low    codex_arg=model_reasoning_effort=low
+        medium: claude_prefix='sys'                               claude_effort=medium codex_arg=(none)
+          high: claude_prefix='think hard and reason step-by-'    claude_effort=high   codex_arg=model_reasoning_effort=high
+           max: claude_prefix='ultrathink — reason exhaustive'    claude_effort=max    codex_arg=model_reasoning_effort=xhigh
 
     If any row mismatches, that's a P0. Fix in duet.py, re-run, until
     all five rows are correct.

@@ -40,7 +40,7 @@ permission_mode: acceptEdits
 worktree: true
 worktree_for: partner             # codex clones repos inside its worktree
 reasoning: high                   # both sides; codex gets -c model_reasoning_effort=high,
-                                  # claude gets a "think hard" prompt prefix
+                                  # claude gets --effort high plus a prompt nudge
 
 task: |
   Goal: produce ../DECISION_v2.md — an updated comparison matrix of agent-to-agent
