@@ -1,6 +1,10 @@
-# duet ignores
-runs/                   # per-run transcripts + state.json — noise, not source
-__pycache__/
-*.pyc
+# Top-level repo only versions docs (REQUIREMENTS, DECISION, SURVEY).
+# duet/ is its own git repo — exclude it here so we don't double-track.
+duet/
+
+# OS / editor noise
 .DS_Store
 *.swp
+
+# Future per-run outputs at the root level (none today)
+runs/

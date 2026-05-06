@@ -77,6 +77,7 @@ With a YAML config:
 | `--config PATH` | YAML/JSON config (overrides most flags) |
 | `--worktree` | run the partner agent in a throwaway git worktree on a fresh `duet/<run_id>` branch; the worktree is left intact at the end |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
+| `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>`; `max` is translated to `xhigh` (Codex's highest). **Claude:** prepends `think hard` (high) or `ultrathink` (max) to its system prompt — Claude Code maps these phrases to larger thinking budgets at runtime |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
 
@@ -126,15 +127,28 @@ runs/
 
 ## Worktree mode
 
-`--worktree` creates a throwaway git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every partner turn duet appends `git status --short` + `git diff --stat` + truncated `git diff HEAD` to its reply, so the lead sees what the partner actually changed — not just what it claims to have changed.
+`--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every partner turn duet appends `git status --short` + `git diff --stat` + truncated `git diff HEAD` to its reply, so the lead sees what the partner actually changed — not just what it claims to have changed.
 
-The worktree is **not deleted** when duet exits. You'll see merge / drop instructions printed at the end:
+### Where the worktree lives
+
+By default the worktree lands at `<runs_dir>/<run_id>/wt/` — i.e. right next to that run's `transcript.md` and `state.json`. Two reasons:
+
+1. **Durability.** OS temp-dir cleaners (`periodic` on macOS, `systemd-tmpfiles` on Linux, reboot-time `/tmp` wipes on some distros) can erase a worktree mid-run on long duets. Living under `runs/` survives all of that.
+2. **Forensics.** Coming back a week later, the transcript, state, and the actual code state of that run sit in one folder.
+
+To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`, namespaced so parallel runs don't collide. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
+
+duet auto-creates `<runs_dir>/.gitignore` containing `*` on first use, so nothing it writes (transcripts, state, worktrees) shows up in your host repo's `git status`.
+
+### Cleanup
+
+The worktree is **not deleted** when duet exits — you'll see merge / drop instructions printed at the end:
 
 ```
-[duet] worktree left intact at /tmp/duet-wt-XXXXXX (branch duet/20260506-202021).
+[duet] worktree left intact at runs/20260506-202021/wt (branch duet/20260506-202021).
         merge:  git -C /your/repo merge duet/20260506-202021
-        review: git -C /tmp/duet-wt-XXXXXX diff HEAD
-        drop:   git -C /your/repo worktree remove /tmp/duet-wt-XXXXXX && git -C /your/repo branch -D duet/20260506-202021
+        review: git -C runs/20260506-202021/wt diff HEAD
+        drop:   git -C /your/repo worktree remove runs/20260506-202021/wt && git -C /your/repo branch -D duet/20260506-202021
 ```
 
 If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No crash.

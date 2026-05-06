@@ -10,6 +10,13 @@ sandbox: workspace-write
 permission_mode: acceptEdits
 dry_run: false
 
+# Optional: where new git worktrees land when --worktree is on. Default is
+# <runs_dir>/<run_id>/wt/, which is durable across reboots and OS temp-dir
+# cleaners. Override to any directory you control; runs land at <root>/<run_id>/.
+# Avoid /tmp on macOS/Linux for long-running duets — the OS may wipe it
+# mid-run.
+# worktree_root: ~/duet-worktrees
+
 # Optional: skip the kickoff stage by giving an explicit first message.
 # kickoff: "Implement the plan we agreed on; write tests; run them."
 

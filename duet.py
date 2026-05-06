@@ -158,6 +158,8 @@ class DuetConfig:
     worktree: bool = False                    # run partner in a throwaway git worktree
     worktree_for: str = "partner"             # "partner" (idx 1) or "lead" (idx 0)
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
+    worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
+                                                  # default = <run_dir>/wt (durable, gitignored)
     reasoning: Optional[str] = None           # default reasoning effort for both agents
 
 # ---------- git worktree helpers ----------
@@ -173,20 +175,25 @@ def is_git_repo(path: pathlib.Path) -> bool:
         return False
 
 
-def setup_worktree(repo_path: pathlib.Path, branch_name: str) -> pathlib.Path:
-    """Create a throwaway git worktree on a fresh branch. Returns its path."""
-    import tempfile
-    wt_path = pathlib.Path(tempfile.mkdtemp(prefix="duet-wt-"))
-    # `git worktree add` requires the destination NOT to exist; we made one with mkdtemp,
-    # so remove it first (it's empty) and let git recreate it.
-    wt_path.rmdir()
+def setup_worktree(repo_path: pathlib.Path, branch_name: str,
+                   dest: pathlib.Path) -> pathlib.Path:
+    """Create a git worktree at `dest` on a fresh branch. Returns the resolved path.
+
+    `dest` must NOT already exist (git worktree add's requirement); its parent
+    is created if missing. Caller controls placement — see `cfg.worktree_root`
+    or the default `<run_dir>/wt`.
+    """
+    dest = dest.expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        raise RuntimeError(f"worktree destination already exists: {dest}")
     r = subprocess.run(
-        ["git", "-C", str(repo_path), "worktree", "add", "-b", branch_name, str(wt_path)],
+        ["git", "-C", str(repo_path), "worktree", "add", "-b", branch_name, str(dest)],
         capture_output=True, text=True, timeout=30,
     )
     if r.returncode != 0:
         raise RuntimeError(f"git worktree add failed: {r.stderr.strip()}")
-    return wt_path
+    return dest
 
 
 def git_diff_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
@@ -419,6 +426,13 @@ def run_duet(cfg: DuetConfig) -> dict:
         raise SystemExit(f"duet expects exactly 2 agents, got {len(cfg.agents)}")
 
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
+    # Auto-ignore everything duet writes (transcripts, state, worktrees) from
+    # the host repo's POV. Idempotent — only written once per runs_dir.
+    gi = cfg.runs_dir / ".gitignore"
+    if not gi.exists():
+        gi.write_text("# auto-created by duet — ignores all run artifacts\n"
+                      "# (transcripts, state.json, worktrees) so they don't\n"
+                      "# pollute the host repo. Safe to delete or edit.\n*\n")
     run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = cfg.runs_dir / run_id
     run_dir.mkdir()
@@ -471,8 +485,15 @@ def run_duet(cfg: DuetConfig) -> dict:
                   f"Falling back to same-repo mode.", file=sys.stderr)
         else:
             wt_branch = f"duet/{run_id}"
+            # Default lives next to the transcript/state in run_dir/wt; users
+            # can override to e.g. ~/duet-worktrees, which we then namespace by
+            # run_id so parallel runs never collide.
+            if cfg.worktree_root:
+                wt_dest = cfg.worktree_root / run_id
+            else:
+                wt_dest = run_dir / "wt"
             try:
-                wt_path = setup_worktree(cfg.cwd, wt_branch)
+                wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
                 cfg.agents[wt_idx].cwd_override = wt_path
                 print(f"[duet] worktree: {wt_path} (branch {wt_branch}, agent {cfg.agents[wt_idx].name})")
             except Exception as e:
@@ -657,6 +678,11 @@ def main() -> int:
                     help="reuse an EXISTING worktree (e.g. from a previous cancelled run). "
                          "Codex's `exec resume --last` will pick up where it left off in this cwd. "
                          "Skips git worktree creation. Mutually exclusive with --worktree.")
+    ap.add_argument("--worktree-root", metavar="PATH", default=None,
+                    help="parent directory for newly-created worktrees (used with --worktree). "
+                         "Each run lands at <PATH>/<run_id>/. Default: <runs_dir>/<run_id>/wt/, "
+                         "which is durable across reboots and OS temp-dir cleaners. "
+                         "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
                          "`-c model_reasoning_effort=<v>` (max → xhigh, Codex's "
@@ -693,6 +719,10 @@ def main() -> int:
                            if args.worktree_path
                            else (pathlib.Path(raw["worktree_path"]).expanduser().resolve()
                                  if raw.get("worktree_path") else None)),
+            worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()
+                           if args.worktree_root
+                           else (pathlib.Path(raw["worktree_root"]).expanduser().resolve()
+                                 if raw.get("worktree_root") else None)),
             reasoning=args.reasoning or raw.get("reasoning"),
         )
         # CLI overrides for resume
@@ -727,6 +757,8 @@ def main() -> int:
             worktree_for=args.worktree_for,
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
                            if args.worktree_path else None),
+            worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()
+                           if args.worktree_root else None),
             reasoning=args.reasoning,
         )
 
