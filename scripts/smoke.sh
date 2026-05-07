@@ -2,6 +2,8 @@
 # scripts/smoke.sh - exercise duet's CLI surface in dry-run.
 set -euo pipefail
 DUET=${DUET:-./duet.py}
+# Resolve to absolute so cases that `cd $TMPD && duet …` still find the binary.
+DUET_ABS=$(cd "$(dirname "$DUET")" && pwd)/$(basename "$DUET")
 TMPD=$(mktemp -d -t duet-smoke.XXXX)
 TMPD_REAL=$(cd "$TMPD" && pwd -P)
 trap 'rm -rf "$TMPD"' EXIT
@@ -73,10 +75,12 @@ mkdir -p "$TMPD/runs/$FAKE_ID"
 cat > "$TMPD/runs/$FAKE_ID/state.json" <<JSON
 {"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":"converged"}
 JSON
-( cd "$TMPD" && expect "status by bare run id"  0 "$DUET" --status "$FAKE_ID" )
+# Use `bash -c` to put the `cd` inside the SUT (a child shell) instead of
+# wrapping `expect` in a subshell — that would lose the PASS/FAIL counters.
+expect "status by bare run id"            0 bash -c "cd '$TMPD' && '$DUET_ABS' --status '$FAKE_ID'"
 
 # Bogus id → exit 3 with helpful "use --list" error.
-( cd "$TMPD" && expect "status nonexistent id -> exit 3"  3 "$DUET" --status "99999999-999999" )
+expect "status nonexistent id -> exit 3"  3 bash -c "cd '$TMPD' && '$DUET_ABS' --status '99999999-999999'"
 
 # state.json should record duet_pid for liveness checks during the run.
 [[ -n "$RUN" ]] && grep -q '"duet_pid"' "$RUN/state.json" \
