@@ -1,9 +1,9 @@
 # duet — usage guide
 
 Companion reference to the [README](../README.md). The README has the
-elevator pitch and the three canonical recipes; this file has the full
-surface — flag reference, sandbox/network rules, worktree mode, output
-layout, `--status` mode, force prompt, session memory.
+human-oriented overview and common recipes; this file has the full reference:
+flag details, sandbox/network rules, worktree mode, output layout, `--status`
+mode, force prompt, and session memory.
 
 ## Contents
 
@@ -70,16 +70,30 @@ When `--cwd` points at a different directory and `--runs-dir` is omitted, run ar
 
 ### Concrete walkthrough: read a GitHub issue, fix the implementation
 
+**Dry-run first** (verify the recipe builds the right cmd; no agent calls):
+
 ```bash
-duet --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --comments' \
+duet --dry-run \
+     --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --json number,title,state,body,comments' \
      --cwd /Users/volkan.altan/workspace/fluentra/fluentra-flutter \
      --partner codex:coder --worktree \
-     --reasoning high --turns 10
+     --turns 2
 ```
+
+If that prints the run dir + faked agent replies cleanly, drop `--dry-run` and bump turns:
+
+```bash
+duet --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --json number,title,state,body,comments' \
+     --cwd /Users/volkan.altan/workspace/fluentra/fluentra-flutter \
+     --partner codex:coder --worktree \
+     --reasoning high --turns 8
+```
+
+> ⚠ **Use `--json` here, not `--comments`.** `gh issue view --comments` routes its formatted output through `$PAGER` (often `less`), which produces *empty stdout* in a pipe — duet then fails fast with "task-from-cmd produced empty stdout". `gh ... --json field,…` skips the pager entirely. Codex and Claude both read JSON natively.
 
 What this does:
 
-1. Runs `gh issue view 304 --repo Fluentra/fluentra-flutter --comments` with cwd = the target project. The issue body + comments become the kickoff text handed to codex.
+1. Runs the `gh` command with cwd = the target project. The issue body + comments JSON becomes the kickoff text handed to codex.
 2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy.
 3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
 4. claude (lead, planner role) sees the auto-appended diff each turn and either flags issues or emits `<<<LGTM>>>` to converge.
@@ -92,6 +106,7 @@ To adapt:
 - Different project: change `--cwd`.
 - Edit main directly (no rollback isolation): drop `--worktree`. Risky; only do this if the repo is fully committed.
 - Need network for `gh`/`curl` inside codex's sandbox: codex's `workspace-write` blocks outbound network by default. The default `--partner codex:coder` doesn't pass the override. For configs that need it, prefer YAML (`extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`); see [Codex sandbox and network access](#codex-sandbox-and-network-access).
+- Default `--turns` is 2 (one codex pass + one claude review). Bump to 6–10 for multi-step fixes; the `force>` prompt at the end of the loop lets you push more rounds without restarting.
 
 ### Edge cases (all fail loud at argparse-time)
 
@@ -155,7 +170,7 @@ EOF
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
-| `--turns N` | max turns (default 10) |
+| `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs; YAML configs for self-review / repo-compare set their own higher cap) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`) |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |

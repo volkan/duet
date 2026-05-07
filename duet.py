@@ -52,7 +52,7 @@ from typing import Optional
 # ---------- defaults ----------
 
 DEFAULT_SENTINEL = "<<<LGTM>>>"
-DEFAULT_TURNS = 10
+DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
 
