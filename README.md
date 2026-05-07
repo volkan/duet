@@ -16,25 +16,31 @@ Use duet when you want:
 
 ## Quick Start
 
-First example: hand off a task by conversation id.
+First example: plan a GitHub issue with Claude, hand the implementation to duet.
 
 ```bash
-# 1. Start the task in Claude, the normal interactive way.
+# 1. In Claude Code, plan how you'd resolve a GitHub issue. Claude
+#    can fetch the issue itself via its bash tool / `gh` CLI.
+cd ~/code/myrepo
 claude
-> let's design a CSV-to-JSON converter in Go with table tests
+> Read GitHub issue 1234 in this repo (`gh issue view 1234` if you
+>   haven't already). Make me an implementation plan: which files to
+>   touch, edge cases, the test strategy. Don't write code yet.
 > /exit
+# Note the session id from "Resume this session with: claude --resume <uuid>"
 
-# 2. Hand Claude's session id to duet. Codex picks up the next step,
-#    then duet passes Codex's reply back to Claude for review.
+# 2. Hand the planning session to duet. Codex implements the plan in a
+#    fresh worktree on `duet/<run_id>`, Claude reviews each turn.
 ./duet.py \
     --resume-claude 106c1c57-ca42-473f-b2f1-1ea764f78c46 \
     --partner codex:coder \
-    --cwd ~/code/csv2json \
-    --turns 10
+    --worktree --turns 4
 ```
 
-Use this when you started a conversation with one agent and want to hand the
-rest of the process to two agents that keep passing context back and forth.
+Use this when you want a planner-led implementation pass on something concrete
+— a bug report, a feature request, a chore. Claude reads the issue and produces
+a plan; duet drives Codex to execute and Claude to review until they converge
+or you stop them.
 
 ```bash
 # Run a fresh task in a target project.
