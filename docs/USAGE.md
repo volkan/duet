@@ -414,7 +414,48 @@ duet --list
 
 ### 2. Apply, iterate, or discard the changes
 
-There are two cases — figure out which one you're in by reading `state.json`'s `worktree` field:
+#### Fastest finalize: let claude commit, push, and open the PR
+
+When the loop converged (`<<<LGTM>>>` emitted), claude already has the full
+diff and the spec in its session context — it reviewed every turn. The
+quickest way to land the work is to resume claude interactively and just
+ask:
+
+```bash
+CLAUDE_SID=$(jq -r '.agents[] | select(.backend=="claude") | .session_id' \
+                 <runs_dir>/<id>/state.json)
+claude --resume "$CLAUDE_SID"
+
+> Commit the changes from our duet with a clear message that summarises
+> what we did, push the branch, and open a PR with a description that
+> links back to the spec we agreed on.
+```
+
+claude already knows the spec, exactly what codex changed (it reviewed the
+auto-appended diff each turn), and the convergence verdict. With `gh` on
+PATH it'll typically run something like:
+
+```bash
+git add -A
+git commit -m "<concise summary based on the spec>"
+git push -u origin HEAD
+gh pr create --fill --base main
+```
+
+Use this shortcut when:
+- The loop converged with `<<<LGTM>>>` (claude approved codex's work).
+- You're fine with claude composing the message + PR description.
+- You'll skim the resulting commit / PR but don't need to micro-stage.
+
+Skip it and use Case A/B below when:
+- You want to read the diff carefully and decide hunk-by-hunk.
+- You want to split codex's work across multiple commits.
+- You're targeting a non-default base branch, a draft PR, or specific
+  labels/reviewers/assignees.
+
+#### Manual review path
+
+There are two manual cases — figure out which one you're in by reading `state.json`'s `worktree` field:
 
 ```bash
 jq '{worktree, worktree_branch, finished_reason}' <runs_dir>/<id>/state.json
