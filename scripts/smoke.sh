@@ -60,6 +60,12 @@ expect "explicit --runs-dir overrides"       0 "$DUET" --task "x" --dry-run --cw
 RUN=$(ls -1d "$TMPD/.duet/runs"/2*/ 2>/dev/null | head -1 || true)
 [[ -n "$RUN" ]] && expect "status on dry-run dir"   0 "$DUET" --status "$RUN"
 
+# `--list <DIR>` should show the dry-run we just produced.
+expect "list runs from explicit path"        0 "$DUET" --list "$TMPD/.duet/runs"
+
+# `--list /nonexistent` exits 0 with a stderr notice (no rows ≠ failure).
+expect "list nonexistent path -> exit 0"     0 "$DUET" --list "$TMPD/no-such-runs-dir"
+
 # state.json should record duet_pid for liveness checks during the run.
 [[ -n "$RUN" ]] && grep -q '"duet_pid"' "$RUN/state.json" \
     || { echo "FAIL: duet_pid missing from dry-run state.json"; FAIL=$((FAIL+1)); }

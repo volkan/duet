@@ -1159,6 +1159,137 @@ def print_run_status(run_dir: pathlib.Path) -> int:
     return 2
 
 
+# ---------- run-list (`duet --list [PATH]`) ----------
+
+# Status glyphs — same vocabulary as print_run_status, packed for table cols.
+_LIST_STATUS_FINISHED = {
+    "converged":           ("✅", "converged"),
+    "converged_after_force": ("✅", "converged"),
+    "max_turns":           ("⏰", "max_turns"),
+    "force_stop":          ("🔴", "force_stop"),
+    "forced_continuation": ("🟡", "forced"),
+    "agent_error":         ("⚠", "agent_error"),
+}
+
+
+_RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
+
+
+def _default_list_paths() -> list[pathlib.Path]:
+    """Where `duet --list` looks when no PATH is given. Order = display order."""
+    paths: list[pathlib.Path] = []
+    for p in (pathlib.Path.cwd() / "runs",
+              pathlib.Path.cwd() / ".duet" / "runs"):
+        if p.is_dir():
+            paths.append(p)
+    home = pathlib.Path.home() / ".duet" / "runs"
+    if home.is_dir():
+        # Each subdir under ~/.duet/runs/ is a slug like "Users-volkan-…".
+        for slug in sorted(home.iterdir()):
+            if slug.is_dir():
+                paths.append(slug)
+    return paths
+
+
+def _humanize_age(seconds: int) -> str:
+    if seconds < 60:           return f"{seconds}s ago"
+    if seconds < 3600:         return f"{seconds // 60}m ago"
+    if seconds < 86400:        return f"{seconds // 3600}h ago"
+    if seconds < 7 * 86400:    return f"{seconds // 86400}d ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _last_activity_mtime(run_dir: pathlib.Path) -> Optional[float]:
+    """Most recent mtime across state.json + per-turn .pid/.stderr.log files."""
+    candidates = [run_dir / "state.json", *run_dir.glob("turn-*.pid"),
+                  *run_dir.glob("turn-*.stderr.log")]
+    mtimes = []
+    for c in candidates:
+        try:
+            mtimes.append(c.stat().st_mtime)
+        except OSError:
+            pass
+    return max(mtimes) if mtimes else None
+
+
+def _classify_run(run_dir: pathlib.Path) -> tuple[str, str, dict]:
+    """Returns (emoji, label, state_dict). Mirrors print_run_status's logic."""
+    state_path = run_dir / "state.json"
+    if not state_path.is_file():
+        return ("❓", "no state.json", {})
+    try:
+        state = json.loads(state_path.read_text())
+    except json.JSONDecodeError:
+        return ("❓", "malformed state", {})
+    finished = state.get("finished_reason")
+    if finished:
+        emoji, label = _LIST_STATUS_FINISHED.get(finished, ("✅", finished))
+        return (emoji, label, state)
+    # No finished_reason — running, between turns, or crashed.
+    if list(run_dir.glob("turn-*.pid")):
+        return ("🟢", "in-flight", state)
+    pid = state.get("duet_pid")
+    if pid is not None and _is_duet_process(int(pid)):
+        return ("🟢", "between turns", state)
+    if pid is not None:
+        return ("⚠", "duet died", state)
+    return ("⚠", "stuck (no pid)", state)
+
+
+def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
+    """`duet --list [PATH]` — print one row per run dir found."""
+    if explicit_path is not None:
+        roots = [explicit_path.expanduser().resolve()]
+    else:
+        roots = _default_list_paths()
+    if not roots:
+        print("[duet] no run dirs found.\n"
+              "  Searched ./runs/, ./.duet/runs/, and ~/.duet/runs/*/. "
+              "Pass an explicit path: duet --list <DIR>", file=sys.stderr)
+        return 0
+
+    rows: list[dict] = []
+    now = time.time()
+    for root in roots:
+        if not root.is_dir():
+            print(f"[duet] {root}: not a directory", file=sys.stderr)
+            continue
+        for child in sorted(root.iterdir(), reverse=True):
+            if not child.is_dir() or not _RUN_ID_RE.match(child.name):
+                continue
+            emoji, label, state = _classify_run(child)
+            mtime = _last_activity_mtime(child)
+            age = _humanize_age(int(now - mtime)) if mtime else "—"
+            history = state.get("history") or []
+            turns_used = state.get("turns_used", len(history))
+            rows.append({
+                "emoji": emoji, "label": label,
+                "id": child.name, "turns": turns_used,
+                "age": age, "dir": str(child),
+            })
+
+    if not rows:
+        print(f"[duet] no runs found under: {', '.join(str(r) for r in roots)}",
+              file=sys.stderr)
+        return 0
+
+    rows.sort(key=lambda r: r["id"], reverse=True)
+    # Column widths
+    w_id    = max(len("run id"),     max(len(r["id"])    for r in rows))
+    w_label = max(len("status"),     max(len(r["label"]) for r in rows))
+    w_turns = max(len("turns"),      max(len(str(r["turns"])) for r in rows))
+    w_age   = max(len("activity"),   max(len(r["age"])   for r in rows))
+    print(f"  {'':2}  {'run id':<{w_id}}  {'status':<{w_label}}  "
+          f"{'turns':<{w_turns}}  {'activity':<{w_age}}  dir")
+    print(f"  {'':2}  {'-'*w_id}  {'-'*w_label}  {'-'*w_turns}  "
+          f"{'-'*w_age}  ---")
+    for r in rows:
+        print(f"  {r['emoji']:2}  {r['id']:<{w_id}}  {r['label']:<{w_label}}  "
+              f"{str(r['turns']):<{w_turns}}  {r['age']:<{w_age}}  {r['dir']}")
+    print(f"\n  {len(rows)} run(s). Per-run health: duet --status <dir>")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
@@ -1218,6 +1349,14 @@ def main() -> int:
                          "and exit. Shows in-flight turn, pid + alive status, "
                          "elapsed time, last stderr write age. Exit codes: "
                          "0=done, 1=running, 2=stuck/crashed, 3=error.")
+    ap.add_argument("--list", metavar="PATH", nargs="?", const="__defaults__",
+                    default=None, dest="list_runs",
+                    help="don't run a duet — instead list runs found under "
+                         "PATH (or under the default search paths if PATH is "
+                         "omitted: ./runs/, ./.duet/runs/, ~/.duet/runs/*/). "
+                         "Each row shows status, turns_used, last-activity "
+                         "age, and dir. Pair with `--status <dir>` to drill "
+                         "into a specific run.")
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
                          "By default, duet prints Codex's live progress as it works.")
@@ -1227,6 +1366,12 @@ def main() -> int:
     # `--status` is read-only: print run health and exit. Skip everything below.
     if args.status:
         return print_run_status(pathlib.Path(args.status))
+
+    # `--list` is read-only: print the run-dir table and exit.
+    if args.list_runs is not None:
+        explicit = (None if args.list_runs == "__defaults__"
+                    else pathlib.Path(args.list_runs))
+        return print_runs_list(explicit)
 
     if args.worktree and args.worktree_path:
         ap.error("--worktree and --worktree-path are mutually exclusive")

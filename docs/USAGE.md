@@ -183,6 +183,7 @@ EOF
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
 | `--status RUN_DIR` | print a one-shot health summary of an existing run dir and exit; see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
+| `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). One row per run with status / turns / last-activity age / dir. Read-only |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
@@ -240,6 +241,25 @@ Exit codes:
 | `3` | `--status` itself errored (bad path, malformed `state.json`) |
 
 The exit-1 vs exit-2 distinction relies on `state.json["duet_pid"]` plus a cmdline check (`/proc/<pid>/cmdline` on Linux, `ps -o command=` on macOS/BSD). Runs from before the `duet_pid` field shipped fall through to a conservative exit-2 with a one-line note.
+
+### `--list [PATH]`
+
+Multi-row companion to `--status`. With no path, `--list` scans the three places duet writes runs (`./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`) and prints one row per run dir, newest first. With an explicit path, it scans only that directory.
+
+```bash
+$ duet --list
+      run id           status          turns  activity  dir
+      ---------------  --------------  -----  --------  ---
+  ✅   20260507-082801  converged       2      3h ago    /Users/.../runs/20260507-082801
+  🟢   20260507-180412  in-flight       1      4s ago    /Users/.../.duet/runs/20260507-180412
+  ⚠   20260506-234519  stuck (no pid)  1      18h ago   /Users/.../runs/20260506-234519
+
+  3 run(s). Per-run health: duet --status <dir>
+```
+
+Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · 🟢 running (in-flight or between turns) · ⚠ crashed/stuck · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
+
+Use `--list` to triage ("which runs are still alive?") and `--status <dir>` to drill into one specifically.
 
 ---
 
