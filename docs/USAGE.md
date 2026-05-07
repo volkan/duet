@@ -216,7 +216,7 @@ EOF
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
-| `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). One row per run with status / turns / last-activity age / dir. Read-only |
+| `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
@@ -290,12 +290,14 @@ $ duet --list
   🟢   20260507-180412  in-flight       1      4s ago    /Users/.../.duet/runs/20260507-180412
   ⚠   20260506-234519  stuck (no pid)  1      18h ago   /Users/.../runs/20260506-234519
 
-  3 run(s). Per-run health: duet --status <dir>
+  3 run(s). Per-run health: duet --status <run-id>
 ```
 
 Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · 🟢 running (in-flight or between turns) · ⚠ crashed/stuck · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
 
-Use `--list` to triage ("which runs are still alive?") and `--status <dir>` to drill into one specifically.
+`duet --cwd /other/project …` records its run under `/other/project/.duet/runs/<id>/`, but it also drops a symlink at `~/.duet/runs/<cwd-slug>/<run_id>/` so the run is visible to `duet --list` (and `duet --status <run_id>`) from any cwd. Runs surfaced via both the cwd-relative path and the home-index symlink show as one row (deduped on resolved real path); the cwd-relative path wins for display because that's usually the more informative one. Runs created before this index existed get backfilled the first time `--list` walks their dir — idempotent and silent.
+
+Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` to drill into one specifically.
 
 ---
 

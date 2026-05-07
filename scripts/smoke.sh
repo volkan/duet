@@ -7,6 +7,10 @@ DUET_ABS=$(cd "$(dirname "$DUET")" && pwd)/$(basename "$DUET")
 TMPD=$(mktemp -d -t duet-smoke.XXXX)
 TMPD_REAL=$(cd "$TMPD" && pwd -P)
 trap 'rm -rf "$TMPD"' EXIT
+# Hermeticity: route ~/.duet/runs/ writes (the home-index symlink farm
+# `_register_run_in_home_index` creates) into TMPD too, so smoke runs
+# don't pollute the user's real $HOME.
+export HOME="$TMPD"
 PASS=0; FAIL=0
 expect() {  # name, want_rc, cmd...
   local name=$1 want=$2; shift 2
@@ -26,6 +30,7 @@ expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --d
 expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
+expect "triage-reviewer role"                0 "$DUET" --task "x" --dry-run --cwd "$TMPD" --lead claude:triage-reviewer --partner codex:coder
 echo "kickoff from file" > "$TMPD/k.txt"
 expect "kickoff @file"                       0 "$DUET" --kickoff @"$TMPD/k.txt" --dry-run --cwd "$TMPD"
 printf "kickoff stdin\n" > "$TMPD/stdin-kickoff.txt"
@@ -64,6 +69,27 @@ RUN=$(ls -1d "$TMPD/.duet/runs"/2*/ 2>/dev/null | head -1 || true)
 
 # `--list <DIR>` should show the dry-run we just produced.
 expect "list runs from explicit path"        0 "$DUET" --list "$TMPD/.duet/runs"
+
+# Home-index symlink: every run dir gets a sibling pointer at
+# ~/.duet/runs/<cwd-slug>/<run_id> so `--list` and bare-id `--status`
+# discover runs across every project. We use a fresh sub-cwd ($TMPD/proj)
+# so the slug differs from $TMPD's own slug — exercises the foreign-cwd
+# happy path, not the degenerate HOME==cwd case.
+mkdir -p "$TMPD/proj"
+expect "foreign cwd run registered"          0 "$DUET" --task "x" --dry-run --cwd "$TMPD/proj"
+PROJ_RUN=$(ls -1d "$TMPD/proj/.duet/runs"/2*/ 2>/dev/null | head -1 || true)
+PROJ_ID=$(basename "$PROJ_RUN")
+HOME_LINK=$(find "$TMPD/.duet/runs" -mindepth 2 -maxdepth 2 -name "$PROJ_ID" -type l 2>/dev/null | head -1 || true)
+[[ -n "$HOME_LINK" && -L "$HOME_LINK" ]] \
+    || { echo "FAIL: home-index symlink not created for $PROJ_ID"; FAIL=$((FAIL+1)); }
+[[ -d "$HOME_LINK" ]] \
+    || { echo "FAIL: home-index symlink dangling: $HOME_LINK"; FAIL=$((FAIL+1)); }
+# Bare-id `--status` should resolve via the home index from any cwd.
+expect "status by bare id via home-index"    0 bash -c "cd '$TMPD' && '$DUET_ABS' --status '$PROJ_ID'"
+# `--list` (no path) from a third cwd should still find the run via the
+# home index — and the dedup logic in print_runs_list should not double-
+# list it (cwd-relative path is empty here, only the home-index sees it).
+expect "list finds run via home-index"       0 bash -c "cd '$TMPD' && '$DUET_ABS' --list"
 
 # `--list /nonexistent` exits 0 with a stderr notice (no rows ≠ failure).
 expect "list nonexistent path -> exit 0"     0 "$DUET" --list "$TMPD/no-such-runs-dir"

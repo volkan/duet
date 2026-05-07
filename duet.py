@@ -82,6 +82,22 @@ ROLE_PROMPTS = {
         "the task and you have no material issues, end with {SENTINEL} on "
         "its own line."
     ),
+    "triage-reviewer": (
+        "You are the TRIAGE REVIEWER half of a duet. Read the partner agent's "
+        "latest message and critically evaluate it: bugs, missing tests, "
+        "security, simpler designs. Score every finding with [P0], [P1], "
+        "[P2], or [P3]. Default to [P3]; promote only when the impact is "
+        "concrete. [P0] means a correctness, security, data-loss, or shipped-"
+        "check blocker. [P1] means a real bug, logic gap, or missing edge case "
+        "that should block this loop. [P2] means a small bug, polish issue, "
+        "or naming/readability fix that is nice to handle. [P3] means a "
+        "follow-up, future refactor, or scope creep. Be specific and brief. "
+        "If the coder reasonably argues a finding is over-scored, either "
+        "accept the lower score or explain why the higher score still applies. "
+        "Emit {SENTINEL} only when no unfixed [P0] or [P1] findings remain. "
+        "When only [P2]/[P3] items remain, move them to a Follow-ups section "
+        "and end with {SENTINEL} on its own line."
+    ),
 }
 
 # Tiny request used to extract Claude's most recent message when we resume
@@ -150,7 +166,7 @@ def effective_reasoning(agent: Agent, cfg_reasoning: Optional[str]) -> Optional[
 class Agent:
     name: str
     backend: str                    # "claude" or "codex"
-    role: str = "coder"             # planner | coder | reviewer | custom (with role_prompt)
+    role: str = "coder"             # planner | coder | reviewer | triage-reviewer | custom
     role_prompt: Optional[str] = None
     model: Optional[str] = None
     session_id: Optional[str] = None  # tracked across turns
@@ -752,6 +768,9 @@ def run_duet(cfg: DuetConfig) -> dict:
             continue
     else:
         raise SystemExit(f"could not allocate a unique run dir under {cfg.runs_dir}")
+    # Register in the home index so `duet --list` / `duet --status <bare-id>`
+    # discover this run from any cwd. Best-effort; never fails the run.
+    _register_run_in_home_index(run_dir, cfg.cwd)
     transcript_path = run_dir / "transcript.md"
     state_path = run_dir / "state.json"
 
@@ -1070,6 +1089,60 @@ def choose_runs_dir(raw_runs_dir: Optional[str], cwd_resolved: pathlib.Path) -> 
     return pathlib.Path("runs")
 
 
+def _cwd_slug(cwd_resolved: pathlib.Path) -> str:
+    """Slugify a cwd into a `~/.duet/runs/` subdir name. Same scheme as the
+    unwritable-cwd fallback inside `run_duet`, on purpose: a fallback dir
+    and a registered symlink for the same cwd land under the same slug."""
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(cwd_resolved)).strip("-")[:80]
+
+
+def _register_run_in_home_index(run_dir: pathlib.Path,
+                                cwd_resolved: pathlib.Path) -> None:
+    """Drop a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` -> `run_dir`.
+
+    `_default_list_paths()` already scans `~/.duet/runs/<slug>/<run_id>/`
+    (originally for the unwritable-cwd fallback in `run_duet`). Mirroring
+    every newly-created run dir into that tree gives `duet --list` and
+    `duet --status <bare-id>` a single home-rooted index of every run
+    started under this user, regardless of which project's
+    `<cwd>/.duet/runs/` it actually lives in. Best-effort: failures
+    (filesystem read-only, symlinks not supported, target slug dir
+    occupied by something weird) emit a one-line stderr notice but never
+    fail the run.
+    """
+    home_runs = (pathlib.Path.home() / ".duet" / "runs").resolve()
+    try:
+        run_resolved = run_dir.resolve()
+    except OSError:
+        return
+    # Skip when run_dir already lives under ~/.duet/runs/<slug>/ (the
+    # unwritable-cwd fallback already landed there) — registering would
+    # be a circular self-reference.
+    if home_runs in run_resolved.parents:
+        return
+    slug = _cwd_slug(cwd_resolved)
+    if not slug:
+        return  # paranoia: empty slug
+    link = home_runs / slug / run_dir.name
+    try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            try:
+                target = pathlib.Path(os.readlink(link))
+                if target.is_absolute() and target.resolve() == run_resolved:
+                    return  # idempotent: already correct
+            except OSError:
+                pass
+            return  # symlink points elsewhere; leave as-is
+        if link.exists():
+            return  # not a symlink; refuse to clobber
+        link.symlink_to(run_resolved)
+    except (OSError, NotImplementedError) as exc:
+        print(f"[duet] note: home-index symlink failed "
+              f"(~/.duet/runs/{slug}/{run_dir.name}): {exc}",
+              file=sys.stderr)
+
+
 # ---------- run-status (`duet --status <run_dir>`) ----------
 
 def _pid_alive(pid: int) -> bool:
@@ -1103,7 +1176,7 @@ def _proc_cmdline(pid: int) -> Optional[str]:
                            capture_output=True, text=True, timeout=2)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         pass
     return None
 
@@ -1264,18 +1337,34 @@ def _resolve_run_dir(arg: str) -> Optional[pathlib.Path]:
         return p.resolve()
     # Bare run id (no path separators, matches the timestamp pattern) — search.
     if "/" not in arg and "\\" not in arg and _RUN_ID_RE.match(arg):
-        candidates = [root / arg for root in _default_list_paths()
-                      if (root / arg).is_dir()]
-        if len(candidates) == 1:
-            return candidates[0].resolve()
-        if len(candidates) > 1:
-            # Same id under multiple roots is rare (timestamps are seconds-
-            # precise) but possible. Prefer most-recently-modified and warn.
-            candidates.sort(key=lambda c: c.stat().st_mtime, reverse=True)
+        # Collect candidates and dedupe by resolved real path so a
+        # home-index symlink and the cwd-relative real dir collapse into
+        # one entry instead of triggering the "multiple roots" warning.
+        seen: set[pathlib.Path] = set()
+        unique: list[pathlib.Path] = []
+        for root in _default_list_paths():
+            cand = root / arg
+            if not cand.is_dir():
+                continue
+            try:
+                real = cand.resolve()
+            except OSError:
+                continue
+            if real in seen:
+                continue
+            seen.add(real)
+            unique.append(cand)
+        if len(unique) == 1:
+            return unique[0].resolve()
+        if len(unique) > 1:
+            # Same id under genuinely distinct dirs is rare (timestamps
+            # are seconds-precise) but possible. Prefer most-recent and
+            # warn so users notice ambiguity.
+            unique.sort(key=lambda c: c.stat().st_mtime, reverse=True)
             print(f"[duet] note: run id {arg!r} found under multiple roots; "
-                  f"using most recent: {candidates[0]}",
+                  f"using most recent: {unique[0]}",
                   file=sys.stderr)
-            return candidates[0].resolve()
+            return unique[0].resolve()
     return None
 
 
@@ -1337,6 +1426,12 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
         return 0
 
     rows: list[dict] = []
+    # Dedupe by resolved real path so a run discovered via both a
+    # cwd-relative root and a home-index symlink only shows once. Iter
+    # order in `_default_list_paths()` puts cwd-relative roots first, so
+    # the displayed `dir` column prefers the (usually more readable)
+    # direct path over the symlink path.
+    seen: set[pathlib.Path] = set()
     now = time.time()
     for root in roots:
         if not root.is_dir():
@@ -1345,7 +1440,23 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
         for child in sorted(root.iterdir(), reverse=True):
             if not child.is_dir() or not _RUN_ID_RE.match(child.name):
                 continue
+            try:
+                real = child.resolve()
+            except OSError:
+                continue
+            if real in seen:
+                continue
+            seen.add(real)
             emoji, label, state = _classify_run(child)
+            # Self-heal: backfill the home index for runs created before
+            # `_register_run_in_home_index` shipped, or for runs whose
+            # `--runs-dir` placed them outside the default tree. The
+            # cwd is recorded in state.json (resolved-absolute by
+            # main()), so we can compute the same slug used at creation
+            # time. Idempotent; the helper swallows its own errors.
+            state_cwd = state.get("cwd") if state else None
+            if state_cwd:
+                _register_run_in_home_index(child, pathlib.Path(state_cwd))
             mtime = _last_activity_mtime(child)
             age = _humanize_age(int(now - mtime)) if mtime else "—"
             history = state.get("history") or []
@@ -1374,7 +1485,7 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
     for r in rows:
         print(f"  {r['emoji']:2}  {r['id']:<{w_id}}  {r['label']:<{w_label}}  "
               f"{str(r['turns']):<{w_turns}}  {r['age']:<{w_age}}  {r['dir']}")
-    print(f"\n  {len(rows)} run(s). Per-run health: duet --status <dir>")
+    print(f"\n  {len(rows)} run(s). Per-run health: duet --status <run-id>")
     return 0
 
 
@@ -1445,7 +1556,7 @@ def main() -> int:
                          "PATH (or under the default search paths if PATH is "
                          "omitted: ./runs/, ./.duet/runs/, ~/.duet/runs/*/). "
                          "Each row shows status, turns_used, last-activity "
-                         "age, and dir. Pair with `--status <dir>` to drill "
+                         "age, and dir. Pair with `--status <run-id>` to drill "
                          "into a specific run.")
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
