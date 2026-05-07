@@ -68,6 +68,31 @@ duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
 When `--cwd` points at a different directory and `--runs-dir` is omitted, run artifacts land under that project at `.duet/runs/<run_id>/`. Pass `--runs-dir runs` to keep the legacy invocation-relative `runs/<run_id>/` layout.
 
+### Concrete walkthrough: read a GitHub issue, fix the implementation
+
+```bash
+duet --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --comments' \
+     --cwd /Users/volkan.altan/workspace/fluentra/fluentra-flutter \
+     --partner codex:coder --worktree \
+     --reasoning high --turns 10
+```
+
+What this does:
+
+1. Runs `gh issue view 304 --repo Fluentra/fluentra-flutter --comments` with cwd = the target project. The issue body + comments become the kickoff text handed to codex.
+2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy.
+3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
+4. claude (lead, planner role) sees the auto-appended diff each turn and either flags issues or emits `<<<LGTM>>>` to converge.
+5. Worktree is left intact at end. Merge / drop instructions printed on exit.
+
+To monitor from another terminal: `duet --status <cwd>/.duet/runs/<id>/`.
+
+To adapt:
+- Different issue: change the URL/number in `--task-from-cmd`.
+- Different project: change `--cwd`.
+- Edit main directly (no rollback isolation): drop `--worktree`. Risky; only do this if the repo is fully committed.
+- Need network for `gh`/`curl` inside codex's sandbox: codex's `workspace-write` blocks outbound network by default. The default `--partner codex:coder` doesn't pass the override. For configs that need it, prefer YAML (`extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`); see [Codex sandbox and network access](#codex-sandbox-and-network-access).
+
 ### Edge cases (all fail loud at argparse-time)
 
 | situation | result |
@@ -142,7 +167,7 @@ EOF
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
-| `--status RUN_DIR` | print a one-shot health summary of an existing run dir and exit; see [Output layout & `--status`](#output-layout--status). Read-only |
+| `--status RUN_DIR` | print a one-shot health summary of an existing run dir and exit; see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
