@@ -66,6 +66,18 @@ expect "list runs from explicit path"        0 "$DUET" --list "$TMPD/.duet/runs"
 # `--list /nonexistent` exits 0 with a stderr notice (no rows ≠ failure).
 expect "list nonexistent path -> exit 0"     0 "$DUET" --list "$TMPD/no-such-runs-dir"
 
+# `--status <bare-id>` resolves against default paths (./runs/, ./.duet/runs/).
+# Stage a fake run under TMPD/runs/<id>/ and call --status with just the id.
+FAKE_ID="20260507-100000"
+mkdir -p "$TMPD/runs/$FAKE_ID"
+cat > "$TMPD/runs/$FAKE_ID/state.json" <<JSON
+{"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":"converged"}
+JSON
+( cd "$TMPD" && expect "status by bare run id"  0 "$DUET" --status "$FAKE_ID" )
+
+# Bogus id → exit 3 with helpful "use --list" error.
+( cd "$TMPD" && expect "status nonexistent id -> exit 3"  3 "$DUET" --status "99999999-999999" )
+
 # state.json should record duet_pid for liveness checks during the run.
 [[ -n "$RUN" ]] && grep -q '"duet_pid"' "$RUN/state.json" \
     || { echo "FAIL: duet_pid missing from dry-run state.json"; FAIL=$((FAIL+1)); }

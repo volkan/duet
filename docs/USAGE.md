@@ -20,6 +20,22 @@ mode, force prompt, and session memory.
 
 ## Other ways to start
 
+Hand off an existing Claude conversation by session id:
+
+```bash
+# 1. Start the task in Claude interactively.
+claude
+> let's design a CSV-to-JSON converter in Go with table tests
+> /exit
+
+# 2. Hand Claude's session id to duet. Codex picks up the next step,
+#    then duet passes Codex's reply back to Claude for review.
+./duet.py --resume-claude 106c1c57-ca42-473f-b2f1-1ea764f78c46 \
+          --partner codex:coder \
+          --cwd ~/code/csv2json \
+          --turns 10
+```
+
 Without a prior Claude session — give it a fresh task and let lead+partner roles drive:
 
 ```bash
@@ -182,7 +198,7 @@ EOF
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
-| `--status RUN_DIR` | print a one-shot health summary of an existing run dir and exit; see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
+| `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). One row per run with status / turns / last-activity age / dir. Read-only |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
@@ -216,12 +232,15 @@ The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your
           --kickoff "continue from where we left off"
 ```
 
-### `--status RUN_DIR`
+### `--status RUN_DIR_OR_ID`
 
-A one-shot health probe of any run dir. Read-only, suitable for cron / external pollers / Linear bots / tmux status lines.
+A one-shot health probe of any run. Read-only, suitable for cron / external pollers / Linear bots / tmux status lines. Accepts:
+
+- a **path** (absolute or relative): `duet --status runs/20260506-194122/`
+- a **bare run id** like `20260507-082801` — auto-resolved against the same default search paths as `--list` (`./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). The natural pairing: `duet --list` to scan, copy the id, `duet --status <id>` to drill in.
 
 ```bash
-$ duet --status runs/20260506-194122/
+$ duet --status 20260506-194122
 [duet] /Users/.../runs/20260506-194122
   turns_used:      3
   finished_reason: None

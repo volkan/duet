@@ -1075,13 +1075,22 @@ def _is_duet_process(pid: int) -> bool:
     return False
 
 
-def print_run_status(run_dir: pathlib.Path) -> int:
+def print_run_status(arg: str) -> int:
     """Print a one-shot health summary for a duet run. Returns shell exit code:
     0 = run finished cleanly, 1 = still running, 2 = stuck/crashed, 3 = error.
+
+    `arg` may be a path (absolute or relative) OR a bare run id like
+    `20260507-082801` — bare ids get resolved against the same default
+    search paths as `--list` (./runs/, ./.duet/runs/, ~/.duet/runs/*/).
     """
-    run_dir = run_dir.expanduser().resolve()
-    if not run_dir.is_dir():
-        print(f"[duet] no such run dir: {run_dir}", file=sys.stderr)
+    run_dir = _resolve_run_dir(arg)
+    if run_dir is None:
+        print(f"[duet] no such run dir: {arg}", file=sys.stderr)
+        if "/" not in arg and "\\" not in arg and _RUN_ID_RE.match(arg):
+            print(f"[duet]   tried bare-id resolution under default paths "
+                  "(./runs/, ./.duet/runs/, ~/.duet/runs/*/). "
+                  "Use `duet --list` to see what's available.",
+                  file=sys.stderr)
         return 3
     state_path = run_dir / "state.json"
     state: dict = {}
@@ -1189,6 +1198,36 @@ def _default_list_paths() -> list[pathlib.Path]:
             if slug.is_dir():
                 paths.append(slug)
     return paths
+
+
+def _resolve_run_dir(arg: str) -> Optional[pathlib.Path]:
+    """Map a `--status` argument to a real run dir.
+
+    Accepts:
+      - an absolute or relative path that exists
+      - a bare run id like `20260507-082801`, resolved against the default
+        list paths so users don't have to remember `runs/` vs `.duet/runs/`
+
+    Returns the resolved Path, or None when nothing matches.
+    """
+    p = pathlib.Path(arg).expanduser()
+    if p.is_dir():
+        return p.resolve()
+    # Bare run id (no path separators, matches the timestamp pattern) — search.
+    if "/" not in arg and "\\" not in arg and _RUN_ID_RE.match(arg):
+        candidates = [root / arg for root in _default_list_paths()
+                      if (root / arg).is_dir()]
+        if len(candidates) == 1:
+            return candidates[0].resolve()
+        if len(candidates) > 1:
+            # Same id under multiple roots is rare (timestamps are seconds-
+            # precise) but possible. Prefer most-recently-modified and warn.
+            candidates.sort(key=lambda c: c.stat().st_mtime, reverse=True)
+            print(f"[duet] note: run id {arg!r} found under multiple roots; "
+                  f"using most recent: {candidates[0]}",
+                  file=sys.stderr)
+            return candidates[0].resolve()
+    return None
 
 
 def _humanize_age(seconds: int) -> str:
@@ -1343,12 +1382,14 @@ def main() -> int:
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
                          "(minimal → low) and adds high/max prompt nudges.")
-    ap.add_argument("--status", metavar="RUN_DIR", default=None,
+    ap.add_argument("--status", metavar="RUN_DIR_OR_ID", default=None,
                     help="don't run a duet — instead print a one-shot health "
-                         "summary of an existing run dir (e.g. runs/<id>/) "
-                         "and exit. Shows in-flight turn, pid + alive status, "
-                         "elapsed time, last stderr write age. Exit codes: "
-                         "0=done, 1=running, 2=stuck/crashed, 3=error.")
+                         "summary of an existing run and exit. Accepts a path "
+                         "(absolute or relative) OR a bare run id like "
+                         "`20260507-082801` (resolved against the same "
+                         "default paths as `--list`: ./runs/, ./.duet/runs/, "
+                         "~/.duet/runs/*/). Exit codes: 0=done, 1=running, "
+                         "2=stuck/crashed, 3=error.")
     ap.add_argument("--list", metavar="PATH", nargs="?", const="__defaults__",
                     default=None, dest="list_runs",
                     help="don't run a duet — instead list runs found under "
@@ -1365,7 +1406,7 @@ def main() -> int:
 
     # `--status` is read-only: print run health and exit. Skip everything below.
     if args.status:
-        return print_run_status(pathlib.Path(args.status))
+        return print_run_status(args.status)
 
     # `--list` is read-only: print the run-dir table and exit.
     if args.list_runs is not None:
