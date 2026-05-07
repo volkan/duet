@@ -343,17 +343,21 @@ LIVE_PREFIX_TASK = "  $ "
 
 
 def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
-                   tee_to=None):
+                   tee_to=None, activity_event=None):
     """Drain a pipe line-by-line, capture into `sink`, optionally mirror live and/or tee to file.
 
     `mirror_to` is a writable text stream (typically sys.stderr) that the
     line is echoed to with `prefix`. `tee_to` is an open file handle that
     receives the raw line — used to persist the live stream for post-hoc
-    forensics. Either or both may be None.
+    forensics. `activity_event`, if given, is `set()` on every received
+    line so a heartbeat thread can detect "subprocess went quiet". All
+    parameters are optional.
     """
     try:
         for line in iter(stream.readline, ""):
             sink.append(line)
+            if activity_event is not None:
+                activity_event.set()
             if mirror_to is not None:
                 try:
                     mirror_to.write(prefix + line if prefix else line)
@@ -371,6 +375,34 @@ def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
             stream.close()
         except Exception:
             pass
+
+
+def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
+                     activity_event, interval: int = 20) -> None:
+    """Print "[duet] still working…" when a subprocess goes quiet.
+
+    Most subprocesses emit rich stderr live (codex, gh, npm). Some don't
+    — `claude -p` is silent on stderr during the API call, so a long
+    seed-extract or claude turn can look like duet has hung. This thread
+    waits on `activity_event`; if no activity for `interval` seconds AND
+    the subprocess is still alive, it prints elapsed time and resets.
+    Mirrors duet's own stderr so it interleaves with live output.
+    """
+    if mirror_to is None:
+        return
+    while proc.poll() is None:
+        if activity_event.wait(timeout=interval):
+            activity_event.clear()
+            continue
+        if proc.poll() is not None:
+            return
+        try:
+            elapsed = int(time.monotonic() - start_monotonic)
+            mirror_to.write(f"{LIVE_PREFIX}[duet] still working… ({elapsed}s; "
+                            "subprocess silent — typical for `claude -p`)\n")
+            mirror_to.flush()
+        except Exception:
+            return
 
 
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
@@ -429,11 +461,22 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             except OSError as e:
                 print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
                       file=sys.stderr)
-        t_out = threading.Thread(target=_stream_reader, args=(proc.stdout, out_chunks), daemon=True)
+        activity_event = threading.Event()
+        t_out = threading.Thread(target=_stream_reader,
+                                 args=(proc.stdout, out_chunks, None, "", None, activity_event),
+                                 daemon=True)
         t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX, stderr_file),
+                                 args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX,
+                                       stderr_file, activity_event),
                                  daemon=True)
         t_out.start(); t_err.start()
+        # Heartbeat: print elapsed-time hint when proc goes quiet (>20s no
+        # stderr/stdout). Useful for `claude -p`, which stays silent on
+        # stderr during the API call. No-op if mirror is None (--quiet).
+        t_hb = threading.Thread(target=_quiet_heartbeat,
+                                args=(proc, mirror, time.monotonic(), activity_event),
+                                daemon=True)
+        t_hb.start()
 
         try:
             if stdin is not None and proc.stdin is not None:
@@ -662,7 +705,13 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
     # If agent[0] has a session_id, ask it to dump its latest plan/message.
     a0 = cfg.agents[0]
     if a0.session_id:
-        print(f"[duet] extracting latest message from {a0.backend} session {a0.session_id[:8]}…")
+        print(f"[duet] extracting latest message from {a0.backend} session "
+              f"{a0.session_id[:8]}…")
+        if a0.backend == "claude" and run_dir is not None:
+            print(f"[duet]   `claude -p` is silent on stderr during the API "
+                  f"call; expect 30–120s.")
+            print(f"[duet]   from another terminal: "
+                  f"duet --status {run_dir.name}")
         return call_agent(a0, EXTRACT_LATEST_PROMPT, cfg,
                           first_turn_for_agent=False,
                           run_dir=run_dir, turn_label="00-extract")
