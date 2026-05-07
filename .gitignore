@@ -12,3 +12,4 @@ __pycache__/
 
 # Future per-run outputs at the root level (none today)
 runs/
+.claude/

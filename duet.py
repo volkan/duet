@@ -54,6 +54,7 @@ from typing import Optional
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_TURNS = 10
 DEFAULT_TIMEOUT = 60 * 15
+TASK_MAX_CHARS = 512 * 1024
 
 ROLE_PROMPTS = {
     "planner": (
@@ -338,6 +339,7 @@ def append_text_atomic(path: pathlib.Path, text: str) -> None:
 # to stderr, so this gives live visibility during long turns.
 LIVE_STREAM = True
 LIVE_PREFIX = "  │ "  # box-drawing prefix on every streamed line
+LIVE_PREFIX_TASK = "  $ "
 
 
 def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
@@ -674,7 +676,15 @@ def run_duet(cfg: DuetConfig) -> dict:
     if len(cfg.agents) != 2:
         raise SystemExit(f"duet expects exactly 2 agents, got {len(cfg.agents)}")
 
-    cfg.runs_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        cfg.runs_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(cfg.cwd)).strip("-")[:80]
+        fallback = pathlib.Path.home() / ".duet" / "runs" / slug
+        print(f"[duet] cannot create runs dir {cfg.runs_dir}: {e}; "
+              f"falling back to {fallback}", file=sys.stderr)
+        fallback.mkdir(parents=True, exist_ok=True)
+        cfg.runs_dir = fallback
     # Auto-ignore everything duet writes (transcripts, state, worktrees) from
     # the host repo's POV. Idempotent — only written once per runs_dir.
     gi = cfg.runs_dir / ".gitignore"
@@ -682,9 +692,17 @@ def run_duet(cfg: DuetConfig) -> dict:
         write_text_atomic(gi, "# auto-created by duet — ignores all run artifacts\n"
                               "# (transcripts, state.json, worktrees) so they don't\n"
                               "# pollute the host repo. Safe to delete or edit.\n*\n")
-    run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = cfg.runs_dir / run_id
-    run_dir.mkdir()
+    base_run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    for n in range(100):
+        run_id = base_run_id if n == 0 else f"{base_run_id}-{n:02d}"
+        run_dir = cfg.runs_dir / run_id
+        try:
+            run_dir.mkdir()
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise SystemExit(f"could not allocate a unique run dir under {cfg.runs_dir}")
     transcript_path = run_dir / "transcript.md"
     state_path = run_dir / "state.json"
 
@@ -920,6 +938,86 @@ def load_yaml_or_json(path: pathlib.Path) -> dict:
     return json.loads(text)
 
 
+def _check_task_size(text: str, parser: argparse.ArgumentParser) -> str:
+    if len(text) > TASK_MAX_CHARS:
+        parser.error(f"task too large ({len(text)} chars > {TASK_MAX_CHARS}); "
+                     "pipe a shorter summary")
+    return text
+
+
+def resolve_at_text(value: Optional[str], option_name: str,
+                    parser: argparse.ArgumentParser,
+                    stdin_cache: dict[str, str]) -> Optional[str]:
+    """Resolve literal / @file / @- task text before a run directory exists."""
+    if value is None:
+        return None
+    if not value.startswith("@"):
+        return _check_task_size(value, parser)
+    if value == "@-":
+        if "stdin" not in stdin_cache:
+            stdin_cache["stdin"] = sys.stdin.read()
+        return _check_task_size(stdin_cache["stdin"], parser)
+
+    raw_path = value[1:]
+    if not raw_path:
+        parser.error(f"{option_name}: file not found: {raw_path}")
+    path = pathlib.Path(raw_path).expanduser()
+    if not path.is_file():
+        parser.error(f"{option_name}: file not found: {path}")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        parser.error(f"{option_name}: file not UTF-8 text: {path}")
+    except OSError as e:
+        parser.error(f"{option_name}: unable to read file: {path}: {e}")
+    return _check_task_size(text, parser)
+
+
+def resolve_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
+                          parser: argparse.ArgumentParser) -> str:
+    """Run a shell command and use stdout as the task seed."""
+    global LIVE_PREFIX
+    old_prefix = LIVE_PREFIX
+    LIVE_PREFIX = LIVE_PREFIX_TASK
+    try:
+        rc, out, err = _run(["sh", "-c", cmd_str], cwd=cwd, stdin=None, timeout=timeout)
+    finally:
+        LIVE_PREFIX = old_prefix
+    if rc != 0:
+        parser.error(f"--task-from-cmd exited {rc}\nstderr:\n{err}")
+    if out == "":
+        parser.error(f"--task-from-cmd produced empty stdout\nstderr:\n{err}")
+    return _check_task_size(out, parser)
+
+
+def resolve_seed_inputs(*, task: Optional[str], kickoff: Optional[str],
+                        task_from_cmd: Optional[str], cwd: pathlib.Path,
+                        timeout: int, parser: argparse.ArgumentParser,
+                        stdin_cache: dict[str, str]) -> tuple[Optional[str], Optional[str]]:
+    if task is not None and task_from_cmd is not None:
+        parser.error("--task and --task-from-cmd are mutually exclusive")
+    resolved_kickoff = resolve_at_text(kickoff, "--kickoff", parser, stdin_cache)
+    if task_from_cmd is not None:
+        resolved_task = resolve_task_from_cmd(task_from_cmd, cwd, timeout, parser)
+    else:
+        resolved_task = resolve_at_text(task, "--task", parser, stdin_cache)
+    return resolved_task, resolved_kickoff
+
+
+def choose_runs_dir(raw_runs_dir: Optional[str], cwd_resolved: pathlib.Path) -> pathlib.Path:
+    invocation_pwd = pathlib.Path.cwd().resolve()
+    if raw_runs_dir is not None:
+        return pathlib.Path(raw_runs_dir)
+    if cwd_resolved != invocation_pwd:
+        runs_dir = cwd_resolved / ".duet" / "runs"
+        print("[duet] --cwd points outside the invocation directory; "
+              f"defaulting run artifacts to {runs_dir}. "
+              "Pass --runs-dir runs to use the legacy invocation-relative path.",
+              file=sys.stderr)
+        return runs_dir
+    return pathlib.Path("runs")
+
+
 # ---------- run-status (`duet --status <run_dir>`) ----------
 
 def _pid_alive(pid: int) -> bool:
@@ -1001,8 +1099,12 @@ def main() -> int:
                          "its latest message and feed it to the partner agent.")
     ap.add_argument("--resume-codex", metavar="SESSION_ID",
                     help="(advanced) seed codex with an existing session id.")
-    ap.add_argument("--task", help="task description (used if no --resume-* and no --kickoff)")
-    ap.add_argument("--kickoff", help="explicit first message to send to the partner agent")
+    ap.add_argument("--task", help="task description, @file, or @- stdin "
+                                   "(used if no --resume-* and no --kickoff)")
+    ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
+                                      "to send to the partner agent")
+    ap.add_argument("--task-from-cmd", metavar="CMD",
+                    help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default="codex:coder",
                     help="partner agent spec, e.g. codex:coder, claude:reviewer (default codex:coder)")
     ap.add_argument("--lead", default="claude:planner",
@@ -1011,7 +1113,7 @@ def main() -> int:
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=DEFAULT_SENTINEL, help="convergence sentinel")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-turn timeout seconds")
-    ap.add_argument("--runs-dir", default="runs", help="where to save transcripts")
+    ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",
                     help="codex --sandbox: read-only|workspace-write|danger-full-access")
     ap.add_argument("--permission-mode", default="acceptEdits",
@@ -1065,18 +1167,39 @@ def main() -> int:
     global LIVE_STREAM
     LIVE_STREAM = not args.quiet
 
+    stdin_cache: dict[str, str] = {}
     if args.config:
         raw = load_yaml_or_json(pathlib.Path(args.config))
+        cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
+        cfg_timeout = int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT))
+        raw_task = raw.get("task")
+        raw_kickoff = raw.get("kickoff")
+        raw_task_from_cmd = raw.get("task_from_cmd")
+        if raw_task is None and raw_kickoff is None and raw_task_from_cmd is None:
+            raw_task = args.task
+            raw_kickoff = args.kickoff
+            raw_task_from_cmd = args.task_from_cmd
+        task, kickoff = resolve_seed_inputs(
+            task=raw_task,
+            kickoff=raw_kickoff,
+            task_from_cmd=raw_task_from_cmd,
+            cwd=cfg_cwd,
+            timeout=cfg_timeout,
+            parser=ap,
+            stdin_cache=stdin_cache,
+        )
+        raw_runs_dir = args.runs_dir if args.runs_dir is not None else raw.get("runs_dir")
+        runs_dir = choose_runs_dir(raw_runs_dir, cfg_cwd)
         agents = [Agent(**a) for a in raw.get("agents", [])]
         cfg = DuetConfig(
-            cwd=pathlib.Path(raw.get("cwd", ".")).expanduser().resolve(),
+            cwd=cfg_cwd,
             agents=agents,
-            task=raw.get("task"),
-            kickoff=raw.get("kickoff"),
+            task=task,
+            kickoff=kickoff,
             max_turns=int(raw.get("max_turns", DEFAULT_TURNS)),
             sentinel=raw.get("sentinel", DEFAULT_SENTINEL),
-            per_turn_timeout=int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT)),
-            runs_dir=pathlib.Path(raw.get("runs_dir", "runs")),
+            per_turn_timeout=cfg_timeout,
+            runs_dir=runs_dir,
             sandbox=raw.get("sandbox", "workspace-write"),
             permission_mode=raw.get("permission_mode", "acceptEdits"),
             dry_run=bool(raw.get("dry_run", False)),
@@ -1100,6 +1223,17 @@ def main() -> int:
         if args.resume_claude and cfg.agents and cfg.agents[0].backend == "claude":
             cfg.agents[0].session_id = args.resume_claude
     else:
+        cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
+        task, kickoff = resolve_seed_inputs(
+            task=args.task,
+            kickoff=args.kickoff,
+            task_from_cmd=args.task_from_cmd,
+            cwd=cfg_cwd,
+            timeout=args.timeout,
+            parser=ap,
+            stdin_cache=stdin_cache,
+        )
+        runs_dir = choose_runs_dir(args.runs_dir, cfg_cwd)
         # Build agents from --lead / --partner / --resume-claude
         if args.resume_claude:
             lead = Agent(name="claude-lead", backend="claude",
@@ -1113,14 +1247,14 @@ def main() -> int:
             partner.session_id = args.resume_codex
 
         cfg = DuetConfig(
-            cwd=pathlib.Path(args.cwd).expanduser().resolve(),
+            cwd=cfg_cwd,
             agents=[lead, partner],
-            task=args.task,
-            kickoff=args.kickoff,
+            task=task,
+            kickoff=kickoff,
             max_turns=args.turns,
             sentinel=args.sentinel,
             per_turn_timeout=args.timeout,
-            runs_dir=pathlib.Path(args.runs_dir),
+            runs_dir=runs_dir,
             sandbox=args.sandbox,
             permission_mode=args.permission_mode,
             dry_run=args.dry_run,

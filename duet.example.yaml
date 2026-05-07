@@ -22,6 +22,8 @@ dry_run: false
 
 # Optional: a generic task; only used if neither agent has a session_id and
 # no kickoff is provided.
+# Use @file or @- here too, or run an upstream tool and use its stdout:
+# task_from_cmd: "claude -p /review"
 task: |
   Refactor the auth module to use JWTs.
   Keep backward compatibility; add tests.

@@ -57,14 +57,77 @@ With a YAML config:
 ./duet.py --config duet.example.yaml
 ```
 
+## Drive duet from any tool / any folder
+
+`--task` and `--kickoff` accept literal text, `@file`, or `@-` for stdin.
+`--task-from-cmd` runs a shell command in the target `--cwd` and uses stdout
+as the kickoff task, while streaming the command's stderr live.
+
+Canonical recipes:
+
+```bash
+# Read a task from a file, but operate on another project.
+duet --task @review-notes.md --cwd ~/workspace/project
+
+# Pipe any tool's output into duet.
+claude -p /review | duet --task @- --cwd ~/workspace/project
+
+# Let duet run the upstream tool itself from inside the target project.
+duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
+
+# With the user-level Claude Code skill installed:
+/duet 'claude -p /review'
+```
+
+When `--cwd` points at a different directory and `--runs-dir` is omitted,
+run artifacts land under that project at `.duet/runs/<run_id>/`. Pass
+`--runs-dir runs` to keep the legacy invocation-relative `runs/<run_id>/`
+layout.
+
+Install the optional Claude Code `/duet` skill by creating
+`~/.claude/skills/duet/SKILL.md`; this command recreates it:
+
+````bash
+mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'
+---
+name: duet
+description: Hand off arbitrary command output to the duet two-agent harness in the current folder. Wraps `duet --task-from-cmd <shell>` so any upstream tool (claude -p /review, gh, npm test, cat error.log) can drive a planner↔coder loop. Use when asked to "duet on …", "run duet with …", "kick off duet from …", or "have duet pick up <some output>".
+argument-hint: "'<shell command>' [extra duet flags…]"
+allowed-tools: Bash(*)
+---
+
+# /duet
+
+Run exactly:
+
+```bash
+duet --task-from-cmd $ARGUMENTS --cwd "$(pwd)" --partner codex:coder --worktree
+```
+
+If `$ARGUMENTS` is empty, print the recipe block above (with the
+quoted-shell-cmd convention example `/duet 'claude -p /review'`) and
+stop. Otherwise after spawn, print the run dir + the
+`duet --status <run_dir>` hint.
+
+Notes:
+- The first quoted token of `$ARGUMENTS` is the shell command duet runs
+  for the kickoff. Anything after that is forwarded to duet (e.g.
+  `--turns 8`, `--reasoning high`, `--lead claude:reviewer`).
+- Don't try to chain `/<other-skill>` — Claude Code skills can't
+  programmatically read prior assistant turns. Use shell composition:
+  `/duet 'claude -p /review'` is the right idiom.
+EOF
+````
+
 ## CLI flags
 
 | flag | purpose |
 |---|---|
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent |
 | `--resume-codex SESSION_ID` | (advanced) seed Codex with a session id |
-| `--task "…"` | task description, used if no resume seed and no kickoff |
-| `--kickoff "…"` | explicit first message to send to the partner agent |
+| `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
+| `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
+| `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
 | `--turns N` | max turns (default 10) |
@@ -73,7 +136,7 @@ With a YAML config:
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |
 | `--permission-mode` | claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
 | `--timeout SEC` | per-turn timeout (default 900) |
-| `--runs-dir DIR` | where to save transcripts (default `runs/`) |
+| `--runs-dir DIR` | where to save transcripts; default is `runs/` from the invocation directory, or `<cwd>/.duet/runs/` for a foreign `--cwd` |
 | `--config PATH` | YAML/JSON config (overrides most flags) |
 | `--worktree` | run the partner agent in a throwaway git worktree on a fresh `duet/<run_id>` branch; the worktree is left intact at the end |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
