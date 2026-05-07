@@ -15,6 +15,7 @@ mode, force prompt, and session memory.
 - [Stop conditions and force prompt](#stop-conditions-and-force-prompt)
 - [Codex sandbox and network access](#codex-sandbox-and-network-access)
 - [Worktree mode](#worktree-mode)
+- [After a run finishes](#after-a-run-finishes)
 
 ---
 
@@ -388,3 +389,106 @@ The worktree is **not deleted** when duet exits — you'll see merge / drop inst
 ```
 
 If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No crash.
+
+---
+
+## After a run finishes
+
+When duet exits — converged, max-turns, force-stopped, or you Ctrl-C'd — the run dir is preserved at `<runs_dir>/<run_id>/`. Three things to do, usually in order:
+
+### 1. See what happened
+
+```bash
+# Health summary (works on a bare run id from anywhere on PATH)
+duet --status 20260507-191155
+
+# Full transcript: every agent turn, the kickoff seed, the auto-appended diffs
+less <runs_dir>/20260507-191155/transcript.md
+
+# Codex's live reasoning trace (often huge — multi-MB on heavy turns)
+less <runs_dir>/20260507-191155/turn-01-codex-partner.stderr.log
+
+# Or scan all your runs at once
+duet --list
+```
+
+### 2. Apply, iterate, or discard the changes
+
+There are two cases — figure out which one you're in by reading `state.json`'s `worktree` field:
+
+```bash
+jq '{worktree, worktree_branch, finished_reason}' <runs_dir>/<id>/state.json
+```
+
+#### Case A — `worktree: <some-path>` (you ran with `--worktree`)
+
+Codex edited a fresh `duet/<run_id>` branch in that worktree. Your working copy is untouched. From the host repo:
+
+```bash
+cd <project>
+
+# Review
+git -C <runs_dir>/<id>/wt diff main
+
+# Pick one:
+git merge duet/<id>                           # accept — fast-forward or merge commit
+git branch -D duet/<id>                       # reject — branch is gone
+
+# Either way, clean up the worktree:
+git worktree remove <runs_dir>/<id>/wt
+
+# duet prints the exact merge/drop commands at end-of-run; copy them.
+```
+
+This is non-destructive — your working copy never sees codex's edits unless you `git merge`.
+
+#### Case B — `worktree: null` (you ran without `--worktree`)
+
+Codex edited the working copy directly. Changes are sitting uncommitted in your repo.
+
+```bash
+cd <project>
+
+# Review
+git status --short
+git diff                          # full unified diff
+git diff --stat                   # one-line per file
+
+# Pick one:
+git add -A && git commit -m "duet: …"   # keep everything
+git restore .                            # discard everything
+git add -p                               # selective (interactive)
+```
+
+> ⚠ Quick tip: case B is a destructive default. If you change your mind after `git restore`, codex's edits are gone (the run dir's transcript still has them, but you'd be re-applying by hand). For any non-trivial run, prefer `--worktree` so "rejection" is just `git branch -D`.
+
+### 3. Continue the conversation (optional)
+
+`state.json` saved both agents' session ids — a follow-up duet run can pick them up so neither agent restarts from scratch:
+
+```bash
+RUN=<runs_dir>/20260507-191155
+CLAUDE_SID=$(jq -r '.agents[] | select(.backend=="claude") | .session_id' "$RUN/state.json")
+CODEX_SID=$( jq -r '.agents[] | select(.backend=="codex")  | .session_id' "$RUN/state.json")
+
+duet --resume-claude "$CLAUDE_SID" \
+     --resume-codex  "$CODEX_SID" \
+     --kickoff "Now run the tests and fix anything that breaks." \
+     --partner codex:coder --worktree --turns 4
+```
+
+Notes:
+- If `CODEX_SID` is `null` (codex doesn't always expose ids; or the run got Ctrl-C'd before codex's first reply), omit `--resume-codex`. Codex will still pick up via `codex exec resume --last` since the cwd is unchanged. Don't run other codex sessions in that cwd in the meantime — they'd race for `--last`.
+- The `--kickoff` is what gets sent to the next-up agent (codex by default). Make it specific so the loop doesn't restart from scratch.
+- `--worktree` here gets you a *fresh* worktree on a *new* `duet/<new_run_id>` branch. Old worktree (if any) stays where it was.
+
+You can also drop into a single agent without duet:
+
+```bash
+# Talk to claude alone, full context preserved
+claude --resume "$CLAUDE_SID"
+
+# Or hand codex a one-off in the same cwd
+( cd <project> && codex exec resume --last --sandbox workspace-write \
+    "Now also write a unit test for the new error path." )
+```

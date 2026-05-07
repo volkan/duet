@@ -114,7 +114,8 @@ set, artifacts go under the target project at `.duet/runs/<run_id>/`.
 
 Read [docs/USAGE.md](docs/USAGE.md) for the full reference: flags, sandbox and
 network rules, worktree mode, output layout, `--status` exit codes, force
-prompt behavior, session memory, and the optional `/duet` Claude Code skill.
+prompt behavior, session memory, the post-run "apply / iterate / discard"
+checklist, and the optional `/duet` Claude Code skill.
 
 For contributor guidance, read [CLAUDE.md](CLAUDE.md). Codex-specific entry
 notes live in [AGENTS.md](AGENTS.md).
