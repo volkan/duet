@@ -20,7 +20,7 @@ mode, force prompt, and session memory.
 
 ## Other ways to start
 
-Hand off an existing Claude conversation by session id:
+Hand off an existing Claude conversation by session id — this is duet's founding workflow: plan with claude interactively, hand the plan to codex via duet, claude reviews each codex turn.
 
 ```bash
 # 1. Start the task in Claude interactively.
@@ -33,8 +33,25 @@ claude
 ./duet.py --resume-claude 106c1c57-ca42-473f-b2f1-1ea764f78c46 \
           --partner codex:coder \
           --cwd ~/code/csv2json \
-          --turns 10
+          --turns 4
 ```
+
+What you'll see (the silence + heartbeat is normal — claude `-p` is silent on stderr during the API call):
+
+```text
+[duet] run dir: runs/20260507-191155
+[duet] claude-lead resumes session 0ce8ad74-972f-4bce-a6cc-1d21a76528dd
+[duet] extracting latest message from claude session 0ce8ad74…
+[duet]   `claude -p` is silent on stderr during the API call; expect 30–120s.
+[duet]   from another terminal: duet --status 20260507-191155
+  │ [duet] still working… (20s; subprocess silent — typical for `claude -p`)
+  │ [duet] still working… (40s; subprocess silent — typical for `claude -p`)
+
+--- Turn 1 :: codex-partner (codex/coder) [started 19:13:17] ---
+  │ … codex's live reasoning + tool calls stream here …
+```
+
+The `[duet] still working…` heartbeat fires every 20s when a subprocess goes quiet, so you'll know the run is alive even before the first turn banner prints. Pair with `duet --status <run_id>` from another terminal for a richer health view.
 
 Without a prior Claude session — give it a fresh task and let lead+partner roles drive:
 
@@ -58,7 +75,7 @@ With a YAML config:
 ./duet.py --config duet.example.yaml
 ```
 
-Roles ship with: `planner`, `coder`, `reviewer`. Override via `role_prompt` in YAML config to define new ones.
+Roles ship with: `planner`, `coder`, `reviewer`, `triage-reviewer`. Override via `role_prompt` in YAML config to define new ones.
 
 ---
 
