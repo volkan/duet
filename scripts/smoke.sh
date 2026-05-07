@@ -56,9 +56,32 @@ grep -qxF "*" "$TMPD/.duet/runs/.gitignore" || { echo "FAIL: .duet/runs/.gitigno
 expect "explicit --runs-dir overrides"       0 "$DUET" --task "x" --dry-run --cwd "$TMPD" --runs-dir "$TMPD/custom-runs"
 [[ -d "$TMPD/custom-runs" ]] || { echo "FAIL: custom-runs not created"; FAIL=$((FAIL+1)); }
 
-# Status check on a fresh dry-run dir
+# Status check on a fresh dry-run dir (run is finished, so exit 0).
 RUN=$(ls -1d "$TMPD/.duet/runs"/2*/ 2>/dev/null | head -1 || true)
 [[ -n "$RUN" ]] && expect "status on dry-run dir"   0 "$DUET" --status "$RUN"
+
+# state.json should record duet_pid for liveness checks during the run.
+[[ -n "$RUN" ]] && grep -q '"duet_pid"' "$RUN/state.json" \
+    || { echo "FAIL: duet_pid missing from dry-run state.json"; FAIL=$((FAIL+1)); }
+
+# Synthetic mid-run state.json with a stale (or unrelated) duet_pid → exit 2.
+# We use PID 1 (init) which is alive but whose cmdline does not contain
+# 'duet.py', so _is_duet_process() should reject it.
+SYNTH="$TMPD/synth-stale"
+mkdir -p "$SYNTH"
+cat > "$SYNTH/state.json" <<JSON
+{"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":null,"duet_pid":1}
+JSON
+expect "stale duet_pid -> exit 2"             2 "$DUET" --status "$SYNTH"
+
+# Synthetic mid-run state.json predating duet_pid → exit 2 with legacy
+# fallback message.
+SYNTH_OLD="$TMPD/synth-old"
+mkdir -p "$SYNTH_OLD"
+cat > "$SYNTH_OLD/state.json" <<JSON
+{"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":null}
+JSON
+expect "no duet_pid (old run) -> exit 2"      2 "$DUET" --status "$SYNTH_OLD"
 
 echo "---"; echo "smoke: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

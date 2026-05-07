@@ -779,6 +779,7 @@ def run_duet(cfg: DuetConfig) -> dict:
             "transcript_path": str(transcript_path),
             "worktree": str(wt_path) if wt_path else None,
             "worktree_branch": wt_branch,
+            "duet_pid": os.getpid(),
         }
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
@@ -830,6 +831,7 @@ def run_duet(cfg: DuetConfig) -> dict:
             "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
                         "session_id": a.session_id} for a in cfg.agents],
             "history": history, "finished_reason": None,
+            "duet_pid": os.getpid(),
         }, indent=2))
         print(reply)
 
@@ -857,6 +859,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         "history": history,
         "finished_reason": finished_reason,
         "transcript_path": str(transcript_path),
+        "duet_pid": os.getpid(),
     }
     state["worktree"] = str(wt_path) if wt_path else None
     state["worktree_branch"] = wt_branch
@@ -1032,6 +1035,46 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _proc_cmdline(pid: int) -> Optional[str]:
+    """Best-effort read of a PID's full cmdline. Returns None on any failure.
+
+    Used to validate that a recorded `duet_pid` still belongs to a duet
+    process (PIDs get recycled after a reboot; the alive-check alone could
+    point at an unrelated app).
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            return (pathlib.Path(f"/proc/{pid}/cmdline")
+                    .read_bytes().replace(b"\x00", b" ").decode(errors="replace"))
+        except OSError:
+            return None
+    # macOS / BSD: shell out to ps. Cheap, ~5ms.
+    try:
+        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return None
+
+
+def _is_duet_process(pid: int) -> bool:
+    """True if `pid` is alive AND looks like a duet.py process (avoids stale-PID false positives)."""
+    if not _pid_alive(pid):
+        return False
+    cmdline = _proc_cmdline(pid) or ""
+    # Match "duet.py" anywhere in the cmdline OR a final path segment
+    # equal to "duet" (when installed via `make install`).
+    if "duet.py" in cmdline:
+        return True
+    # Look for ".../duet" or "duet " (the installed-symlink case).
+    head = cmdline.split() and cmdline.split()[0]
+    if head and pathlib.Path(head).name == "duet":
+        return True
+    return False
+
+
 def print_run_status(run_dir: pathlib.Path) -> int:
     """Print a one-shot health summary for a duet run. Returns shell exit code:
     0 = run finished cleanly, 1 = still running, 2 = stuck/crashed, 3 = error.
@@ -1082,12 +1125,37 @@ def print_run_status(run_dir: pathlib.Path) -> int:
                   "crashed or was killed without cleanup")
             return 2
         return 1
-    # No pid files. Either run hasn't started or has finished.
+    # No pid files. Either run hasn't started, has finished, or is between
+    # turns (in particular, sitting at the post-loop `force>` prompt).
     if finished:
         print(f"  done. transcript: {state.get('transcript_path', run_dir / 'transcript.md')}")
         return 0
+
+    # Disambiguate "between turns" from "actually crashed" using the
+    # duet_pid recorded in state.json.
+    duet_pid = state.get("duet_pid")
+    if duet_pid is not None:
+        if _is_duet_process(int(duet_pid)):
+            print(f"  state:           between turns / awaiting force> prompt")
+            print(f"  duet pid:        {duet_pid} (alive)")
+            history = state.get("history") or []
+            if history:
+                last = history[-1]
+                print(f"  last completed:  turn {last.get('turn')} "
+                      f"({last.get('agent')}) in {last.get('elapsed_s', 0):.1f}s, "
+                      f"{last.get('len_chars', 0)} chars")
+            return 1
+        print(f"  ⚠ duet pid {duet_pid} no longer running (or recycled by an "
+              "unrelated process); no finished_reason recorded — run died "
+              "between turns")
+        return 2
+
+    # state.json predates the duet_pid field — keep the old message and the
+    # old conservative "looks stuck" exit code so callers don't regress.
     print("  no in-flight turn AND no finished_reason — run may have died "
           "between turns, or hasn't started yet")
+    print("  (state.json predates the duet_pid field; can't auto-distinguish "
+          "alive-between-turns from crashed)")
     return 2
 
 
