@@ -65,8 +65,10 @@ Each agent keeps its own conversation memory:
 - Codex resumes with `codex exec resume --last` in the working directory.
 
 On each turn, duet sends the latest reply from one agent to the other. It
-continues until an agent prints the sentinel `<<<LGTM>>>` on its own line,
-`--turns` is reached, a timeout happens, or you press Ctrl-C.
+continues until both agents accept convergence in back-to-back turns, `--turns`
+is reached, a timeout happens, or you press Ctrl-C. A convergence proposal must
+include an `LGTM rationale:` explaining why the work is done, followed by the
+sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 
 After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
 feedback to force another round.
@@ -141,5 +143,5 @@ notes live in [AGENTS.md](AGENTS.md).
   `codex exec resume --last` is cwd-based. `--worktree` isolates duet's Codex
   cwd from the host repo, but do not start another Codex session inside that
   same worktree while the run is active.
-- Transcripts capture full agent text. Sentinel detection only counts the
-  sentinel on its own line outside fenced markdown code blocks.
+- Transcripts capture full agent text. Convergence detection only counts
+  rationale-backed sentinels outside fenced markdown code blocks.

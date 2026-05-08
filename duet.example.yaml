@@ -51,4 +51,4 @@ agents:
     extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
     # role_prompt: |
     #   You are a senior engineer. Be terse. Apply edits. Run tests.
-    #   Emit {SENTINEL} on its own line when done.
+    #   When done, include an LGTM rationale and {SENTINEL} on its own line.

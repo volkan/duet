@@ -79,6 +79,36 @@ expect "config task_from_cmd"                0 "$DUET" --config "$TMPD/cfg.json"
 expect "config cli --runs-dir override"      0 "$DUET" --config "$TMPD/cfg.json" --runs-dir "$TMPD/config-runs"
 [[ -d "$TMPD/config-runs" ]] || { echo "FAIL: config-runs not created"; FAIL=$((FAIL+1)); }
 
+expect "convergence requires rationale"      0 python3 - "$DUET_ABS" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+assert not m.convergence_proposed("done\n<<<LGTM>>>", "<<<LGTM>>>")
+assert m.convergence_proposed(
+    "LGTM rationale: task is satisfied, checks passed, and no blocking follow-ups remain.\n<<<LGTM>>>",
+    "<<<LGTM>>>",
+)
+assert not m.convergence_proposed(
+    "LGTM rationale: task is satisfied, checks passed, and no blocking follow-ups remain.\n"
+    "```text\n<<<LGTM>>>\n```",
+    "<<<LGTM>>>",
+)
+assert not m.convergence_proposed(
+    "<<<LGTM>>>\nLGTM rationale: task is satisfied, but this came too late.",
+    "<<<LGTM>>>",
+)
+PY
+expect_stdout "one proposal not enough"      0 "reason=max_turns" "$DUET" --dry-run --turns 1 --task "x" --cwd "$TMPD"
+expect_stdout "two proposals converge"       0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD"
+
 # C2 - foreign-cwd defaults
 expect "foreign cwd creates .duet/runs/"     0 "$DUET" --task "x" --dry-run --cwd "$TMPD"
 [[ -d "$TMPD/.duet/runs" ]] || { echo "FAIL: .duet/runs not created"; FAIL=$((FAIL+1)); }

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-**duet** is a single-file Python harness (`duet.py`, ~1350 lines, stdlib-only, Python 3.9+) that runs two CLI agents — `claude` and `codex` by default — in alternating turns until they converge on a sentinel (`<<<LGTM>>>` on its own line), hit `--turns`, time out, or get Ctrl-C'd. Each agent keeps its own conversation memory across turns: Claude via `--resume <session_id>` parsed from its JSON-wrapped output; Codex via `codex exec resume --last` keyed on cwd.
+**duet** is a single-file Python harness (`duet.py`, ~1350 lines, stdlib-only, Python 3.9+) that runs two CLI agents — `claude` and `codex` by default — in alternating turns until both agents propose convergence in back-to-back turns with an LGTM rationale plus the sentinel (`<<<LGTM>>>` on its own line), hit `--turns`, time out, or get Ctrl-C'd. Each agent keeps its own conversation memory across turns: Claude via `--resume <session_id>` parsed from its JSON-wrapped output; Codex via `codex exec resume --last` keyed on cwd.
 
 The single-file shape is a hard constraint. PyYAML is the one optional import, gated behind `--config foo.yaml`; the smoke test uses JSON configs to stay stdlib-only. `README.md` has the user-facing pitch; `docs/USAGE.md` is the full flag reference; this file is for someone modifying `duet.py`.
 
@@ -43,9 +43,9 @@ These break easily if you only update one place.
 
 3. **Codex's flag-set bifurcation.** `codex exec` accepts `--sandbox` and `--cd`; `codex exec resume --last` rejects them with "unexpected argument". `call_codex` splits options into `exec_only_opts` (first turn / no session) vs shared opts. Modern Codex's clap parser also requires options *before* the positional prompt — adding any flag after `full_prompt` is a silent regression that surfaces as a confusing rc=2.
 
-### Convergence sentinel: fenced-code-aware
+### Convergence: fenced-code-aware, rationale-backed, pair-approved
 
-`converged()` does a line-by-line scan tracking whether it's inside a markdown code fence (` ``` ` or `~~~`, length-matched closing). The sentinel only counts on its own line *outside* a fence. An agent quoting "the sentinel is `<<<LGTM>>>`" inline won't false-positive; an agent showing an example code block containing the sentinel won't either. Don't replace this with a regex over the whole text — README's "Limits" section explicitly calls this out as the deliberate trade-off.
+`convergence_proposed()` does a line-by-line scan tracking whether it's inside a markdown code fence (` ``` ` or `~~~`, length-matched closing). The sentinel only counts on its own line *outside* a fence, and the same reply must include an `LGTM rationale:` / `Rationale:` outside a fence. The loop only stops after two back-to-back agent turns propose convergence, so one agent can reject the other's rationale by omitting the sentinel and asking for another round. An agent quoting "the sentinel is `<<<LGTM>>>`" inline won't false-positive; an agent showing an example code block containing the sentinel won't either. Don't replace this with a regex over the whole text — README's "Limits" section explicitly calls this out as the deliberate trade-off.
 
 ### Subprocess plumbing (`_run`)
 

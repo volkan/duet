@@ -15,8 +15,9 @@ Workflow this is built for:
 
   3. duet pulls Claude's latest message from that session, feeds it to Codex.
      Codex replies. duet feeds Codex's reply back to Claude (with --resume so
-     Claude remembers the whole prior conversation). Ping-pong until either
-     the convergence sentinel <<<LGTM>>> appears, --turns is hit, or you Ctrl-C.
+     Claude remembers the whole prior conversation). Ping-pong until both
+     agents propose convergence with an LGTM rationale and <<<LGTM>>> in
+     back-to-back turns, --turns is hit, or you Ctrl-C.
 
 Each agent keeps its own session across turns:
   - Claude: `claude -p --resume <session_id> --output-format json` — we capture
@@ -55,6 +56,7 @@ DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
+CONVERGENCE_RATIONALE_MIN_CHARS = 20
 
 RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
 
@@ -64,7 +66,17 @@ Begin every reply with three header lines, then a blank line, then your full rep
   FILES: <comma-separated paths you touched or referenced, or "none">
   STATUS: <one of: planning | implementing | reviewing | requesting-changes | ready-for-review | converged>
 
-The headers DO NOT replace your reply — write your normal answer as usual after the blank line. Use STATUS: converged only when you would also emit the convergence sentinel."""
+The headers DO NOT replace your reply — write your normal answer as usual after the blank line. Use STATUS: converged only when you would also emit the convergence sentinel with an LGTM rationale."""
+
+CONVERGENCE_INSTRUCTION = (
+    "Convergence requires pair agreement, not just the sentinel. When you "
+    "believe the loop should stop, include a concise `LGTM rationale:` line or "
+    "paragraph that explains why the result satisfies the task, what you "
+    "checked, and any remaining low-risk follow-ups; then put {SENTINEL} on "
+    "its own line. A bare sentinel without that rationale is ignored. If your "
+    "partner proposed convergence and you disagree with the rationale, do not "
+    "emit the sentinel; explain the gap and ask for another round."
+)
 
 ROLE_PROMPTS = {
     "planner": (
@@ -75,22 +87,21 @@ ROLE_PROMPTS = {
         "documents, reports, comparison matrices, configuration, README "
         "updates, dashboards, etc. What you should NOT do is write production "
         "feature code (that's the coder's job). When you believe the work is "
-        "fully done and reviewed, end your reply with {SENTINEL} on its own "
-        "line."
+        "fully done and reviewed, follow the convergence instructions."
     ),
     "coder": (
         "You are the CODER half of a duet. Read the partner agent's latest "
         "message (typically a plan or critique) and produce code. Apply edits "
         "to disk. Run quick checks where reasonable. Summarise what you "
-        "changed. When you believe the work is fully done, end your reply "
-        "with {SENTINEL} on its own line."
+        "changed. When you believe the work is fully done, follow the "
+        "convergence instructions."
     ),
     "reviewer": (
         "You are the REVIEWER half of a duet. Read the partner agent's "
         "latest message and critically evaluate it: bugs, missing tests, "
         "security, simpler designs. Be specific and brief. If the work meets "
-        "the task and you have no material issues, end with {SENTINEL} on "
-        "its own line."
+        "the task and you have no material issues, follow the convergence "
+        "instructions."
     ),
     "triage-reviewer": (
         "You are the TRIAGE REVIEWER half of a duet. Read the partner agent's "
@@ -104,9 +115,9 @@ ROLE_PROMPTS = {
         "follow-up, future refactor, or scope creep. Be specific and brief. "
         "If the coder reasonably argues a finding is over-scored, either "
         "accept the lower score or explain why the higher score still applies. "
-        "Emit {SENTINEL} only when no unfixed [P0] or [P1] findings remain. "
+        "Emit convergence only when no unfixed [P0] or [P1] findings remain. "
         "When only [P2]/[P3] items remain, move them to a Follow-ups section "
-        "and end with {SENTINEL} on its own line."
+        "and follow the convergence instructions."
     ),
 }
 
@@ -194,6 +205,7 @@ class Agent:
         # parse those as format fields and crash with "unexpected '{' in
         # field name". replace handles them as plain text.
         prompt = tmpl.replace("{SENTINEL}", sentinel)
+        prompt += "\n\n" + CONVERGENCE_INSTRUCTION.replace("{SENTINEL}", sentinel)
         if recap:
             prompt += "\n\n" + RECAP_ADDENDUM
         return prompt
@@ -562,7 +574,12 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         new_sid = agent.session_id or f"dry-claude-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
         rn = f" reasoning={reasoning}" if reasoning else ""
-        return f"[dry-run claude/{agent.name}{wt_note}{rn}] received {len(message)} chars\n{DEFAULT_SENTINEL}", new_sid
+        return (
+            f"[dry-run claude/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            "LGTM rationale: dry-run accepted the harness path and has no real "
+            "agent output to review.\n"
+            f"{DEFAULT_SENTINEL}"
+        ), new_sid
     cmd = ["claude", "-p", message,
            "--output-format", "json",
            "--append-system-prompt", system_prompt,
@@ -603,7 +620,12 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         new_sid = agent.session_id or f"dry-codex-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
         rn = f" reasoning={reasoning}" if reasoning else ""
-        return f"[dry-run codex/{agent.name}{wt_note}{rn}] received {len(message)} chars\n{DEFAULT_SENTINEL}", new_sid
+        return (
+            f"[dry-run codex/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            "LGTM rationale: dry-run accepted the harness path and has no real "
+            "agent output to review.\n"
+            f"{DEFAULT_SENTINEL}"
+        ), new_sid
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
     reasoning_args: list[str] = []
     if reasoning:
@@ -706,11 +728,21 @@ def _install_sigint(stop: StopFlag) -> None:
     signal.signal(signal.SIGINT, handler)
 
 
-def converged(text: str, sentinel: str) -> bool:
+def _convergence_markers(text: str, sentinel: str) -> tuple[bool, bool]:
+    """Return (sentinel_seen, rationale_seen), ignoring fenced code blocks."""
     sentinel_re = re.compile(rf"^\s*{re.escape(sentinel)}\s*$")
+    rationale_re = re.compile(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?(?:LGTM\s+rationale|Rationale)"
+        r"(?:\*\*)?\s*:\s*(.*)$",
+        re.IGNORECASE,
+    )
     in_fence = False
     fence_char = ""
     fence_len = 0
+    sentinel_seen = False
+    rationale_parts: list[str] = []
+    collecting_rationale = False
+
     for line in text.splitlines():
         m = re.match(r"^\s*(`{3,}|~{3,})", line)
         if m:
@@ -724,9 +756,38 @@ def converged(text: str, sentinel: str) -> bool:
                 fence_char = ""
                 fence_len = 0
             continue
-        if not in_fence and sentinel_re.match(line):
-            return True
-    return False
+        if in_fence:
+            continue
+        if sentinel_re.match(line):
+            sentinel_seen = True
+            collecting_rationale = False
+            continue
+        if sentinel_seen:
+            continue
+        rationale_match = rationale_re.match(line)
+        if rationale_match:
+            collecting_rationale = True
+            rationale_parts.append(rationale_match.group(1).strip())
+            continue
+        if collecting_rationale:
+            stripped = line.strip()
+            if stripped:
+                rationale_parts.append(stripped)
+
+    rationale_text = " ".join(part for part in rationale_parts if part)
+    rationale_text = re.sub(r"\s+", " ", rationale_text).strip()
+    rationale_seen = len(rationale_text) >= CONVERGENCE_RATIONALE_MIN_CHARS
+    return sentinel_seen, rationale_seen
+
+
+def convergence_proposed(text: str, sentinel: str) -> bool:
+    sentinel_seen, rationale_seen = _convergence_markers(text, sentinel)
+    return sentinel_seen and rationale_seen
+
+
+def converged(text: str, sentinel: str) -> bool:
+    """Backward-compatible name for a single reply's convergence proposal."""
+    return convergence_proposed(text, sentinel)
 
 
 def parse_recap_headers(text: str) -> dict[str, Optional[str]]:
@@ -814,17 +875,20 @@ def format_recap_block(turn_no: int, agent_name: str, role: str,
                        parsed: dict[str, Optional[str]],
                        fallbacks: dict[str, str],
                        sentinel_hit: bool) -> str:
+    if not sentinel_hit and parsed.get("status") == "converged":
+        parsed = dict(parsed)
+        parsed["status"] = None
     recap = _recap_field(parsed, fallbacks, "recap")
     files = _recap_field(parsed, fallbacks, "files")
     status = _recap_field(parsed, fallbacks, "status")
-    sentinel_label = "yes" if sentinel_hit else "no"
+    convergence_label = "yes" if sentinel_hit else "no"
     return (
         f"## Turn {turn_no:02d} | {agent_name} ({role}) · "
         f"{int(round(elapsed_s))}s · {_format_byte_size(byte_size)} · "
         f"{line_count} lines\n\n"
         f"RECAP:  {recap}\n"
         f"FILES:  {files}\n"
-        f"STATUS: {status} · sentinel: {sentinel_label}\n\n"
+        f"STATUS: {status} · convergence: {convergence_label}\n\n"
     )
 
 
@@ -1055,6 +1119,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     # Partner (agent[1]) speaks first in the loop, replying to the seed.
     speaker_idx = 1
     finished_reason = "max_turns"
+    previous_convergence_proposal = False
 
     for turn in range(1, cfg.max_turns + 1):
         if stop.requested:
@@ -1091,7 +1156,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         seen_first_turn[speaker.name] = True
         elapsed = time.time() - t0
         raw_reply = reply
-        sentinel_hit = converged(raw_reply, cfg.sentinel)
+        convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
 
         if cfg.recap:
             parsed = parse_recap_headers(raw_reply)
@@ -1099,13 +1164,13 @@ def run_duet(cfg: DuetConfig) -> dict:
             fallbacks = {
                 "recap": _derive_recap_heuristic(raw_reply),
                 "files": ", ".join(files) if files else "none",
-                "status": derive_status_heuristic(speaker.role, sentinel_hit),
+                "status": derive_status_heuristic(speaker.role, convergence_hit),
             }
             recap_block = format_recap_block(
                 turn, speaker.name, speaker.role, elapsed,
                 len(raw_reply.encode("utf-8")),
                 raw_reply.count("\n") + 1,
-                parsed, fallbacks, sentinel_hit,
+                parsed, fallbacks, convergence_hit,
             )
             append_text_atomic(recap_path, recap_block)
 
@@ -1135,7 +1200,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         else:
             print(reply)
 
-        if converged(reply, cfg.sentinel):
+        if convergence_hit and previous_convergence_proposal:
             finished_reason = "converged"
             break
         if stop.requested:
@@ -1143,6 +1208,7 @@ def run_duet(cfg: DuetConfig) -> dict:
             break
 
         last_msg = reply
+        previous_convergence_proposal = convergence_hit
         speaker_idx = 1 - speaker_idx
     else:
         finished_reason = "max_turns"
@@ -1226,7 +1292,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             _stop_recap_inflight(*inflight)
         elapsed = time.time() - t0
         seen_first_turn[next_speaker.name] = True
-        sentinel_hit = converged(reply, cfg.sentinel)
+        convergence_hit = convergence_proposed(reply, cfg.sentinel)
         recap_block = ""
         if cfg.recap:
             parsed = parse_recap_headers(reply)
@@ -1234,12 +1300,12 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             fallbacks = {
                 "recap": _derive_recap_heuristic(reply),
                 "files": ", ".join(files) if files else "none",
-                "status": derive_status_heuristic(next_speaker.role, sentinel_hit),
+                "status": derive_status_heuristic(next_speaker.role, convergence_hit),
             }
             recap_block = format_recap_block(
                 forced_turn, next_speaker.name, next_speaker.role, elapsed,
                 len(reply.encode("utf-8")), reply.count("\n") + 1,
-                parsed, fallbacks, sentinel_hit,
+                parsed, fallbacks, convergence_hit,
             )
             append_text_atomic(transcript_path.parent / "recap.md", recap_block)
         append_text_atomic(
@@ -1255,7 +1321,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             print(reply)
         speaker_idx = 1 - speaker_idx
         reason = "forced_continuation"
-        if sentinel_hit:
+        if convergence_hit:
             return "converged_after_force"
 
 # ---------- config / cli parsing ----------
@@ -1786,7 +1852,9 @@ def main() -> int:
                     help="lead agent spec, e.g. claude:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--cwd", default=".", help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
-    ap.add_argument("--sentinel", default=DEFAULT_SENTINEL, help="convergence sentinel")
+    ap.add_argument("--sentinel", default=DEFAULT_SENTINEL,
+                    help="convergence sentinel; requires an LGTM rationale and "
+                         "back-to-back proposals from both agents")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-turn timeout seconds")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",

@@ -130,7 +130,7 @@ What this does:
 1. Runs the `gh` command with cwd = the target project. The issue body + comments JSON becomes the kickoff text handed to codex.
 2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy.
 3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
-4. claude (lead, planner role) sees the auto-appended diff each turn and either flags issues or emits `<<<LGTM>>>` to converge.
+4. claude (lead, planner role) sees the auto-appended diff each turn and either flags issues or accepts Codex's convergence rationale with its own `LGTM rationale:` plus `<<<LGTM>>>`.
 5. Worktree is left intact at end. Merge / drop instructions printed on exit.
 
 To monitor from another terminal: `duet --status <cwd>/.duet/runs/<id>/`.
@@ -205,7 +205,7 @@ EOF
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs; YAML configs for self-review / repo-compare set their own higher cap) |
-| `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`) |
+| `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |
 | `--permission-mode` | claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
@@ -260,7 +260,7 @@ When the turn finishes, that line is replaced with the turn summary:
 Turn 01 | codex-partner (coder) · 18s · 2.1KB · 87 lines
 RECAP:  Proposed sidecar recap.md with per-turn metadata.
 FILES:  duet.py, docs/USAGE.md, README.md, scripts/smoke.sh
-STATUS: ready-for-review · sentinel: no
+STATUS: ready-for-review · convergence: no
 ```
 
 duet also writes `recap.md` next to `transcript.md`. The sidecar starts with the run dir, mode, and transcript path, then appends one Markdown block per turn. The full agent prose remains in `transcript.md`; `recap.md` is for humans only and is never fed back into agent prompts. Recap runs record `recap_path` in `state.json`, and `duet --status <run>` prints the recap path whenever `recap.md` is present.
@@ -348,7 +348,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 | trigger | result |
 |---|---|
-| sentinel on its own line | `reason=converged` |
+| both agents propose convergence in back-to-back turns | `reason=converged` |
 | `--turns` reached | `reason=max_turns` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
@@ -362,6 +362,12 @@ force>
 ```
 
 Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
+
+Convergence is deliberately a pair decision. A single reply with `<<<LGTM>>>`
+does not stop the loop unless it also has an `LGTM rationale:` / `Rationale:`
+outside fenced code, and the immediately previous agent turn also proposed
+convergence with rationale. This lets one agent propose "I think this is done"
+while the partner can still reject the rationale and ask for another round.
 
 While duet is at the `force>` prompt, `duet --status RUN_DIR` from another terminal returns exit 1 with `state: between turns / awaiting force> prompt`.
 
@@ -454,8 +460,9 @@ duet --list
 
 #### Fastest finalize: let claude commit, push, and open the PR
 
-When the loop converged (`<<<LGTM>>>` emitted), claude already has the full
-diff and the spec in its session context — it reviewed every turn. The
+When the loop converged (both agents accepted with rationale-backed
+`<<<LGTM>>>` turns), claude already has the full diff and the spec in its
+session context — it reviewed every turn. The
 quickest way to land the work is to resume claude interactively and just
 ask:
 
@@ -481,7 +488,7 @@ gh pr create --fill --base main
 ```
 
 Use this shortcut when:
-- The loop converged with `<<<LGTM>>>` (claude approved codex's work).
+- The loop converged with pair-approved, rationale-backed `<<<LGTM>>>` turns.
 - You're fine with claude composing the message + PR description.
 - You'll skim the resulting commit / PR but don't need to micro-stage.
 
