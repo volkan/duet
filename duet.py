@@ -56,6 +56,16 @@ DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
 
+RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
+
+Begin every reply with three header lines, then a blank line, then your full reply:
+
+  RECAP: <one short sentence describing what you produced this turn>
+  FILES: <comma-separated paths you touched or referenced, or "none">
+  STATUS: <one of: planning | implementing | reviewing | requesting-changes | ready-for-review | converged>
+
+The headers DO NOT replace your reply — write your normal answer as usual after the blank line. Use STATUS: converged only when you would also emit the convergence sentinel."""
+
 ROLE_PROMPTS = {
     "planner": (
         "You are the PLANNER half of a duet. Read the partner agent's latest "
@@ -174,7 +184,7 @@ class Agent:
     cwd_override: Optional[pathlib.Path] = None  # set when this agent runs in a git worktree
     reasoning_effort: Optional[str] = None  # one of REASONING_LEVELS; overrides cfg.reasoning
 
-    def system_prompt(self, sentinel: str) -> str:
+    def system_prompt(self, sentinel: str, recap: bool = False) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
         if tmpl is None:
             raise SystemExit(f"unknown role '{self.role}' for agent '{self.name}' — "
@@ -183,7 +193,10 @@ class Agent:
         # `{...}` (JSON schema, code samples, jq patterns). format() would
         # parse those as format fields and crash with "unexpected '{' in
         # field name". replace handles them as plain text.
-        return tmpl.replace("{SENTINEL}", sentinel)
+        prompt = tmpl.replace("{SENTINEL}", sentinel)
+        if recap:
+            prompt += "\n\n" + RECAP_ADDENDUM
+        return prompt
 
 
 @dataclasses.dataclass
@@ -199,6 +212,7 @@ class DuetConfig:
     sandbox: str = "workspace-write"          # codex
     permission_mode: str = "acceptEdits"      # claude
     dry_run: bool = False
+    recap: bool = False
     worktree: bool = False                    # run partner in a throwaway git worktree
     worktree_for: str = "partner"             # "partner" (idx 1) or "lead" (idx 0)
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
@@ -356,6 +370,7 @@ def append_text_atomic(path: pathlib.Path, text: str) -> None:
 LIVE_STREAM = True
 LIVE_PREFIX = "  │ "  # box-drawing prefix on every streamed line
 LIVE_PREFIX_TASK = "  $ "
+RECAP_MODE = False
 
 
 def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
@@ -440,7 +455,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     vs "agent crashed silently". Critical for agents like `claude -p` that
     emit no stderr during their long API call.
     """
-    mirror = sys.stderr if (LIVE_STREAM and sys.stderr.isatty()) else None
+    mirror = sys.stderr if (LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty()) else None
     out_chunks: list[str] = []
     err_chunks: list[str] = []
     stderr_file = None
@@ -637,7 +652,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
 def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool,
                *, run_dir: Optional[pathlib.Path] = None,
                turn_label: Optional[str] = None) -> str:
-    sys_prompt = agent.system_prompt(cfg.sentinel)
+    sys_prompt = agent.system_prompt(cfg.sentinel, recap=cfg.recap)
     reasoning = effective_reasoning(agent, cfg.reasoning)
     # Per-turn stderr log + pid file land in the run dir for forensics +
     # liveness checks, sortable by turn number. The pid file is the only
@@ -714,6 +729,141 @@ def converged(text: str, sentinel: str) -> bool:
     return False
 
 
+def parse_recap_headers(text: str) -> dict[str, Optional[str]]:
+    """Parse agent-emitted recap headers from the top of a reply."""
+    parsed: dict[str, Optional[str]] = {"recap": None, "files": None, "status": None}
+    status_values = {
+        "planning", "implementing", "reviewing", "requesting-changes",
+        "ready-for-review", "converged",
+    }
+    for line in text.splitlines()[:10]:
+        m = re.match(r"^(RECAP|FILES|STATUS):\s*(.*)$", line)
+        if not m:
+            continue
+        key = m.group(1).lower()
+        value = m.group(2).strip()
+        if key == "status" and value not in status_values:
+            value = ""
+        parsed[key] = value or None
+    return parsed
+
+
+_FILE_PATH_RE = re.compile(
+    r"\b[\w./-]+\.(?:py|md|sh|ts|tsx|js|jsx|json|yaml|yml|toml|html|css|rs|go|java|sql|txt)\b"
+)
+
+
+def extract_files_heuristic(text: str) -> list[str]:
+    """Find plausible file paths in a reply, preserving first-seen order."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> None:
+        if path in seen or len(found) >= 8:
+            return
+        seen.add(path)
+        found.append(path)
+
+    for code in re.findall(r"`([^`\n]+)`", text):
+        for m in _FILE_PATH_RE.finditer(code):
+            add(m.group(0))
+    for m in _FILE_PATH_RE.finditer(text):
+        add(m.group(0))
+    return found
+
+
+def derive_status_heuristic(role: str, sentinel_hit: bool) -> str:
+    if sentinel_hit:
+        return "converged"
+    if role == "planner":
+        return "planning"
+    if role == "coder":
+        return "implementing"
+    if role in {"reviewer", "triage-reviewer"}:
+        return "reviewing"
+    return "unknown"
+
+
+def _derive_recap_heuristic(text: str) -> str:
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or re.match(r"^(RECAP|FILES|STATUS):", s):
+            continue
+        s = re.sub(r"^\s*[-*#>\d.)]+\s*", "", s).strip()
+        if s:
+            return textwrap.shorten(s, width=140, placeholder="...")
+    return "No concise summary available."
+
+
+def _format_byte_size(byte_size: int) -> str:
+    if byte_size < 1024:
+        return f"{byte_size}B"
+    return f"{byte_size / 1024:.1f}KB"
+
+
+def _recap_field(parsed: dict[str, Optional[str]],
+                 fallbacks: dict[str, str], key: str) -> str:
+    value = parsed.get(key)
+    if value:
+        return value
+    return f"· {fallbacks.get(key, 'unknown')}"
+
+
+def format_recap_block(turn_no: int, agent_name: str, role: str,
+                       elapsed_s: float, byte_size: int, line_count: int,
+                       parsed: dict[str, Optional[str]],
+                       fallbacks: dict[str, str],
+                       sentinel_hit: bool) -> str:
+    recap = _recap_field(parsed, fallbacks, "recap")
+    files = _recap_field(parsed, fallbacks, "files")
+    status = _recap_field(parsed, fallbacks, "status")
+    sentinel_label = "yes" if sentinel_hit else "no"
+    return (
+        f"## Turn {turn_no:02d} | {agent_name} ({role}) · "
+        f"{int(round(elapsed_s))}s · {_format_byte_size(byte_size)} · "
+        f"{line_count} lines\n\n"
+        f"RECAP:  {recap}\n"
+        f"FILES:  {files}\n"
+        f"STATUS: {status} · sentinel: {sentinel_label}\n\n"
+    )
+
+
+def _format_live_recap_block(recap_block: str) -> str:
+    lines = recap_block.strip("\n").splitlines()
+    if lines and lines[0].startswith("## "):
+        lines[0] = lines[0][3:]
+    if len(lines) > 1 and lines[1] == "":
+        del lines[1]
+    return "\n".join(lines) + "\n"
+
+
+def _start_recap_inflight(turn_no: int, agent_name: str, role: str,
+                          started_at: float) -> tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def redraw() -> None:
+        while not stop_event.is_set():
+            elapsed = int(time.time() - started_at)
+            sys.stdout.write(
+                f"\rTurn {turn_no:02d} | {agent_name} ({role}) · "
+                f"running [{elapsed // 60:02d}:{elapsed % 60:02d}]\033[K"
+            )
+            sys.stdout.flush()
+            stop_event.wait(1)
+
+    t = threading.Thread(target=redraw, daemon=True)
+    t.start()
+    return stop_event, t
+
+
+def _stop_recap_inflight(stop_event: threading.Event,
+                         thread: threading.Thread) -> None:
+    stop_event.set()
+    thread.join(timeout=2)
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+
+
 def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
     """Figure out the first message to send to the partner agent."""
     if cfg.kickoff:
@@ -738,6 +888,8 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
 
 
 def run_duet(cfg: DuetConfig) -> dict:
+    global RECAP_MODE
+    RECAP_MODE = cfg.recap
     if len(cfg.agents) != 2:
         raise SystemExit(f"duet expects exactly 2 agents, got {len(cfg.agents)}")
 
@@ -772,7 +924,17 @@ def run_duet(cfg: DuetConfig) -> dict:
     # discover this run from any cwd. Best-effort; never fails the run.
     _register_run_in_home_index(run_dir, cfg.cwd)
     transcript_path = run_dir / "transcript.md"
+    recap_path = run_dir / "recap.md"
     state_path = run_dir / "state.json"
+
+    if cfg.recap:
+        append_text_atomic(
+            recap_path,
+            f"# duet recap — {run_dir}\n\n"
+            f"run dir:    {run_dir}\n"
+            f"mode:       recap (live)\n"
+            f"transcript: {transcript_path}\n\n",
+        )
 
     stop = StopFlag()
     _install_sigint(stop)
@@ -787,9 +949,40 @@ def run_duet(cfg: DuetConfig) -> dict:
         transcript += head + text + "\n"
         write_text_atomic(transcript_path, transcript)
 
-    print(f"[duet] run dir: {run_dir}")
+    if cfg.recap:
+        print(f"[duet] run: {run_dir}")
+        print("[duet] mode: recap (live)")
+        print(f"[duet] transcript: {transcript_path}")
+        print(f"[duet] recap:      {recap_path}")
+    else:
+        print(f"[duet] run dir: {run_dir}")
     if cfg.agents[0].session_id:
         print(f"[duet] {cfg.agents[0].name} resumes session {cfg.agents[0].session_id}")
+
+    if cfg.dry_run and cfg.recap:
+        if not (cfg.task or cfg.kickoff or cfg.agents[0].session_id):
+            raise SystemExit("nothing to start the conversation with — supply --task, "
+                             "--kickoff, or --resume-claude <session_id>")
+        write_text_atomic(transcript_path, "")
+        state = {
+            "task": cfg.task,
+            "cwd": str(cfg.cwd),
+            "turns_used": 0,
+            "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
+                        "session_id": a.session_id} for a in cfg.agents],
+            "history": history,
+            "finished_reason": "dry_run",
+            "transcript_path": str(transcript_path),
+            "recap_path": str(recap_path),
+            "worktree": None,
+            "worktree_branch": None,
+            "duet_pid": os.getpid(),
+        }
+        write_text_atomic(state_path, json.dumps(state, indent=2))
+        print("[duet] dry-run: agents not called; no recap turn blocks written.")
+        print(f"[duet] done. reason=dry_run. transcript: {transcript_path}")
+        print(f"[duet] recap: {recap_path}")
+        return state
 
     # ----- worktree setup (optional) -----
     wt_path: Optional[pathlib.Path] = None
@@ -849,6 +1042,8 @@ def run_duet(cfg: DuetConfig) -> dict:
             "worktree_branch": wt_branch,
             "duet_pid": os.getpid(),
         }
+        if cfg.recap:
+            state["recap_path"] = str(recap_path)
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
 
@@ -867,21 +1062,52 @@ def run_duet(cfg: DuetConfig) -> dict:
             break
         speaker = cfg.agents[speaker_idx]
         t0 = time.time()
-        # Print BEFORE the subprocess starts so the terminal user sees
-        # something happen instantly. claude -p emits nothing on stderr
-        # during its API call; without this banner the user thinks duet hung.
-        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
-              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
-        sys.stdout.flush()
+        inflight: Optional[tuple[threading.Event, threading.Thread]] = None
+        if cfg.recap:
+            inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
+        else:
+            # Print BEFORE the subprocess starts so the terminal user sees
+            # something happen instantly. claude -p emits nothing on stderr
+            # during its API call; without this banner the user thinks duet hung.
+            print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
+                  f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
+            sys.stdout.flush()
         try:
             reply = call_agent(speaker, last_msg, cfg,
                                first_turn_for_agent=not seen_first_turn[speaker.name],
                                run_dir=run_dir, turn_label=f"{turn:02d}")
         except Exception as e:
+            if cfg.recap and inflight is not None:
+                _stop_recap_inflight(*inflight)
+                elapsed = time.time() - t0
+                print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
+                      f"ERROR after {int(round(elapsed))}s — "
+                      f"see turn-{turn:02d}-{speaker.name}.stderr.log")
+                raise
             reply = f"[duet] AGENT ERROR: {e}"
             stop.request(f"agent_error: {e}")
+        if cfg.recap and inflight is not None:
+            _stop_recap_inflight(*inflight)
         seen_first_turn[speaker.name] = True
         elapsed = time.time() - t0
+        raw_reply = reply
+        sentinel_hit = converged(raw_reply, cfg.sentinel)
+
+        if cfg.recap:
+            parsed = parse_recap_headers(raw_reply)
+            files = extract_files_heuristic(raw_reply)
+            fallbacks = {
+                "recap": _derive_recap_heuristic(raw_reply),
+                "files": ", ".join(files) if files else "none",
+                "status": derive_status_heuristic(speaker.role, sentinel_hit),
+            }
+            recap_block = format_recap_block(
+                turn, speaker.name, speaker.role, elapsed,
+                len(raw_reply.encode("utf-8")),
+                raw_reply.count("\n") + 1,
+                parsed, fallbacks, sentinel_hit,
+            )
+            append_text_atomic(recap_path, recap_block)
 
         # If this speaker is the worktree agent, capture the diff and append it to its reply.
         if wt_path is not None and speaker.cwd_override == wt_path:
@@ -894,14 +1120,20 @@ def run_duet(cfg: DuetConfig) -> dict:
         log(speaker.name, speaker.role, reply)
         history.append({"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                         "len_chars": len(reply), "session_id": speaker.session_id})
-        write_text_atomic(state_path, json.dumps({
+        turn_state = {
             "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
             "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
                         "session_id": a.session_id} for a in cfg.agents],
             "history": history, "finished_reason": None,
             "duet_pid": os.getpid(),
-        }, indent=2))
-        print(reply)
+        }
+        if cfg.recap:
+            turn_state["recap_path"] = str(recap_path)
+        write_text_atomic(state_path, json.dumps(turn_state, indent=2))
+        if cfg.recap:
+            print(_format_live_recap_block(recap_block), end="")
+        else:
+            print(reply)
 
         if converged(reply, cfg.sentinel):
             finished_reason = "converged"
@@ -929,10 +1161,14 @@ def run_duet(cfg: DuetConfig) -> dict:
         "transcript_path": str(transcript_path),
         "duet_pid": os.getpid(),
     }
+    if cfg.recap:
+        state["recap_path"] = str(recap_path)
     state["worktree"] = str(wt_path) if wt_path else None
     state["worktree_branch"] = wt_branch
     write_text_atomic(state_path, json.dumps(state, indent=2))
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
+    if cfg.recap:
+        print(f"[duet] recap: {recap_path}")
     print(f"[duet] resumable session ids — "
           + ", ".join(f"{a.name}={a.session_id}" for a in cfg.agents if a.session_id))
     if wt_path:
@@ -966,14 +1202,46 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         append_text_atomic(transcript_path, head + line + "\n")
         last_msg = line
         forced_turn = len(history) + 1
+        t0 = time.time()
+        inflight: Optional[tuple[threading.Event, threading.Thread]] = None
+        if cfg.recap:
+            inflight = _start_recap_inflight(forced_turn, next_speaker.name,
+                                             next_speaker.role, t0)
         try:
             reply = call_agent(next_speaker, last_msg, cfg,
                                first_turn_for_agent=not seen_first_turn[next_speaker.name],
                                run_dir=transcript_path.parent,
                                turn_label=f"{forced_turn:02d}-forced")
         except Exception as e:
+            if cfg.recap and inflight is not None:
+                _stop_recap_inflight(*inflight)
+                elapsed = time.time() - t0
+                print(f"Turn {forced_turn:02d} | {next_speaker.name} "
+                      f"({next_speaker.role}) · ERROR after "
+                      f"{int(round(elapsed))}s — see "
+                      f"turn-{forced_turn:02d}-forced-{next_speaker.name}.stderr.log")
+                raise
             reply = f"[duet] AGENT ERROR: {e}"
+        if cfg.recap and inflight is not None:
+            _stop_recap_inflight(*inflight)
+        elapsed = time.time() - t0
         seen_first_turn[next_speaker.name] = True
+        sentinel_hit = converged(reply, cfg.sentinel)
+        recap_block = ""
+        if cfg.recap:
+            parsed = parse_recap_headers(reply)
+            files = extract_files_heuristic(reply)
+            fallbacks = {
+                "recap": _derive_recap_heuristic(reply),
+                "files": ", ".join(files) if files else "none",
+                "status": derive_status_heuristic(next_speaker.role, sentinel_hit),
+            }
+            recap_block = format_recap_block(
+                forced_turn, next_speaker.name, next_speaker.role, elapsed,
+                len(reply.encode("utf-8")), reply.count("\n") + 1,
+                parsed, fallbacks, sentinel_hit,
+            )
+            append_text_atomic(transcript_path.parent / "recap.md", recap_block)
         append_text_atomic(
             transcript_path,
             f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
@@ -981,10 +1249,13 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         history.append({"turn": len(history) + 1, "agent": next_speaker.name,
                         "forced": True, "len_chars": len(reply),
                         "session_id": next_speaker.session_id})
-        print(reply)
+        if cfg.recap:
+            print(_format_live_recap_block(recap_block), end="")
+        else:
+            print(reply)
         speaker_idx = 1 - speaker_idx
         reason = "forced_continuation"
-        if converged(reply, cfg.sentinel):
+        if sentinel_hit:
             return "converged_after_force"
 
 # ---------- config / cli parsing ----------
@@ -1223,9 +1494,15 @@ def print_run_status(arg: str) -> int:
             print(f"[duet] state.json malformed: {e}", file=sys.stderr)
             return 3
     finished = state.get("finished_reason")
+    transcript_display = state.get("transcript_path", run_dir / "transcript.md")
+    recap_display = state.get("recap_path")
+    if recap_display is None and (run_dir / "recap.md").exists():
+        recap_display = run_dir / "recap.md"
     print(f"[duet] {run_dir}")
     print(f"  turns_used:      {state.get('turns_used', '?')}")
     print(f"  finished_reason: {finished!r}")
+    if recap_display is not None:
+        print(f"  recap:           {recap_display}")
 
     # Find the in-flight turn via .pid file (only present while a turn runs).
     pid_files = sorted(run_dir.glob("turn-*.pid"))
@@ -1259,7 +1536,7 @@ def print_run_status(arg: str) -> int:
     # No pid files. Either run hasn't started, has finished, or is between
     # turns (in particular, sitting at the post-loop `force>` prompt).
     if finished:
-        print(f"  done. transcript: {state.get('transcript_path', run_dir / 'transcript.md')}")
+        print(f"  done. transcript: {transcript_display}")
         return 0
 
     # Disambiguate "between turns" from "actually crashed" using the
@@ -1561,6 +1838,9 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
                          "By default, duet prints Codex's live progress as it works.")
+    ap.add_argument("--recap", action="store_true",
+                    help="compact per-turn debug view; suppresses live stderr mirror "
+                         "and writes recap.md next to transcript.md")
     ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
     args = ap.parse_args()
 
@@ -1617,6 +1897,7 @@ def main() -> int:
             sandbox=raw.get("sandbox", "workspace-write"),
             permission_mode=raw.get("permission_mode", "acceptEdits"),
             dry_run=bool(raw.get("dry_run", False)),
+            recap=bool(raw.get("recap", False)) or args.recap,
             worktree=bool(raw.get("worktree", False)) or args.worktree,
             worktree_for=raw.get("worktree_for", args.worktree_for),
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
@@ -1672,6 +1953,7 @@ def main() -> int:
             sandbox=args.sandbox,
             permission_mode=args.permission_mode,
             dry_run=args.dry_run,
+            recap=args.recap,
             worktree=args.worktree,
             worktree_for=args.worktree_for,
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()

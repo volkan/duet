@@ -220,6 +220,7 @@ EOF
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
+| `--recap` | compact per-turn debug view; suppresses the live `│`-mirror and writes `recap.md` next to `transcript.md` |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
 
 ---
@@ -232,8 +233,10 @@ Each run produces:
 runs/                                       # or <cwd>/.duet/runs/ for foreign --cwd
   20260506-194122/
     transcript.md                            # full conversation, human-readable
+    recap.md                                 # compact per-turn debug view, if --recap
     state.json                               # task, agents, session_ids, history,
-                                             # finished_reason, duet_pid
+                                             # finished_reason, duet_pid,
+                                             # recap_path if --recap
     turn-01-codex-coder.stderr.log           # live stderr from each agent invocation
     turn-01-codex-coder.pid                  # PID file (only present while the turn runs)
     turn-02-claude-reviewer.stderr.log
@@ -242,6 +245,37 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
 ```
 
 The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn.
+
+### Recap view
+
+`--recap` replaces the verbose live `│` stderr mirror with one compact block per completed turn. While a turn is running, duet redraws a single line like:
+
+```text
+Turn 01 | codex-partner (coder) · running [00:14]
+```
+
+When the turn finishes, that line is replaced with the turn summary:
+
+```text
+Turn 01 | codex-partner (coder) · 18s · 2.1KB · 87 lines
+RECAP:  Proposed sidecar recap.md with per-turn metadata.
+FILES:  duet.py, docs/USAGE.md, README.md, scripts/smoke.sh
+STATUS: ready-for-review · sentinel: no
+```
+
+duet also writes `recap.md` next to `transcript.md`. The sidecar starts with the run dir, mode, and transcript path, then appends one Markdown block per turn. The full agent prose remains in `transcript.md`; `recap.md` is for humans only and is never fed back into agent prompts. Recap runs record `recap_path` in `state.json`, and `duet --status <run>` prints the recap path whenever `recap.md` is present.
+
+In recap mode, duet asks each agent to begin every reply with:
+
+```text
+RECAP: <one short sentence describing what you produced this turn>
+FILES: <comma-separated paths you touched or referenced, or "none">
+STATUS: <one of: planning | implementing | reviewing | requesting-changes | ready-for-review | converged>
+```
+
+If an agent omits or mangles a header, duet derives a fallback from the reply. Fallback values are prefixed with `·` in `recap.md`, so `FILES: · duet.py` means duet inferred the file path instead of reading an agent-emitted `FILES:` header. Use `recap.md` to scan what each turn produced, `transcript.md` to read the full conversation, and `turn-*.stderr.log` to inspect the underlying CLI progress stream.
+
+`--dry-run --recap` validates the flag path, prints the recap banner, initializes `transcript.md` / `recap.md`, and exits without synthetic turn blocks.
 
 `state.json` includes both agents' final session ids so you can re-run later:
 
@@ -262,6 +296,7 @@ $ duet --status 20260506-194122
 [duet] /Users/.../runs/20260506-194122
   turns_used:      3
   finished_reason: None
+  recap:           /Users/.../runs/20260506-194122/recap.md
   in-flight turn:  turn-04-claude-planner
     pid:           44967  (alive: True)
     started:       2026-05-07T08:40:43  (171s ago)
@@ -401,6 +436,9 @@ When duet exits — converged, max-turns, force-stopped, or you Ctrl-C'd — the
 ```bash
 # Health summary (works on a bare run id from anywhere on PATH)
 duet --status 20260507-191155
+
+# Compact turn-by-turn recap, when the run used --recap
+less <runs_dir>/20260507-191155/recap.md
 
 # Full transcript: every agent turn, the kickoff seed, the auto-appended diffs
 less <runs_dir>/20260507-191155/transcript.md

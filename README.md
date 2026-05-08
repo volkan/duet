@@ -103,12 +103,19 @@ Gate convergence on P0/P1 review findings:
 ./duet.py --task "Fix the issue" --lead claude:triage-reviewer --partner codex:coder --cwd ~/workspace/project
 ```
 
+Compact live debug view — see only what each turn produced, in real time:
+
+```bash
+./duet.py --recap --task "Fix the issue" --cwd ~/workspace/project
+```
+
 ## Output
 
 Every run writes a directory containing:
 
 - `transcript.md` - the full conversation.
-- `state.json` - run state, agent roles, session ids, and finish reason.
+- `recap.md` - compact per-turn debug view when `--recap` is enabled; `--status` shows this path when present.
+- `state.json` - run state, agent roles, session ids, finish reason, and `recap_path` for recap runs.
 - `turn-*.stderr.log` - live stderr from each agent invocation.
 - `turn-*.pid` - present only while a turn is running.
 - `wt/` - the git worktree, when `--worktree` is enabled.

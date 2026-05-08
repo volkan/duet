@@ -21,6 +21,20 @@ expect() {  # name, want_rc, cmd...
   else FAIL=$((FAIL+1)); echo "FAIL $name (rc=$rc want=$want)"; sed 's/^/    /' "$err"; fi
   rm -f "$out" "$err"
 }
+expect_stdout() {  # name, want_rc, grep_pattern, cmd...
+  local name=$1 want=$2 pattern=$3; shift 3
+  local out err rc
+  err=$(mktemp); out=$(mktemp)
+  if "$@" >"$out" 2>"$err"; then rc=0; else rc=$?; fi
+  if [[ $rc -eq $want ]] && grep -q -- "$pattern" "$out"; then
+    PASS=$((PASS+1)); echo "ok   $name"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL $name (rc=$rc want=$want, pattern=$pattern)"
+    sed 's/^/    stdout: /' "$out"
+    sed 's/^/    stderr: /' "$err"
+  fi
+  rm -f "$out" "$err"
+}
 
 # C1 - task input variants
 printf "fix typo\n" > "$TMPD/stdin-task.txt"
@@ -30,6 +44,17 @@ expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --d
 expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
+RECAP_RUNS="$TMPD/recap-runs"
+expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
+RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$RECAP_RUN" ]]; then
+  expect_stdout "recap status prints path"   0 "recap:" "$DUET" --status "$RECAP_RUN"
+  grep -q '"recap_path"' "$RECAP_RUN/state.json" \
+      || { echo "FAIL: recap_path missing from recap state.json"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: recap dry-run dir not created"; FAIL=$((FAIL+1))
+fi
+expect_stdout "recap dry-run prints mode"    0 "mode: recap" "$DUET" --dry-run --recap --task "x" --cwd "$TMPD"
 expect "triage-reviewer role"                0 "$DUET" --task "x" --dry-run --cwd "$TMPD" --lead claude:triage-reviewer --partner codex:coder
 echo "kickoff from file" > "$TMPD/k.txt"
 expect "kickoff @file"                       0 "$DUET" --kickoff @"$TMPD/k.txt" --dry-run --cwd "$TMPD"

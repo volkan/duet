@@ -9,6 +9,7 @@ runs_dir: runs
 sandbox: workspace-write
 permission_mode: acceptEdits
 dry_run: false
+# recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
 # Optional: where new git worktrees land when --worktree is on. Default is
 # <runs_dir>/<run_id>/wt/, which is durable across reboots and OS temp-dir
