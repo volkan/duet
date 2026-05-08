@@ -236,6 +236,13 @@ class DuetConfig:
                                                   # (e.g. ../DECISION.md). Without these claude
                                                   # silently refuses paths outside cwd.
     reasoning: Optional[str] = None           # default reasoning effort for both agents
+    codex_fast: bool = False                  # Codex-only "fast mode": pin reasoning to
+                                              # minimal and add `model_reasoning_summary=concise`
+                                              # for every codex turn this run, regardless of
+                                              # cfg.reasoning / agent.reasoning_effort. Claude's
+                                              # effort is untouched, so `--reasoning high
+                                              # --codex-fast` keeps the planner deep and the
+                                              # coder snappy.
 
 
 # ---------- active child process tracking ----------
@@ -693,28 +700,38 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
 def call_codex(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, sandbox: str, timeout: int, dry: bool,
                first_turn: bool, reasoning: Optional[str] = None,
+               fast: bool = False,
                stderr_log_path: Optional[pathlib.Path] = None,
                pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id). Codex resume tracking uses --last."""
     eff_cwd = agent.cwd_override or cwd
+    # Fast mode pins this Codex turn to minimal reasoning regardless of caller
+    # intent. Documented as Codex-only — it never affects Claude turns.
+    effective = "minimal" if fast else reasoning
     if dry:
         new_sid = agent.session_id or f"dry-codex-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
-        rn = f" reasoning={reasoning}" if reasoning else ""
+        rn = f" reasoning={effective}" if effective else ""
+        fast_note = " fast" if fast else ""
         return (
-            f"[dry-run codex/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            f"[dry-run codex/{agent.name}{fast_note}{wt_note}{rn}] received {len(message)} chars\n"
             "LGTM rationale: dry-run accepted the harness path and has no real "
             "agent output to review.\n"
             f"{DEFAULT_SENTINEL}"
         ), new_sid
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
     reasoning_args: list[str] = []
-    if reasoning:
-        codex_value = CODEX_REASONING_MAP.get(reasoning, reasoning)
+    if effective:
+        codex_value = CODEX_REASONING_MAP.get(effective, effective)
         # `medium` is Codex's default; only override when we actually want a
         # different effort level.
         if codex_value != "medium":
             reasoning_args = ["-c", f"model_reasoning_effort={codex_value}"]
+    if fast:
+        # Concise reasoning summaries cut output volume and time-to-first-token
+        # on Codex turns. Pairs with minimal effort above; together they're the
+        # "trade depth for latency" knob.
+        reasoning_args += ["-c", "model_reasoning_summary=concise"]
     # Codex's `exec` parses options BEFORE the positional prompt in modern
     # builds, and some flags (e.g. --ask-for-approval) have come and gone
     # across versions. We keep the default flag set conservative.
@@ -780,6 +797,7 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
                                    cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
                                    first_turn=first_turn_for_agent,
                                    reasoning=reasoning,
+                                   fast=cfg.codex_fast,
                                    stderr_log_path=log_path,
                                    pid_file_path=pid_path)
         agent.session_id = new_sid
@@ -1973,6 +1991,14 @@ def main() -> int:
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
                          "(minimal → low) and adds high/max prompt nudges.")
+    ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
+                    help="Codex-only fast mode: pin every codex turn to "
+                         "`model_reasoning_effort=minimal` and "
+                         "`model_reasoning_summary=concise`, regardless of "
+                         "--reasoning / per-agent reasoning_effort. Trades "
+                         "depth for latency on codex turns; claude is "
+                         "unaffected, so `--reasoning high --codex-fast` is "
+                         "a real and useful combo. YAML key: `codex_fast: true`.")
     ap.add_argument("--status", metavar="RUN_DIR_OR_ID", default=None,
                     help="don't run a duet — instead print a one-shot health "
                          "summary of an existing run and exit. Accepts a path "
@@ -2067,6 +2093,7 @@ def main() -> int:
                 for d in (args.add_dirs or raw.get("add_dirs", []))
             ],
             reasoning=args.reasoning or raw.get("reasoning"),
+            codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
         )
         # CLI overrides for resume
         if args.resume_claude and cfg.agents and cfg.agents[0].backend == "claude":
@@ -2116,6 +2143,7 @@ def main() -> int:
                            if args.worktree_root else None),
             add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
             reasoning=args.reasoning,
+            codex_fast=bool(args.codex_fast),
         )
 
     validate_reasoning(cfg.reasoning, "config reasoning")

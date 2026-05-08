@@ -113,6 +113,12 @@ Compact live debug view — see only what each turn produced, in real time:
 ./duet.py --recap --task "Fix the issue" --cwd ~/workspace/project
 ```
 
+Plan deep, code fast — claude reasons hard, codex applies edits at minimum effort:
+
+```bash
+./duet.py --reasoning high --codex-fast --task "Fix the issue" --cwd ~/workspace/project
+```
+
 ## Output
 
 Every run writes a directory containing:

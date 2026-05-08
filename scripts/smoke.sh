@@ -109,6 +109,16 @@ PY
 expect_stdout "one proposal not enough"      0 "reason=max_turns" "$DUET" --dry-run --turns 1 --task "x" --cwd "$TMPD"
 expect_stdout "two proposals converge"       0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD"
 
+# Codex fast mode: tag must show in dry-run codex output, and reasoning
+# must be pinned to `minimal` even when --reasoning says otherwise.
+expect_stdout "codex-fast tags dry-run"      0 "fast"               "$DUET" --dry-run --task "x" --cwd "$TMPD" --codex-fast
+expect_stdout "codex-fast pins minimal"      0 "reasoning=minimal"  "$DUET" --dry-run --task "x" --cwd "$TMPD" --reasoning high --codex-fast
+# YAML key path: codex_fast: true should produce the same tag.
+cat > "$TMPD/cfg-fast.json" <<JSON
+{"cwd":"$TMPD","dry_run":true,"task":"x","codex_fast":true,"agents":[{"name":"claude-lead","backend":"claude","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
+JSON
+expect_stdout "codex_fast yaml key"          0 "fast"               "$DUET" --config "$TMPD/cfg-fast.json"
+
 # C2 - foreign-cwd defaults
 expect "foreign cwd creates .duet/runs/"     0 "$DUET" --task "x" --dry-run --cwd "$TMPD"
 [[ -d "$TMPD/.duet/runs" ]] || { echo "FAIL: .duet/runs not created"; FAIL=$((FAIL+1)); }

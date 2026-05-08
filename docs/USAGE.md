@@ -263,6 +263,7 @@ unnecessary ambiguity.
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
+| `--codex-fast` | Codex-only fast mode: pin every codex turn to `model_reasoning_effort=minimal` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Claude turns are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
@@ -449,6 +450,17 @@ The other two sandbox modes:
 - **`danger-full-access`** — filesystem + network unrestricted. Rarely the right choice when `workspace-write + network_access=true` covers the same surface but keeps writes scoped.
 
 Source: [`[sandbox_workspace_write] network_access`](https://github.com/openai/codex) in codex-rs.
+
+### Codex fast mode
+
+`--codex-fast` (CLI) or `codex_fast: true` (YAML) pins **every codex turn** in this run to `model_reasoning_effort=minimal` and adds `model_reasoning_summary=concise`. It overrides `--reasoning` and per-agent `reasoning_effort` for codex agents only — Claude turns keep whatever effort you set.
+
+Use it when:
+
+- You want a cheap/snappy implementation pass and let the Claude planner do the heavy thinking. `--reasoning high --codex-fast` is the canonical combo.
+- You're iterating on a tight feedback loop and don't need codex to deliberate over every change.
+
+Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:reviewer` reading a long diff). Fast mode is a Codex-only knob; setting it without any codex agent in the run is a no-op.
 
 ---
 
