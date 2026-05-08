@@ -16,55 +16,54 @@ Use duet when you want:
 
 ## Quick Start
 
-First example: plan a GitHub issue with Claude, hand the implementation to duet.
+Recommended split: Codex plans and reviews, Claude implements.
 
 ```bash
-# 1. In Claude Code, plan how you'd resolve a GitHub issue. Claude
-#    can fetch the issue itself via its bash tool / `gh` CLI.
 cd ~/code/myrepo
-claude
-> Read GitHub issue 1234 in this repo (`gh issue view 1234` if you
->   haven't already). Make me an implementation plan: which files to
->   touch, edge cases, the test strategy. Don't write code yet.
-> /exit
-# Note the session id from "Resume this session with: claude --resume <uuid>"
 
-# 2. Hand the planning session to duet. Codex implements the plan in a
-#    fresh worktree on `duet/<run_id>`, Claude reviews each turn.
 ./duet.py \
-    --resume-claude 106c1c57-ca42-473f-b2f1-1ea764f78c46 \
-    --partner codex:coder \
-    --worktree --turns 4
+    --recap \
+    --task-from-cmd 'gh issue view 1234 --json number,title,state,body,comments' \
+    --lead claude:coder \
+    --partner codex:planner \
+    --worktree --worktree-for lead \
+    --turns 4
 ```
 
 Use this when you want a planner-led implementation pass on something concrete
-— a bug report, a feature request, a chore. Claude reads the issue and produces
-a plan; duet drives Codex to execute and Claude to review until they converge
-or you stop them.
+— a bug report, a feature request, a chore. Codex reads the issue, shapes the
+plan, and reviews each turn; Claude writes the patch in an isolated worktree
+until both agents converge or you stop them.
 
-Second example: flip the roles so Codex plans/reviews and Claude applies the
-code changes in an isolated worktree. This is the pattern used to add Codex
-fast mode itself:
+For fresh `--task` input, duet sends the first real turn to the partner agent.
+That is why this recipe makes Codex the partner planner and uses
+`--worktree-for lead` to isolate Claude's implementation turns.
+
+For a task you already have in words, pass it directly:
 
 ```bash
 ./duet.py \
     --recap \
     --task "Add Codex fast mode for duet-managed Codex runs, don't miss any doc files" \
-    --lead codex:planner \
-    --partner claude:coder \
-    --worktree --turns 4
+    --lead claude:coder \
+    --partner codex:planner \
+    --worktree --worktree-for lead \
+    --turns 4
 ```
 
-Use this when you want Codex to pressure-test the plan and review the result,
-while Claude writes the patch. `--recap` keeps the live output compact and the
-worktree keeps the host checkout clean until you merge.
+`--recap` keeps the live output compact and the worktree keeps the host
+checkout clean until you merge.
 
 ```bash
 # Run a fresh task in a target project.
-./duet.py --task "Implement fizzbuzz in Go with tests" --cwd ~/code/scratch
+./duet.py --task "Implement fizzbuzz in Go with tests" \
+    --lead claude:coder --partner codex:planner \
+    --cwd ~/code/scratch
 
 # Check what duet would do without calling either agent.
-./duet.py --dry-run --task "Explain this repository" --cwd .
+./duet.py --dry-run --task "Explain this repository" \
+    --lead claude:coder --partner codex:planner \
+    --cwd .
 ```
 
 Install the `duet` command:
@@ -97,13 +96,18 @@ plus your feedback, including any appended worktree diff.
 Pipe another tool into duet:
 
 ```bash
-claude -p /review | ./duet.py --task @- --cwd ~/workspace/project
+claude -p /review | ./duet.py --task @- \
+    --lead claude:coder --partner codex:planner \
+    --cwd ~/workspace/project
 ```
 
 Let duet run the upstream command inside the target project:
 
 ```bash
-./duet.py --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project --worktree
+./duet.py --task-from-cmd 'npm test 2>&1' \
+    --lead claude:coder --partner codex:planner \
+    --cwd ~/workspace/project \
+    --worktree --worktree-for lead
 ```
 
 Use a repeatable config:
@@ -121,13 +125,17 @@ Check an in-progress run from another terminal:
 Gate convergence on P0/P1 review findings:
 
 ```bash
-./duet.py --task "Fix the issue" --lead claude:triage-reviewer --partner codex:coder --cwd ~/workspace/project
+./duet.py --task "Fix the issue" \
+    --lead claude:coder --partner codex:triage-reviewer \
+    --cwd ~/workspace/project
 ```
 
 Compact live debug view — see only what each turn produced, in real time:
 
 ```bash
-./duet.py --recap --task "Fix the issue" --cwd ~/workspace/project
+./duet.py --recap --task "Fix the issue" \
+    --lead claude:coder --partner codex:planner \
+    --cwd ~/workspace/project
 ```
 
 ## Output
