@@ -237,7 +237,7 @@ class DuetConfig:
                                                   # silently refuses paths outside cwd.
     reasoning: Optional[str] = None           # default reasoning effort for both agents
     codex_fast: bool = False                  # Codex-only "fast mode": pin reasoning to
-                                              # minimal and add `model_reasoning_summary=concise`
+                                              # low and add `model_reasoning_summary=concise`
                                               # for every codex turn this run, regardless of
                                               # cfg.reasoning / agent.reasoning_effort. Claude's
                                               # effort is untouched, so `--reasoning high
@@ -705,9 +705,10 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
                pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id). Codex resume tracking uses --last."""
     eff_cwd = agent.cwd_override or cwd
-    # Fast mode pins this Codex turn to minimal reasoning regardless of caller
-    # intent. Documented as Codex-only — it never affects Claude turns.
-    effective = "minimal" if fast else reasoning
+    # Fast mode pins this Codex turn to low reasoning regardless of caller
+    # intent. Codex minimal currently rejects the default tool set, while low
+    # preserves tool compatibility and still trades depth for latency.
+    effective = "low" if fast else reasoning
     if dry:
         new_sid = agent.session_id or f"dry-codex-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
@@ -729,8 +730,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             reasoning_args = ["-c", f"model_reasoning_effort={codex_value}"]
     if fast:
         # Concise reasoning summaries cut output volume and time-to-first-token
-        # on Codex turns. Pairs with minimal effort above; together they're the
-        # "trade depth for latency" knob.
+        # on Codex turns. Pairs with low effort above; together they're the
+        # "trade depth for latency while keeping tools available" knob.
         reasoning_args += ["-c", "model_reasoning_summary=concise"]
     # Codex's `exec` parses options BEFORE the positional prompt in modern
     # builds, and some flags (e.g. --ask-for-approval) have come and gone
@@ -1993,7 +1994,7 @@ def main() -> int:
                          "(minimal → low) and adds high/max prompt nudges.")
     ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
                     help="Codex-only fast mode: pin every codex turn to "
-                         "`model_reasoning_effort=minimal` and "
+                         "`model_reasoning_effort=low` and "
                          "`model_reasoning_summary=concise`, regardless of "
                          "--reasoning / per-agent reasoning_effort. Trades "
                          "depth for latency on codex turns; claude is "

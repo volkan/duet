@@ -42,6 +42,23 @@ Use this when you want a planner-led implementation pass on something concrete
 a plan; duet drives Codex to execute and Claude to review until they converge
 or you stop them.
 
+Second example: flip the roles so Codex plans/reviews and Claude applies the
+code changes in an isolated worktree. This is the pattern used to add Codex
+fast mode itself:
+
+```bash
+./duet.py \
+    --recap \
+    --task "Add Codex fast mode for duet-managed Codex runs, don't miss any doc files" \
+    --lead codex:planner \
+    --partner claude:coder \
+    --worktree --turns 4
+```
+
+Use this when you want Codex to pressure-test the plan and review the result,
+while Claude writes the patch. `--recap` keeps the live output compact and the
+worktree keeps the host checkout clean until you merge.
+
 ```bash
 # Run a fresh task in a target project.
 ./duet.py --task "Implement fizzbuzz in Go with tests" --cwd ~/code/scratch
@@ -111,12 +128,6 @@ Compact live debug view — see only what each turn produced, in real time:
 
 ```bash
 ./duet.py --recap --task "Fix the issue" --cwd ~/workspace/project
-```
-
-Plan deep, code fast — claude reasons hard, codex applies edits at minimum effort:
-
-```bash
-./duet.py --reasoning high --codex-fast --task "Fix the issue" --cwd ~/workspace/project
 ```
 
 ## Output

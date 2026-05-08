@@ -110,14 +110,72 @@ expect_stdout "one proposal not enough"      0 "reason=max_turns" "$DUET" --dry-
 expect_stdout "two proposals converge"       0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD"
 
 # Codex fast mode: tag must show in dry-run codex output, and reasoning
-# must be pinned to `minimal` even when --reasoning says otherwise.
+# must be pinned to `low` even when --reasoning says otherwise.
 expect_stdout "codex-fast tags dry-run"      0 "fast"               "$DUET" --dry-run --task "x" --cwd "$TMPD" --codex-fast
-expect_stdout "codex-fast pins minimal"      0 "reasoning=minimal"  "$DUET" --dry-run --task "x" --cwd "$TMPD" --reasoning high --codex-fast
+expect_stdout "codex-fast pins low"          0 "reasoning=low"      "$DUET" --dry-run --task "x" --cwd "$TMPD" --reasoning high --codex-fast
 # YAML key path: codex_fast: true should produce the same tag.
 cat > "$TMPD/cfg-fast.json" <<JSON
 {"cwd":"$TMPD","dry_run":true,"task":"x","codex_fast":true,"agents":[{"name":"claude-lead","backend":"claude","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
 JSON
 expect_stdout "codex_fast yaml key"          0 "fast"               "$DUET" --config "$TMPD/cfg-fast.json"
+
+expect "codex-fast command args"             0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+cwd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", ""
+
+m._run = fake_run
+agent = m.Agent(name="codex-partner", backend="codex", role="coder")
+m.call_codex(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    "workspace-write",
+    60,
+    dry=False,
+    first_turn=True,
+    reasoning="high",
+    fast=True,
+)
+first = calls[-1]
+assert "model_reasoning_effort=low" in first, first
+assert "model_reasoning_effort=minimal" not in first, first
+assert "model_reasoning_summary=concise" in first, first
+assert first.index("model_reasoning_summary=concise") < len(first) - 1, first
+
+agent.session_id = "codex-current"
+m.call_codex(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    "workspace-write",
+    60,
+    dry=False,
+    first_turn=False,
+    reasoning="high",
+    fast=True,
+)
+resume = calls[-1]
+assert resume[:4] == ["codex", "exec", "resume", "--last"], resume
+assert "model_reasoning_effort=low" in resume, resume
+assert "model_reasoning_summary=concise" in resume, resume
+PY
 
 # C2 - foreign-cwd defaults
 expect "foreign cwd creates .duet/runs/"     0 "$DUET" --task "x" --dry-run --cwd "$TMPD"

@@ -11,11 +11,11 @@ permission_mode: acceptEdits
 dry_run: false
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
-# Codex-only fast mode: pin every codex turn to minimal reasoning effort
-# and concise reasoning summaries, regardless of the `reasoning:` key or
-# any per-agent `reasoning_effort`. Claude turns are untouched. Useful when
-# the planner (claude) is doing the deep thinking and codex just needs to
-# apply edits quickly. Combine with `reasoning: high` for that split.
+# Codex-only fast mode: pin every codex turn to low reasoning effort and
+# concise reasoning summaries, regardless of the `reasoning:` key or any
+# per-agent `reasoning_effort`. Claude turns are untouched. Useful when the
+# planner (claude) is doing the deep thinking and codex just needs to apply
+# edits quickly. Combine with `reasoning: high` for that split.
 # codex_fast: false
 
 # Optional: where new git worktrees land when --worktree is on. Default is
