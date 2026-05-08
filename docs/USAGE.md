@@ -9,6 +9,7 @@ mode, force prompt, and session memory.
 
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
+- [Real loop test](#real-loop-test)
 - [CLI flags](#cli-flags)
 - [Output layout and status mode](#output-layout-and-status-mode)
 - [How session memory works](#how-session-memory-works)
@@ -193,6 +194,52 @@ EOF
 
 ---
 
+## Real loop test
+
+`make test` is the fast dry-run regression suite. To check the actual product
+loop with real agents, run:
+
+```bash
+make loop-test
+```
+
+This invokes `scripts/duet_loop_e2e.py`, which builds disposable git fixtures
+under a durable local artifact directory:
+
+```text
+runs/test-loop/<suite-id>/
+  fixtures/       # generated seed repos and per-scenario configs
+  duet-runs/      # duet transcripts, state, recap, stderr logs, worktrees
+  failures/       # copied failed run dirs for triage
+  results.tsv
+```
+
+The suite is intentionally not part of `make test`: it launches real Claude
+and Codex turns, can take several minutes, and consumes model calls. Each
+scenario uses `--worktree --recap` and validates more than agent agreement:
+visible tests, hidden validators, unchanged `LOCKED.md`, clean host repo,
+recap/transcript parser consistency, no stale `turn-*.pid` files, and
+`duet --status` exit behavior.
+
+Useful variants:
+
+```bash
+# Run one scenario while iterating on the harness.
+python3 scripts/duet_loop_e2e.py --scenario S1
+
+# Store artifacts somewhere else.
+python3 scripts/duet_loop_e2e.py --base-dir ~/duet-loop-runs/$(date +%Y%m%d-%H%M%S)
+
+# Compare lower-cost reasoning behavior with default behavior.
+python3 scripts/duet_loop_e2e.py --reasoning low
+```
+
+Do not run multiple loop-test sweeps concurrently. Codex resume is cwd-based;
+the harness isolates each fixture and worktree, but parallel sweeps add
+unnecessary ambiguity.
+
+---
+
 ## CLI flags
 
 | flag | purpose |
@@ -350,6 +397,8 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 |---|---|
 | both agents propose convergence in back-to-back turns | `reason=converged` |
 | `--turns` reached | `reason=max_turns` |
+| forced post-loop turn proposes convergence | `reason=converged_after_force` |
+| forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
 | per-turn timeout | turn rc=124, error inserted, loop stops with `reason=force_stop` |
@@ -361,7 +410,7 @@ After any normal exit, if stdin is a TTY:
 force>
 ```
 
-Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
+Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree diff without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
 
 Convergence is deliberately a pair decision. A single reply with `<<<LGTM>>>`
 does not stop the loop unless it also has an `LGTM rationale:` / `Rationale:`
@@ -405,7 +454,7 @@ Source: [`[sandbox_workspace_write] network_access`](https://github.com/openai/c
 
 ## Worktree mode
 
-`--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every partner turn duet appends `git status --short` + `git diff --stat` + truncated `git diff HEAD` to its reply, so the lead sees what the partner actually changed — not just what it claims to have changed.
+`--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every partner turn duet appends `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files, to its reply, so the lead sees what the partner actually changed — not just what it claims to have changed.
 
 ### Where the worktree lives
 

@@ -55,6 +55,7 @@ Install the `duet` command:
 ```bash
 make install      # symlinks duet.py to ~/.local/bin/duet
 make test         # runs scripts/smoke.sh dry-run regression checks
+make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 ```
 
 ## How It Works
@@ -71,7 +72,8 @@ include an `LGTM rationale:` explaining why the work is done, followed by the
 sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 
 After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
-feedback to force another round.
+feedback to force another round; duet sends the next agent the previous reply
+plus your feedback, including any appended worktree diff.
 
 ## Common Recipes
 

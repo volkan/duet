@@ -350,9 +350,90 @@ def git_diff_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
         ).stdout
         if len(full) > max_chars:
             full = full[:max_chars] + f"\n…[truncated, {len(full)-max_chars} more chars]"
-        return f"### git status\n{status or '(clean)'}\n\n### diffstat\n{diff or '(none)'}\n\n### diff\n{full or '(none)'}"
+        untracked = _untracked_files_summary(wt_path, max_chars=max_chars)
+        untracked_block = (
+            f"\n\n### untracked file contents\n{untracked}"
+            if untracked else ""
+        )
+        return (
+            f"### git status\n{status or '(clean)'}\n\n"
+            f"### diffstat\n{diff or '(none)'}\n\n"
+            f"### diff\n{full or '(none)'}"
+            f"{untracked_block}"
+        )
     except subprocess.TimeoutExpired:
         return "[duet] git diff timed out"
+
+
+def _untracked_files_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(wt_path), "ls-files", "--others",
+         "--exclude-standard", "-z"],
+        capture_output=True, timeout=10,
+    )
+    if proc.returncode != 0:
+        return ""
+    rel_paths = [os.fsdecode(p) for p in proc.stdout.split(b"\0") if p]
+    if not rel_paths:
+        return ""
+
+    sections: list[str] = []
+    remaining = max_chars
+    for rel_path in rel_paths:
+        if remaining <= 0:
+            sections.append("…[truncated]")
+            break
+        section = _untracked_file_summary(wt_path, rel_path)
+        if len(section) > remaining:
+            section = section[:remaining] + f"\n…[truncated, {len(section)-remaining} more chars]"
+            sections.append(section)
+            break
+        sections.append(section)
+        remaining -= len(section) + 2
+    return "\n\n".join(sections)
+
+
+def _untracked_file_summary(wt_path: pathlib.Path, rel_path: str) -> str:
+    display_path = rel_path.replace("\\", "/")
+    file_path = wt_path / rel_path
+    if file_path.is_symlink():
+        return f"#### {display_path}\n(symlink omitted)"
+    if not file_path.is_file():
+        return f"#### {display_path}\n(non-file omitted)"
+    try:
+        data = _read_file_preview(file_path)
+    except OSError as e:
+        return f"#### {display_path}\n(unable to read: {e})"
+    if data is None:
+        return f"#### {display_path}\n(binary file omitted)"
+    fence = _markdown_fence(data)
+    return f"#### {display_path}\n{fence}text\n{data}\n{fence}"
+
+
+def _read_file_preview(path: pathlib.Path, max_bytes: int = 12000) -> Optional[str]:
+    with path.open("rb") as f:
+        data = f.read(max_bytes + 1)
+    truncated = len(data) > max_bytes
+    data = data[:max_bytes]
+    if b"\0" in data:
+        return None
+    text = data.decode("utf-8", errors="replace")
+    if truncated:
+        text += f"\n…[truncated, file exceeds {max_bytes} bytes]"
+    return text
+
+
+def _markdown_fence(text: str) -> str:
+    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
+
+
+def append_worktree_diff(reply: str, wt_path: pathlib.Path) -> str:
+    try:
+        diff_block = git_diff_summary(wt_path)
+        return f"{reply}\n\n---\n#### worktree changes ({wt_path.name})\n{diff_block}"
+    except Exception as e:
+        return f"{reply}\n\n[duet] git diff failed: {e}"
 
 
 def write_text_atomic(path: pathlib.Path, text: str) -> None:
@@ -1176,11 +1257,7 @@ def run_duet(cfg: DuetConfig) -> dict:
 
         # If this speaker is the worktree agent, capture the diff and append it to its reply.
         if wt_path is not None and speaker.cwd_override == wt_path:
-            try:
-                diff_block = git_diff_summary(wt_path)
-                reply = f"{reply}\n\n---\n#### worktree changes ({wt_path.name})\n{diff_block}"
-            except Exception as e:
-                reply = f"{reply}\n\n[duet] git diff failed: {e}"
+            reply = append_worktree_diff(reply, wt_path)
 
         log(speaker.name, speaker.role, reply)
         history.append({"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
@@ -1214,7 +1291,8 @@ def run_duet(cfg: DuetConfig) -> dict:
         finished_reason = "max_turns"
 
     finished_reason = ask_force(cfg, history, transcript_path, state_path,
-                                last_msg, speaker_idx, seen_first_turn, finished_reason)
+                                last_msg, speaker_idx, seen_first_turn,
+                                finished_reason, wt_path)
 
     state = {
         "task": cfg.task,
@@ -1248,7 +1326,8 @@ def run_duet(cfg: DuetConfig) -> dict:
 
 def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               state_path: pathlib.Path, last_msg: str, speaker_idx: int,
-              seen_first_turn: dict, reason: str) -> str:
+              seen_first_turn: dict, reason: str,
+              wt_path: Optional[pathlib.Path] = None) -> str:
     """Post-loop interactive prompt: human can push another turn or accept."""
     if not sys.stdin.isatty():
         return reason
@@ -1266,7 +1345,11 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         # Append a human note to transcript
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
-        last_msg = line
+        forced_msg = (
+            f"{last_msg}\n\n---\n"
+            "#### human force-feedback\n"
+            f"{line}\n"
+        )
         forced_turn = len(history) + 1
         t0 = time.time()
         inflight: Optional[tuple[threading.Event, threading.Thread]] = None
@@ -1274,7 +1357,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             inflight = _start_recap_inflight(forced_turn, next_speaker.name,
                                              next_speaker.role, t0)
         try:
-            reply = call_agent(next_speaker, last_msg, cfg,
+            reply = call_agent(next_speaker, forced_msg, cfg,
                                first_turn_for_agent=not seen_first_turn[next_speaker.name],
                                run_dir=transcript_path.parent,
                                turn_label=f"{forced_turn:02d}-forced")
@@ -1293,6 +1376,8 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         elapsed = time.time() - t0
         seen_first_turn[next_speaker.name] = True
         convergence_hit = convergence_proposed(reply, cfg.sentinel)
+        if wt_path is not None and next_speaker.cwd_override == wt_path:
+            reply = append_worktree_diff(reply, wt_path)
         recap_block = ""
         if cfg.recap:
             parsed = parse_recap_headers(reply)
@@ -1319,6 +1404,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             print(_format_live_recap_block(recap_block), end="")
         else:
             print(reply)
+        last_msg = reply
         speaker_idx = 1 - speaker_idx
         reason = "forced_continuation"
         if convergence_hit:
