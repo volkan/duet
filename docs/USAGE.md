@@ -131,7 +131,7 @@ What this does:
 1. Runs the `gh` command with cwd = the target project. The issue body + comments JSON becomes the kickoff text handed to codex.
 2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy.
 3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
-4. claude (lead, planner role) sees the auto-appended diff each turn and either flags issues or accepts Codex's convergence rationale with its own `LGTM rationale:` plus `<<<LGTM>>>`.
+4. claude (lead, planner role) sees the auto-appended worktree handoff block and diff each turn, then either flags issues or accepts Codex's convergence rationale with its own `LGTM rationale:` plus `<<<LGTM>>>`.
 5. Worktree is left intact at end. Merge / drop instructions printed on exit.
 
 To monitor from another terminal: `duet --status <cwd>/.duet/runs/<id>/`.
@@ -411,7 +411,7 @@ After any normal exit, if stdin is a TTY:
 force>
 ```
 
-Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree diff without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
+Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree handoff block without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
 
 Convergence is deliberately a pair decision. A single reply with `<<<LGTM>>>`
 does not stop the loop unless it also has an `LGTM rationale:` / `Rationale:`
@@ -466,7 +466,17 @@ Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:
 
 ## Worktree mode
 
-`--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every partner turn duet appends `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files, to its reply, so the lead sees what the partner actually changed — not just what it claims to have changed.
+`--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every worktree-agent turn duet appends a handoff block and diff to that agent's reply, so the other agent sees what actually changed — not just what the worktree agent claims changed.
+
+The handoff block names the exact worktree path and branch, warns that the receiving agent's current cwd may be a clean checkout, and gives review commands such as:
+
+```bash
+git -C <worktree-path> status --short
+git -C <worktree-path> diff HEAD
+make -C <worktree-path> test  # when this project uses make test
+```
+
+The diff section then includes `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files.
 
 ### Where the worktree lives
 

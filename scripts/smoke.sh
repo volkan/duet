@@ -109,6 +109,32 @@ PY
 expect_stdout "one proposal not enough"      0 "reason=max_turns" "$DUET" --dry-run --turns 1 --task "x" --cwd "$TMPD"
 expect_stdout "two proposals converge"       0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD"
 
+expect "worktree handoff names review target" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import shlex
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+wt_path = tmpd / "review wt"
+m.git_diff_summary = lambda path: "### git status\n M duet.py\n\n### diff\n..."
+out = m.append_worktree_diff("reply", wt_path, "duet/test-run")
+quoted = shlex.quote(str(wt_path))
+assert "#### worktree changes" in out, out
+assert f"Worktree path: `{wt_path}`" in out, out
+assert "Branch: `duet/test-run`" in out, out
+assert "Your current cwd may be a clean checkout" in out, out
+assert f"git -C {quoted} status --short" in out, out
+assert f"git -C {quoted} diff HEAD" in out, out
+PY
+
 # Codex fast mode: tag must show in dry-run codex output, and reasoning
 # must be pinned to `low` even when --reasoning says otherwise.
 expect_stdout "codex-fast tags dry-run"      0 "fast"               "$DUET" --dry-run --task "x" --cwd "$TMPD" --codex-fast

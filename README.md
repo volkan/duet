@@ -89,7 +89,7 @@ sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 
 After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
 feedback to force another round; duet sends the next agent the previous reply
-plus your feedback, including any appended worktree diff.
+plus your feedback, including any appended worktree handoff block and diff.
 
 ## Common Recipes
 
@@ -148,6 +148,11 @@ Every run writes a directory containing:
 - `turn-*.stderr.log` - live stderr from each agent invocation.
 - `turn-*.pid` - present only while a turn is running.
 - `wt/` - the git worktree, when `--worktree` is enabled.
+
+When a worktree agent replies, duet appends a handoff block to that reply before
+the diff. The block names the exact worktree path and branch, warns that the
+receiving agent's cwd may be a clean checkout, and includes `git -C <wt>` review
+commands so verification happens against the edited tree.
 
 When `--cwd` points outside the invocation directory and `--runs-dir` is not
 set, artifacts go under the target project at `.duet/runs/<run_id>/`.

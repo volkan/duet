@@ -41,6 +41,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -435,10 +436,37 @@ def _markdown_fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def append_worktree_diff(reply: str, wt_path: pathlib.Path) -> str:
+def worktree_handoff_block(wt_path: pathlib.Path,
+                           wt_branch: Optional[str] = None) -> str:
+    """Tell the receiving agent exactly where the edited tree lives."""
+    wt_display = str(wt_path)
+    wt_arg = shlex.quote(wt_display)
+    branch_line = f"- Branch: `{wt_branch}`\n" if wt_branch else ""
+    return (
+        "### review target\n"
+        "The code changes for this turn are in the git worktree below. "
+        "Your current cwd may be a clean checkout, so do not use that cwd's "
+        "`git status` as evidence that these edits are absent.\n\n"
+        f"- Worktree path: `{wt_display}`\n"
+        f"{branch_line}"
+        "\n"
+        "Use the worktree as the source of truth when reviewing or running "
+        "checks:\n\n"
+        "```bash\n"
+        f"git -C {wt_arg} status --short\n"
+        f"git -C {wt_arg} diff HEAD\n"
+        f"make -C {wt_arg} test  # if this project uses make test; "
+        "otherwise run its normal checks here\n"
+        "```\n"
+    )
+
+
+def append_worktree_diff(reply: str, wt_path: pathlib.Path,
+                         wt_branch: Optional[str] = None) -> str:
     try:
         diff_block = git_diff_summary(wt_path)
-        return f"{reply}\n\n---\n#### worktree changes ({wt_path.name})\n{diff_block}"
+        handoff = worktree_handoff_block(wt_path, wt_branch)
+        return f"{reply}\n\n---\n#### worktree changes\n{handoff}\n{diff_block}"
     except Exception as e:
         return f"{reply}\n\n[duet] git diff failed: {e}"
 
@@ -1276,7 +1304,7 @@ def run_duet(cfg: DuetConfig) -> dict:
 
         # If this speaker is the worktree agent, capture the diff and append it to its reply.
         if wt_path is not None and speaker.cwd_override == wt_path:
-            reply = append_worktree_diff(reply, wt_path)
+            reply = append_worktree_diff(reply, wt_path, wt_branch)
 
         log(speaker.name, speaker.role, reply)
         history.append({"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
@@ -1311,7 +1339,7 @@ def run_duet(cfg: DuetConfig) -> dict:
 
     finished_reason = ask_force(cfg, history, transcript_path, state_path,
                                 last_msg, speaker_idx, seen_first_turn,
-                                finished_reason, wt_path)
+                                finished_reason, wt_path, wt_branch)
 
     state = {
         "task": cfg.task,
@@ -1346,7 +1374,8 @@ def run_duet(cfg: DuetConfig) -> dict:
 def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               state_path: pathlib.Path, last_msg: str, speaker_idx: int,
               seen_first_turn: dict, reason: str,
-              wt_path: Optional[pathlib.Path] = None) -> str:
+              wt_path: Optional[pathlib.Path] = None,
+              wt_branch: Optional[str] = None) -> str:
     """Post-loop interactive prompt: human can push another turn or accept."""
     if not sys.stdin.isatty():
         return reason
@@ -1396,7 +1425,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         seen_first_turn[next_speaker.name] = True
         convergence_hit = convergence_proposed(reply, cfg.sentinel)
         if wt_path is not None and next_speaker.cwd_override == wt_path:
-            reply = append_worktree_diff(reply, wt_path)
+            reply = append_worktree_diff(reply, wt_path, wt_branch)
         recap_block = ""
         if cfg.recap:
             parsed = parse_recap_headers(reply)
