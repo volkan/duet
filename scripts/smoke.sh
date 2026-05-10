@@ -79,6 +79,32 @@ expect "config task_from_cmd"                0 "$DUET" --config "$TMPD/cfg.json"
 expect "config cli --runs-dir override"      0 "$DUET" --config "$TMPD/cfg.json" --runs-dir "$TMPD/config-runs"
 [[ -d "$TMPD/config-runs" ]] || { echo "FAIL: config-runs not created"; FAIL=$((FAIL+1)); }
 
+# `--continue` restores agents/session ids from a prior state.json and
+# starts the next agent after the last completed turn.
+CONT_RUNS="$TMPD/continue-runs"
+expect "continue seed run"                   0 "$DUET" --dry-run --task "x" --cwd "$TMPD" --runs-dir "$CONT_RUNS" --turns 1 --lead codex:planner --partner claude:coder
+CONT_BASE=$(ls -1d "$CONT_RUNS"/2*/ 2>/dev/null | head -1 || true)
+expect_stdout "continue without task picks next speaker" 0 "Turn 1 :: codex-lead" "$DUET" --continue "$CONT_BASE" --dry-run --runs-dir "$TMPD/continue-runs-2" --turns 1
+CONT_NEW=$(ls -1d "$TMPD/continue-runs-2"/2*/ 2>/dev/null | head -1 || true)
+[[ -n "$CONT_NEW" ]] && grep -q '"continue_from"' "$CONT_NEW/state.json" \
+    || { echo "FAIL: continue_from missing from continued state.json"; FAIL=$((FAIL+1)); }
+
+# Old crashed worktree runs may have a wt/ directory but no worktree field
+# in their rolling state.json. Continue should still reuse run/wt.
+CONT_SYNTH="$TMPD/continue-synth/20260507-120000"
+mkdir -p "$CONT_SYNTH/wt"
+cat > "$CONT_SYNTH/state.json" <<JSON
+{"task":"x","cwd":"$TMPD","turns_used":2,"agents":[{"name":"codex-lead","backend":"codex","role":"planner","session_id":"codex-current"},{"name":"claude-partner","backend":"claude","role":"coder","session_id":"sid-123"}],"history":[{"turn":1,"agent":"claude-partner"},{"turn":2,"agent":"codex-lead"}],"finished_reason":null,"duet_pid":1}
+JSON
+expect "continue reuses legacy wt dir"       0 bash -c '
+  out=$("$1" --continue "$2" --dry-run --runs-dir "$3" --turns 1)
+  echo "$out" | grep -q "reusing worktree:" \
+    || { echo "missing reusing worktree output"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 1 :: claude-partner" \
+    || { echo "wrong next speaker"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$CONT_SYNTH" "$TMPD/continue-runs-3"
+
 expect "convergence requires rationale"      0 python3 - "$DUET_ABS" <<'PY'
 import importlib.util
 import pathlib

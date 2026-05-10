@@ -19,6 +19,7 @@ make uninstall
 ./duet.py --dry-run --task "x" --cwd /tmp        # quickest end-to-end smoke
 ./duet.py --config examples/hello.yaml           # 2-turn real run, no edits to disk
 ./duet.py --status runs/<id>/                    # health-probe a finished or in-flight run
+./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
 python3 scripts/decision_from_transcript.py \
     --transcript runs/<id>/transcript.md --out-dir ../   # rebuild deliverables when agents deadlocked
 ```
@@ -62,7 +63,11 @@ Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently con
 
 ### Worktree mode
 
-`--worktree` creates `<runs_dir>/<run_id>/wt/` on a fresh `duet/<run_id>` branch and points the selected worktree agent's `cwd_override` at it (partner by default, lead with `--worktree-for lead`). After every worktree-agent turn, duet appends a handoff block plus `git_diff_summary` (`git status --short` + `--stat` + truncated `diff HEAD`, capped at 8 KB, plus fenced previews of untracked text files) to that turn's reply. The handoff block names the exact worktree path/branch, warns that the receiving agent's cwd may be a clean checkout, and includes `git -C <wt>` review commands so verification targets the edited tree, not the host checkout. The worktree is intentionally **not deleted** at exit — duet prints merge/review/drop commands. Default placement under `runs/<id>/wt/` is durable across reboots (escapes `/tmp` cleaners); `--worktree-root /tmp` opts back into temp-dir behavior. `--worktree-path` is the resume case (point at an existing worktree); `--worktree` and `--worktree-path` are mutually exclusive and validated twice (argparse + post-config).
+`--worktree` creates `<runs_dir>/<run_id>/wt/` on a fresh `duet/<run_id>` branch and points the selected worktree agent's `cwd_override` at it (partner by default, lead with `--worktree-for lead`). After every worktree-agent turn, duet appends a handoff block plus `git_diff_summary` (`git status --short` + `--stat` + truncated `diff HEAD`, capped at 8 KB, plus fenced previews of untracked text files) to that turn's reply. The handoff block names the exact worktree path/branch, warns that the receiving agent's cwd may be a clean checkout, and includes `git -C <wt>` review commands so verification targets the edited tree, not the host checkout. The worktree is intentionally **not deleted** at exit — duet prints merge/review/drop commands. Default placement under `runs/<id>/wt/` is durable across reboots (escapes `/tmp` cleaners); `--worktree-root /tmp` opts back into temp-dir behavior. `--worktree-path` is the resume case (point at an existing worktree); `--continue <run>` uses the prior state's `worktree` path or falls back to `<run>/wt/` for older crashed runs. `--worktree` and `--worktree-path` are mutually exclusive and validated twice (argparse + post-config).
+
+### Continue mode
+
+`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. `DuetConfig.start_speaker_idx` is internal plumbing for this; normal runs keep the default partner-first value of `1`. Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
 
 ### Foreign-cwd default
 

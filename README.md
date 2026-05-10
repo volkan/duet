@@ -186,7 +186,7 @@ Every run writes a directory containing:
 
 - `transcript.md` - the full conversation.
 - `recap.md` - compact per-turn debug view when `--recap` is enabled; `--status` shows this path when present.
-- `state.json` - run state, agent roles, session ids, finish reason, and `recap_path` for recap runs.
+- `state.json` - run state, agent roles, session ids, finish reason, worktree metadata, and `recap_path` for recap runs.
 - `turn-*.stderr.log` - live stderr from each agent invocation.
 - `turn-*.pid` - present only while a turn is running.
 - `wt/` - the git worktree, when `--worktree` is enabled.
@@ -202,7 +202,7 @@ set, artifacts go under the target project at `.duet/runs/<run_id>/`.
 ## Documentation
 
 Read [docs/USAGE.md](docs/USAGE.md) for the full reference: flags, sandbox and
-network rules, worktree mode, output layout, `--status` exit codes, force
+network rules, worktree mode, output layout, `--status` / `--continue`, force
 prompt behavior, session memory, the post-run "apply / iterate / discard"
 checklist, and the optional `/duet` Claude Code skill.
 
@@ -211,8 +211,9 @@ notes live in [AGENTS.md](AGENTS.md).
 
 ## Limits
 
-- duet does not automatically resume a prior duet run. Session ids are saved,
-  but you pass them manually.
+- `duet --continue <run>` starts a fresh run from a prior `state.json`, restores
+  saved session ids, and reuses the previous worktree when available. It does
+  not append to the old transcript.
 - Parallel Codex sessions in the same cwd are unsafe because
   `codex exec resume --last` is cwd-based. `--worktree` isolates duet's Codex
   cwd from the host repo, but do not start another Codex session inside that

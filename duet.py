@@ -212,6 +212,24 @@ class Agent:
         return prompt
 
 
+def agent_state(a: Agent) -> dict:
+    data = {
+        "name": a.name,
+        "backend": a.backend,
+        "role": a.role,
+        "session_id": a.session_id,
+    }
+    if a.role_prompt is not None:
+        data["role_prompt"] = a.role_prompt
+    if a.model is not None:
+        data["model"] = a.model
+    if a.extra_args:
+        data["extra_args"] = a.extra_args
+    if a.reasoning_effort is not None:
+        data["reasoning_effort"] = a.reasoning_effort
+    return data
+
+
 @dataclasses.dataclass
 class DuetConfig:
     cwd: pathlib.Path
@@ -244,6 +262,8 @@ class DuetConfig:
                                               # effort is untouched, so `--reasoning high
                                               # --codex-fast` keeps the planner deep and the
                                               # coder snappy.
+    start_speaker_idx: int = 1                # default loop starts with partner replying
+    continue_from: Optional[str] = None       # prior run dir/id when created by --continue
 
 
 # ---------- active child process tracking ----------
@@ -1095,6 +1115,8 @@ def run_duet(cfg: DuetConfig) -> dict:
     RECAP_MODE = cfg.recap
     if len(cfg.agents) != 2:
         raise SystemExit(f"duet expects exactly 2 agents, got {len(cfg.agents)}")
+    if cfg.start_speaker_idx not in (0, 1):
+        raise SystemExit(f"start_speaker_idx must be 0 or 1, got {cfg.start_speaker_idx}")
 
     try:
         cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1142,7 +1164,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     stop = StopFlag()
     _install_sigint(stop)
 
-    seen_first_turn = {a.name: False for a in cfg.agents}
+    seen_first_turn = {a.name: bool(a.session_id) for a in cfg.agents}
     history: list[dict] = []
     transcript = ""
 
@@ -1171,14 +1193,15 @@ def run_duet(cfg: DuetConfig) -> dict:
             "task": cfg.task,
             "cwd": str(cfg.cwd),
             "turns_used": 0,
-            "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
-                        "session_id": a.session_id} for a in cfg.agents],
+            "agents": [agent_state(a) for a in cfg.agents],
             "history": history,
             "finished_reason": "dry_run",
             "transcript_path": str(transcript_path),
             "recap_path": str(recap_path),
             "worktree": None,
             "worktree_branch": None,
+            "worktree_for": cfg.worktree_for,
+            "continue_from": cfg.continue_from,
             "duet_pid": os.getpid(),
         }
         write_text_atomic(state_path, json.dumps(state, indent=2))
@@ -1236,13 +1259,14 @@ def run_duet(cfg: DuetConfig) -> dict:
             "task": cfg.task,
             "cwd": str(cfg.cwd),
             "turns_used": 0,
-            "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
-                        "session_id": a.session_id} for a in cfg.agents],
+            "agents": [agent_state(a) for a in cfg.agents],
             "history": history,
             "finished_reason": "force_stop",
             "transcript_path": str(transcript_path),
             "worktree": str(wt_path) if wt_path else None,
             "worktree_branch": wt_branch,
+            "worktree_for": cfg.worktree_for,
+            "continue_from": cfg.continue_from,
             "duet_pid": os.getpid(),
         }
         if cfg.recap:
@@ -1255,8 +1279,10 @@ def run_duet(cfg: DuetConfig) -> dict:
     seen_first_turn[cfg.agents[0].name] = True
     last_msg = seed
 
-    # Partner (agent[1]) speaks first in the loop, replying to the seed.
-    speaker_idx = 1
+    # Partner (agent[1]) normally speaks first in the loop, replying to the seed.
+    # `--continue` may set this to the other agent so the next speaker matches
+    # the previous run's last completed turn.
+    speaker_idx = cfg.start_speaker_idx
     finished_reason = "max_turns"
     previous_convergence_proposal = False
 
@@ -1322,9 +1348,13 @@ def run_duet(cfg: DuetConfig) -> dict:
                         "len_chars": len(reply), "session_id": speaker.session_id})
         turn_state = {
             "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
-            "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
-                        "session_id": a.session_id} for a in cfg.agents],
+            "agents": [agent_state(a) for a in cfg.agents],
             "history": history, "finished_reason": None,
+            "transcript_path": str(transcript_path),
+            "worktree": str(wt_path) if wt_path else None,
+            "worktree_branch": wt_branch,
+            "worktree_for": cfg.worktree_for,
+            "continue_from": cfg.continue_from,
             "duet_pid": os.getpid(),
         }
         if cfg.recap:
@@ -1356,17 +1386,18 @@ def run_duet(cfg: DuetConfig) -> dict:
         "task": cfg.task,
         "cwd": str(cfg.cwd),
         "turns_used": len(history),
-        "agents": [{"name": a.name, "backend": a.backend, "role": a.role,
-                    "session_id": a.session_id} for a in cfg.agents],
+        "agents": [agent_state(a) for a in cfg.agents],
         "history": history,
         "finished_reason": finished_reason,
         "transcript_path": str(transcript_path),
+        "continue_from": cfg.continue_from,
         "duet_pid": os.getpid(),
     }
     if cfg.recap:
         state["recap_path"] = str(recap_path)
     state["worktree"] = str(wt_path) if wt_path else None
     state["worktree_branch"] = wt_branch
+    state["worktree_for"] = cfg.worktree_for
     write_text_atomic(state_path, json.dumps(state, indent=2))
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
     if cfg.recap:
@@ -1858,6 +1889,188 @@ def _resolve_run_dir(arg: str) -> Optional[pathlib.Path]:
     return None
 
 
+def _load_run_state(run_dir: pathlib.Path,
+                    parser: argparse.ArgumentParser,
+                    option_name: str) -> dict:
+    state_path = run_dir / "state.json"
+    if not state_path.is_file():
+        parser.error(f"{option_name}: missing state.json in {run_dir}")
+    try:
+        return json.loads(state_path.read_text())
+    except json.JSONDecodeError as e:
+        parser.error(f"{option_name}: state.json malformed: {e}")
+    except OSError as e:
+        parser.error(f"{option_name}: unable to read state.json: {e}")
+    raise AssertionError("parser.error should have exited")
+
+
+def _agents_from_state(state: dict,
+                       parser: argparse.ArgumentParser,
+                       option_name: str) -> list[Agent]:
+    raw_agents = state.get("agents")
+    if not isinstance(raw_agents, list) or len(raw_agents) != 2:
+        parser.error(f"{option_name}: state.json must contain exactly two agents")
+    agents: list[Agent] = []
+    for i, raw in enumerate(raw_agents):
+        if not isinstance(raw, dict):
+            parser.error(f"{option_name}: agents[{i}] is not an object")
+        name = raw.get("name")
+        backend = raw.get("backend")
+        if not name or not backend:
+            parser.error(f"{option_name}: agents[{i}] missing name/backend")
+        raw_extra_args = raw.get("extra_args") or []
+        if not isinstance(raw_extra_args, list):
+            parser.error(f"{option_name}: agents[{i}].extra_args is not a list")
+        agents.append(Agent(
+            name=str(name),
+            backend=str(backend),
+            role=str(raw.get("role") or "coder"),
+            role_prompt=(str(raw["role_prompt"]) if raw.get("role_prompt") else None),
+            model=(str(raw["model"]) if raw.get("model") else None),
+            session_id=(str(raw["session_id"]) if raw.get("session_id") else None),
+            extra_args=[str(x) for x in raw_extra_args],
+            reasoning_effort=(str(raw["reasoning_effort"])
+                              if raw.get("reasoning_effort") else None),
+        ))
+    return agents
+
+
+def _next_speaker_idx_from_state(agents: list[Agent], state: dict) -> int:
+    history = state.get("history") or []
+    if isinstance(history, list):
+        for item in reversed(history):
+            if not isinstance(item, dict):
+                continue
+            last_agent = item.get("agent")
+            for idx, agent in enumerate(agents):
+                if agent.name == last_agent:
+                    return 1 - idx
+    try:
+        turns_used = int(state.get("turns_used") or 0)
+    except (TypeError, ValueError):
+        turns_used = 0
+    # Normal runs start with agent[1], so even turns mean agent[1] is next.
+    return 1 if turns_used % 2 == 0 else 0
+
+
+def _continue_note_from_args(args: argparse.Namespace,
+                             cwd: pathlib.Path,
+                             timeout: int,
+                             parser: argparse.ArgumentParser,
+                             stdin_cache: dict[str, str]) -> Optional[str]:
+    sources = [
+        args.task is not None,
+        args.kickoff is not None,
+        args.task_from_cmd is not None,
+    ]
+    if sum(1 for x in sources if x) > 1:
+        parser.error("--continue accepts only one extra instruction via "
+                     "--task, --kickoff, or --task-from-cmd")
+    if args.task_from_cmd is not None:
+        return resolve_task_from_cmd(args.task_from_cmd, cwd, timeout, parser)
+    if args.kickoff is not None:
+        return resolve_at_text(args.kickoff, "--kickoff", parser, stdin_cache)
+    if args.task is not None:
+        return resolve_at_text(args.task, "--task", parser, stdin_cache)
+    return None
+
+
+def _default_continue_kickoff(run_dir: pathlib.Path,
+                              state: dict,
+                              next_agent: Agent,
+                              user_note: Optional[str],
+                              worktree_path: Optional[pathlib.Path]) -> str:
+    history = state.get("history") or []
+    last = history[-1] if isinstance(history, list) and history else {}
+    transcript = state.get("transcript_path") or str(run_dir / "transcript.md")
+    recap = state.get("recap_path")
+    finished = state.get("finished_reason")
+    turns_display = state.get(
+        "turns_used",
+        len(history) if isinstance(history, list) else "?",
+    )
+    lines = [
+        "Continue the previous duet run without restarting from scratch.",
+        f"Previous run: {run_dir}",
+        f"Previous finished_reason: {finished!r}",
+        f"Previous turns_used: {turns_display}",
+        f"Next speaker: {next_agent.name} ({next_agent.backend}/{next_agent.role})",
+        f"Transcript: {transcript}",
+    ]
+    if recap:
+        lines.append(f"Recap: {recap}")
+    if worktree_path is not None:
+        lines.append(f"Worktree: {worktree_path}")
+    if isinstance(last, dict) and last:
+        lines.append(
+            f"Last completed turn: {last.get('turn')} by {last.get('agent')}"
+        )
+    if finished is None:
+        lines.append(
+            "The previous run appears interrupted or crashed. Inspect the "
+            "transcript, stderr logs, and any worktree changes before editing; "
+            "keep useful partial work."
+        )
+    else:
+        lines.append(
+            "Use the saved session context and artifacts above, then continue "
+            "with the next concrete step."
+        )
+    if user_note:
+        lines += ["", "Human continuation instruction:", user_note]
+    return "\n".join(lines)
+
+
+def build_continue_config(run_arg: str,
+                          args: argparse.Namespace,
+                          parser: argparse.ArgumentParser,
+                          stdin_cache: dict[str, str]) -> DuetConfig:
+    run_dir = _resolve_run_dir(run_arg)
+    if run_dir is None:
+        parser.error(f"--continue: no such run dir or id: {run_arg}")
+    state = _load_run_state(run_dir, parser, "--continue")
+    agents = _agents_from_state(state, parser, "--continue")
+    cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
+    timeout = args.timeout
+    user_note = _continue_note_from_args(args, cwd, timeout, parser, stdin_cache)
+    next_idx = _next_speaker_idx_from_state(agents, state)
+
+    raw_worktree = args.worktree_path or state.get("worktree")
+    if not raw_worktree:
+        legacy_wt = run_dir / "wt"
+        if legacy_wt.is_dir():
+            raw_worktree = str(legacy_wt)
+    worktree_path = (pathlib.Path(raw_worktree).expanduser().resolve()
+                     if raw_worktree else None)
+    worktree_for = str(args.worktree_for or state.get("worktree_for") or "partner")
+    kickoff = _default_continue_kickoff(
+        run_dir, state, agents[next_idx], user_note, worktree_path
+    )
+    runs_dir = choose_runs_dir(args.runs_dir, cwd)
+    return DuetConfig(
+        cwd=cwd,
+        agents=agents,
+        task=state.get("task"),
+        kickoff=kickoff,
+        max_turns=args.turns,
+        sentinel=args.sentinel,
+        per_turn_timeout=timeout,
+        runs_dir=runs_dir,
+        sandbox=args.sandbox,
+        permission_mode=args.permission_mode,
+        dry_run=args.dry_run,
+        recap=args.recap or bool(state.get("recap_path")),
+        worktree=False,
+        worktree_for=worktree_for,
+        worktree_path=worktree_path,
+        add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
+        reasoning=args.reasoning,
+        codex_fast=bool(args.codex_fast),
+        start_speaker_idx=next_idx,
+        continue_from=str(run_dir),
+    )
+
+
 def _humanize_age(seconds: int) -> str:
     if seconds < 60:           return f"{seconds}s ago"
     if seconds < 3600:         return f"{seconds // 60}m ago"
@@ -1987,6 +2200,11 @@ def main() -> int:
                          "its latest message and feed it to the partner agent.")
     ap.add_argument("--resume-codex", metavar="SESSION_ID",
                     help="(advanced) seed codex with an existing session id.")
+    ap.add_argument("--continue", metavar="RUN_DIR_OR_ID", dest="continue_run",
+                    help="start a new run from an existing run's state.json: "
+                         "restore agents/session ids, reuse its worktree when "
+                         "available, and send the next agent a continuation kickoff. "
+                         "--task/--kickoff/--task-from-cmd may add optional guidance.")
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
     ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
@@ -2012,7 +2230,7 @@ def main() -> int:
     ap.add_argument("--worktree", action="store_true",
                     help="run the partner agent in a throwaway git worktree on a fresh branch; "
                          "the worktree is left intact at the end so you can review/merge/drop it.")
-    ap.add_argument("--worktree-for", choices=["partner", "lead"], default="partner",
+    ap.add_argument("--worktree-for", choices=["partner", "lead"], default=None,
                     help="which agent runs in the worktree (default: partner)")
     ap.add_argument("--worktree-path", metavar="PATH", default=None,
                     help="reuse an EXISTING worktree (e.g. from a previous cancelled run). "
@@ -2079,13 +2297,23 @@ def main() -> int:
 
     if args.worktree and args.worktree_path:
         ap.error("--worktree and --worktree-path are mutually exclusive")
+    if args.continue_run and args.config:
+        ap.error("--continue and --config are mutually exclusive")
+    if args.continue_run and (args.resume_claude or args.resume_codex):
+        ap.error("--continue restores session ids from state.json; do not also pass --resume-*")
+    if args.continue_run and args.worktree:
+        ap.error("--continue reuses the saved worktree; use --worktree-path to override it")
 
     # Live-stream subprocess stderr unless --quiet
     global LIVE_STREAM
     LIVE_STREAM = not args.quiet
 
     stdin_cache: dict[str, str] = {}
-    if args.config:
+    if args.continue_run:
+        cfg = build_continue_config(args.continue_run, args, ap, stdin_cache)
+        print(f"[duet] continuing run {args.continue_run} "
+              f"(next: {cfg.agents[cfg.start_speaker_idx].name})")
+    elif args.config:
         raw = load_yaml_or_json(pathlib.Path(args.config))
         cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
         cfg_timeout = int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT))
@@ -2122,7 +2350,7 @@ def main() -> int:
             dry_run=bool(raw.get("dry_run", False)),
             recap=bool(raw.get("recap", False)) or args.recap,
             worktree=bool(raw.get("worktree", False)) or args.worktree,
-            worktree_for=raw.get("worktree_for", args.worktree_for),
+            worktree_for=raw.get("worktree_for") or args.worktree_for or "partner",
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
                            if args.worktree_path
                            else (pathlib.Path(raw["worktree_path"]).expanduser().resolve()
@@ -2179,7 +2407,7 @@ def main() -> int:
             dry_run=args.dry_run,
             recap=args.recap,
             worktree=args.worktree,
-            worktree_for=args.worktree_for,
+            worktree_for=args.worktree_for or "partner",
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
                            if args.worktree_path else None),
             worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()

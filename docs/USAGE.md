@@ -284,6 +284,7 @@ unnecessary ambiguity.
 |---|---|
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent |
 | `--resume-codex SESSION_ID` | (advanced) seed Codex with a session id |
+| `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
@@ -322,7 +323,9 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     recap.md                                 # compact per-turn debug view, if --recap
     state.json                               # task, agents, session_ids, history,
                                              # finished_reason, duet_pid,
-                                             # recap_path if --recap
+                                             # worktree/worktree_for if present,
+                                             # recap_path if --recap,
+                                             # continue_from for --continue runs
     turn-01-codex-coder.stderr.log           # live stderr from each agent invocation
     turn-01-codex-coder.pid                  # PID file (only present while the turn runs)
     turn-02-claude-reviewer.stderr.log
@@ -363,12 +366,21 @@ If an agent omits or mangles a header, duet derives a fallback from the reply. F
 
 `--dry-run --recap` validates the flag path, prints the recap banner, initializes `transcript.md` / `recap.md`, and exits without synthetic turn blocks.
 
-`state.json` includes both agents' final session ids so you can re-run later:
+`state.json` includes both agents' session ids, rolling worktree metadata, and
+enough turn history for `--continue` to pick the next speaker:
 
 ```bash
-./duet.py --resume-claude $(jq -r '.agents[0].session_id' runs/<ts>/state.json) \
-          --kickoff "continue from where we left off"
+duet --continue runs/<ts> \
+     --turns 4
 ```
+
+`--continue` writes a fresh run directory; it does not mutate the old
+transcript/state. If the old run used worktree mode, the new run reuses that
+worktree path instead of creating a new branch. For runs created before
+worktree metadata was persisted in rolling `state.json`, duet also checks for
+the conventional `<run>/wt/` directory. Use `--task`, `--kickoff`, or
+`--task-from-cmd` only when you want to append fresh human guidance to the
+generated continuation prompt.
 
 ### `--status RUN_DIR_OR_ID`
 
@@ -662,23 +674,23 @@ git add -p                               # selective (interactive)
 
 ### 3. Continue the conversation (optional)
 
-`state.json` saved both agents' session ids — a follow-up duet run can pick them up so neither agent restarts from scratch:
+The shortest path is `--continue`. It reads the prior `state.json`, restores
+the same agent names/roles/session ids, reuses the saved worktree when present,
+and starts with the agent who should speak next:
 
 ```bash
 RUN=<runs_dir>/20260507-191155
-CLAUDE_SID=$(jq -r '.agents[] | select(.backend=="claude") | .session_id' "$RUN/state.json")
-CODEX_SID=$( jq -r '.agents[] | select(.backend=="codex")  | .session_id' "$RUN/state.json")
 
-duet --resume-claude "$CLAUDE_SID" \
-     --resume-codex  "$CODEX_SID" \
-     --kickoff "Now run the tests and fix anything that breaks." \
-     --partner codex:coder --worktree --turns 4
+duet --continue "$RUN" \
+     --turns 4
 ```
 
 Notes:
-- If `CODEX_SID` is `null` (codex doesn't always expose ids; or the run got Ctrl-C'd before codex's first reply), omit `--resume-codex`. Codex will still pick up via `codex exec resume --last` since the cwd is unchanged. Don't run other codex sessions in that cwd in the meantime — they'd race for `--last`.
-- The `--kickoff` is what gets sent to the next-up agent (codex by default). Make it specific so the loop doesn't restart from scratch.
-- `--worktree` here gets you a *fresh* worktree on a *new* `duet/<new_run_id>` branch. Old worktree (if any) stays where it was.
+- The argument accepts the same path-or-bare-id forms as `--status`.
+- `--task`, `--kickoff`, and `--task-from-cmd` are optional; if present, they are treated as one extra continuation instruction. Pass at most one.
+- The old run remains intact. Continuation always creates a new run directory whose `state.json` includes `continue_from`.
+- If the old run used worktree mode, duet reuses that worktree. To override which agent owns it, pass `--worktree-for lead` or `--worktree-for partner`.
+- Don't run other Codex sessions in the relevant cwd/worktree before continuing; Codex resume is still `--last` and cwd-based.
 
 You can also drop into a single agent without duet:
 
