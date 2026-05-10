@@ -91,14 +91,19 @@ Canonical recipes:
 # Read a task from a file, but operate on another project.
 duet --task @review-notes.md --cwd ~/workspace/project
 
-# Pipe any tool's output into duet.
-claude -p /review | duet --task @- --cwd ~/workspace/project
+# Call Claude Code's real /review skill and let duet manage the loop.
+duet --recap --task-from-cmd 'claude -p /review' \
+     --lead claude:reviewer --partner codex:coder \
+     --worktree --cwd ~/workspace/project --turns 6
 
 # Let duet run the upstream tool itself from inside the target project.
 duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
-# With the user-level Claude Code skill installed:
-/duet 'claude -p /review'
+# With the user-level Claude Code skill installed, plain /duet runs /review.
+/duet
+
+# Or pass a different upstream command.
+/duet 'npm test 2>&1' --turns 4
 ```
 
 When `--cwd` points at a different directory and `--runs-dir` is omitted, run artifacts land under that project at `.duet/runs/<run_id>/`. Pass `--runs-dir runs` to keep the legacy invocation-relative `runs/<run_id>/` layout.
@@ -196,37 +201,41 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 
 ### `/duet` Claude Code skill (optional)
 
-Install the `/duet` skill so you can chain any upstream tool from inside Claude Code:
+Install the `/duet` skill so plain `/duet` runs Claude Code's real `/review`
+through duet, while still letting you pass any other upstream command:
 
 ````bash
 mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'
 ---
 name: duet
-description: Hand off arbitrary command output to the duet two-agent harness in the current folder. Wraps `duet --task-from-cmd <shell>` so any upstream tool (claude -p /review, gh, npm test, cat error.log) can drive a planner↔coder loop. Use when asked to "duet on …", "run duet with …", "kick off duet from …", or "have duet pick up <some output>".
-argument-hint: "'<shell command>' [extra duet flags…]"
+description: Run Claude Code's real /review through the duet two-agent harness, or hand off another command's output to duet. Wraps `duet --task-from-cmd <shell>` so /review, gh, npm test, cat error.log, or another upstream tool can drive a two-agent loop. Use when asked to "duet on …", "run duet with …", "kick off duet from …", "run /review through duet", or "have duet pick up <some output>".
+argument-hint: "['<shell command>' extra duet flags…]"
 allowed-tools: Bash(*)
 ---
 
 # /duet
 
-Run exactly:
+If `$ARGUMENTS` is empty, run exactly:
+
+```bash
+duet --recap --task-from-cmd 'claude -p /review' --cwd "$(pwd)" --lead claude:reviewer --partner codex:coder --worktree --turns 6
+```
+
+Otherwise run exactly:
 
 ```bash
 duet --task-from-cmd $ARGUMENTS --cwd "$(pwd)" --partner codex:coder --worktree
 ```
 
-If `$ARGUMENTS` is empty, print the recipe block above (with the
-quoted-shell-cmd convention example `/duet 'claude -p /review'`) and
-stop. Otherwise after spawn, print the run dir + the
-`duet --status <run_dir>` hint.
+After spawn, print the run dir + the `duet --status <run_dir>` hint.
 
 Notes:
 - The first quoted token of `$ARGUMENTS` is the shell command duet runs
   for the kickoff. Anything after that is forwarded to duet (e.g.
   `--turns 8`, `--reasoning high`, `--lead claude:reviewer`).
-- Don't try to chain `/<other-skill>` — Claude Code skills can't
-  programmatically read prior assistant turns. Use shell composition:
-  `/duet 'claude -p /review'` is the right idiom.
+- Plain `/duet` seeds the loop from Claude Code's real `/review` skill.
+  `/review` produces the kickoff; duet manages the Codex/Claude turns after
+  that.
 EOF
 ````
 

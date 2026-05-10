@@ -60,11 +60,16 @@ checkout clean until you merge.
     --lead claude:coder --partner codex:planner \
     --cwd ~/code/scratch
 
-# Check what duet would do without calling either agent.
-./duet.py --dry-run --task "Explain this repository" \
-    --lead claude:coder --partner codex:planner \
+# Seed duet from Claude Code's real /review output.
+./duet.py --recap --task-from-cmd 'claude -p /review' \
+    --lead claude:reviewer --partner codex:coder \
+    --worktree \
     --cwd .
 ```
+
+In the review recipe, Claude's `/review` runs once to produce the kickoff
+critique. Duet then hands that critique to Codex, preserves both agent
+sessions, and manages the back-and-forth until convergence or the turn limit.
 
 Install the `duet` command:
 
@@ -95,13 +100,22 @@ plus your feedback, including any appended worktree handoff block and diff.
 
 ## Common Recipes
 
-Pipe another tool into duet:
+Call Claude Code's real `/review` skill through duet:
 
 ```bash
-claude -p /review | ./duet.py --task @- \
-    --lead claude:coder --partner codex:planner \
-    --cwd ~/workspace/project
+./duet.py --recap --task-from-cmd 'claude -p /review' \
+    --lead claude:reviewer --partner codex:coder \
+    --worktree \
+    --cwd ~/workspace/project \
+    --turns 6
 ```
+
+The `/review` skill supplies the initial findings; duet handles the subsequent
+Codex fix turn, Claude verification turn, worktree diff handoff, and any extra
+rounds.
+
+With the optional Claude Code skill from [docs/USAGE.md](docs/USAGE.md),
+plain `/duet` runs that same `/review` kickoff recipe.
 
 Let duet run the upstream command inside the target project:
 
