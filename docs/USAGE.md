@@ -243,8 +243,15 @@ EOF
 
 ## Real loop test
 
-`make test` is the fast dry-run regression suite. To check the actual product
-loop with real agents, run:
+`make test` is the fast regression suite — it runs the stdlib unit tests in
+`tests/test_duet.py` (pure-function coverage of the convergence detector,
+codex session-id parser, recap header parser, file-path heuristic, reasoning
+maps, partner spec parser, markdown fence sizer, age formatter, and status
+heuristic) followed by `scripts/smoke.sh` dry-run cases that exercise the
+CLI surface and exit-code contract). Use `make unit-test` or
+`make smoke-test` to run just one half.
+
+To check the actual product loop with real agents, run:
 
 ```bash
 make loop-test
