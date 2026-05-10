@@ -272,9 +272,10 @@ python3 scripts/duet_loop_e2e.py --base-dir ~/duet-loop-runs/$(date +%Y%m%d-%H%M
 python3 scripts/duet_loop_e2e.py --reasoning low
 ```
 
-Do not run multiple loop-test sweeps concurrently. Codex resume is cwd-based;
-the harness isolates each fixture and worktree, but parallel sweeps add
-unnecessary ambiguity.
+Do not run multiple loop-test sweeps concurrently. UUID-pinned Codex resume is
+parallelism-safe but the `--last` fallback path is still cwd-based; the harness
+isolates each fixture and worktree, but parallel sweeps add unnecessary
+ambiguity if any of them hit the fallback.
 
 ---
 
@@ -438,7 +439,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 ## How session memory works
 
 - **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
-- **Codex**: first call is `codex exec`, subsequent calls are `codex exec resume --last` in the same `--cd`. Codex doesn't expose a session id we can pin, so it uses "most recent in cwd". **Don't run other codex sessions in that cwd while a duet is running** — they'd compete for `--last`. `--worktree` gives duet's Codex agent its own cwd, but a parallel Codex session launched inside that same worktree can still race.
+- **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. `--worktree` gives duet's Codex agent its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 
 ---
 
@@ -690,7 +691,7 @@ Notes:
 - `--task`, `--kickoff`, and `--task-from-cmd` are optional; if present, they are treated as one extra continuation instruction. Pass at most one.
 - The old run remains intact. Continuation always creates a new run directory whose `state.json` includes `continue_from`.
 - If the old run used worktree mode, duet reuses that worktree. To override which agent owns it, pass `--worktree-for lead` or `--worktree-for partner`.
-- Don't run other Codex sessions in the relevant cwd/worktree before continuing; Codex resume is still `--last` and cwd-based.
+- Don't run other Codex sessions in the relevant cwd/worktree between runs if the prior run's `state.json` has no Codex `session_id` (i.e. it pre-dates UUID parsing or never managed to capture one) — that continuation will fall back to `codex exec resume --last`, which is cwd-based. When a UUID was captured, continuation pins to it and parallel Codex sessions in the same cwd are safe.
 
 You can also drop into a single agent without duet:
 
@@ -698,7 +699,17 @@ You can also drop into a single agent without duet:
 # Talk to claude alone, full context preserved
 claude --resume "$CLAUDE_SID"
 
-# Or hand codex a one-off in the same cwd
-( cd <project> && codex exec resume --last --sandbox workspace-write \
-    "Now also write a unit test for the new error path." )
+# Or hand codex a one-off in the same cwd. Prefer the captured session id
+# from state.json so it isn't ambiguous which codex session you're resuming;
+# fall back to `--last` for older runs that didn't capture one.
+CODEX_SID=$(jq -r '.agents[] | select(.backend=="codex") | .session_id // empty' \
+    runs/<id>/state.json)
+( cd <project> && \
+  if [ -n "$CODEX_SID" ] && [ "$CODEX_SID" != "codex-current" ]; then \
+    codex exec resume "$CODEX_SID" \
+        "Now also write a unit test for the new error path."; \
+  else \
+    codex exec resume --last \
+        "Now also write a unit test for the new error path."; \
+  fi )
 ```

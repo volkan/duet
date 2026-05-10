@@ -22,9 +22,12 @@ Workflow this is built for:
 Each agent keeps its own session across turns:
   - Claude: `claude -p --resume <session_id> --output-format json` — we capture
     `session_id` from the JSON wrapper and reuse it.
-  - Codex:  first turn `codex exec ...`, subsequent turns `codex exec resume --last`
-    in the same cwd (caveat: don't run other codex sessions in that cwd in parallel;
-    use `--worktree` to isolate duet's Codex cwd from the host repo).
+  - Codex:  first turn `codex exec ...`; subsequent turns `codex exec resume <uuid>`
+    when we parsed a session id from Codex's stderr, or `codex exec resume --last`
+    in the same cwd as a fallback for builds that don't print one. Pinning the
+    UUID makes resume robust to parallel Codex sessions sharing the cwd, but
+    `--last` is still keyed on cwd — use `--worktree` to isolate duet's Codex
+    cwd from the host repo when no UUID is available.
 
 Transcript is always logged to runs/<ts>/transcript.md for humans, but each
 prompt sent to an agent is just the latest counterpart message — keeping
@@ -751,13 +754,50 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         raise RuntimeError(f"claude returned malformed JSON output: {snippet!r}")
 
 
+# Codex's `codex exec` prints a line like `session id: 019e12ad-0b1b-7732-bd7b-6acbbd04ab46`
+# to stderr near startup; modern builds also re-emit it on resume. We pin to that
+# UUID for subsequent resumes so duet doesn't depend on `--last`'s cwd-keyed
+# lookup. Anchored to "session id" to avoid false-positives on stray UUIDs in
+# tracebacks or path strings; case-insensitive because the label has varied.
+_CODEX_UUID_PATTERN = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+_CODEX_SESSION_ID_RE = re.compile(
+    r"session[ _-]?id\s*[:=]\s*(" + _CODEX_UUID_PATTERN + r")",
+    re.IGNORECASE,
+)
+_CODEX_UUID_RE = re.compile(r"\A" + _CODEX_UUID_PATTERN + r"\Z", re.IGNORECASE)
+
+
+def _parse_codex_session_id(stderr: str) -> Optional[str]:
+    """Return the last `session id: <uuid>` UUID found in Codex's stderr.
+
+    The last match wins so a resume that emits both the inherited id and a
+    rotated id (if a future Codex build does that) ends up pinned to the
+    rotated one. Returns the UUID lowercased; None if no match. We never parse
+    stdout — Codex puts the assistant reply there and a UUID inside the reply
+    must not be confused for the harness's session pin.
+    """
+    if not stderr:
+        return None
+    matches = _CODEX_SESSION_ID_RE.findall(stderr)
+    return matches[-1].lower() if matches else None
+
+
 def call_codex(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, sandbox: str, timeout: int, dry: bool,
                first_turn: bool, reasoning: Optional[str] = None,
                fast: bool = False,
                stderr_log_path: Optional[pathlib.Path] = None,
                pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
-    """Returns (assistant_text, new_session_id). Codex resume tracking uses --last."""
+    """Returns (assistant_text, new_session_id).
+
+    Resume strategy: when stderr from a prior turn yielded a UUID we pin to
+    that with `codex exec resume <uuid>`; otherwise we fall back to
+    `codex exec resume --last`, which keys on cwd. `agent.session_id` carries
+    either the parsed UUID, the sentinel ``"codex-current"`` (meaning "use
+    --last"), or ``None`` (no prior turn for this agent).
+    """
     eff_cwd = agent.cwd_override or cwd
     # Fast mode pins this Codex turn to low reasoning regardless of caller
     # intent. Codex minimal currently rejects the default tool set, while low
@@ -808,20 +848,34 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         options = [*exec_only_opts, *shared_opts, *reasoning_args, *agent.extra_args]
         cmd = ["codex", "exec", *options, full_prompt]
     else:
-        # Resume the most recent codex session in this cwd. Caveat: don't run
-        # parallel codex sessions in the same cwd while a duet is running.
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
-        # directory for `--last`'s lookup. sandbox carries over from session.
+        # directory regardless of how we resume. `--sandbox` and `--cd` are
+        # exec-only; sandbox carries over from the resumed session.
         options = [*shared_opts, *reasoning_args, *agent.extra_args]
-        cmd = ["codex", "exec", "resume", "--last", *options, full_prompt]
+        if _CODEX_UUID_RE.match(agent.session_id):
+            # Pin to the UUID we parsed from a prior turn's stderr. This is
+            # robust to parallel codex sessions sharing the cwd because
+            # codex looks up the session by id, not by recency.
+            cmd = ["codex", "exec", "resume", agent.session_id,
+                   *options, full_prompt]
+        else:
+            # Sentinel value (typically "codex-current") meaning "we know a
+            # prior turn happened but never captured a UUID." Fall back to
+            # the most recent codex session in this cwd. Caveat: don't run
+            # parallel codex sessions in the same cwd while a duet is alive.
+            cmd = ["codex", "exec", "resume", "--last",
+                   *options, full_prompt]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
     rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout,
                         stderr_log_path=stderr_log_path,
                         pid_file_path=pid_file_path)
     if rc != 0:
         raise RuntimeError(f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…")
-    # We don't reliably parse codex's session id; treat presence of "last"-resume as our state marker.
-    return out.rstrip(), agent.session_id or "codex-current"
+    # Prefer a freshly-parsed UUID from stderr; fall back to whatever id we
+    # were already carrying; finally fall back to the "codex-current"
+    # sentinel so the next turn at least knows a prior turn happened.
+    parsed_sid = _parse_codex_session_id(err)
+    return out.rstrip(), parsed_sid or agent.session_id or "codex-current"
 
 
 def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool,
@@ -2030,6 +2084,20 @@ def build_continue_config(run_arg: str,
         parser.error(f"--continue: no such run dir or id: {run_arg}")
     state = _load_run_state(run_dir, parser, "--continue")
     agents = _agents_from_state(state, parser, "--continue")
+    # Older runs (or runs that crashed before the first state.json roll) may
+    # have Codex agents that already spoke but have no saved session_id. Without
+    # a marker, run_duet would treat the next turn as a fresh `codex exec` and
+    # lose the prior session. Plant the legacy "codex-current" sentinel so
+    # call_codex resumes via `--last` keyed on cwd.
+    history = state.get("history") or []
+    if isinstance(history, list):
+        codex_speakers = {item.get("agent") for item in history
+                          if isinstance(item, dict)}
+        for agent in agents:
+            if (agent.backend == "codex"
+                    and not agent.session_id
+                    and agent.name in codex_speakers):
+                agent.session_id = "codex-current"
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
     timeout = args.timeout
     user_note = _continue_note_from_args(args, cwd, timeout, parser, stdin_cache)
@@ -2234,8 +2302,9 @@ def main() -> int:
                     help="which agent runs in the worktree (default: partner)")
     ap.add_argument("--worktree-path", metavar="PATH", default=None,
                     help="reuse an EXISTING worktree (e.g. from a previous cancelled run). "
-                         "Codex's `exec resume --last` will pick up where it left off in this cwd. "
-                         "Skips git worktree creation. Mutually exclusive with --worktree.")
+                         "Codex resumes via the saved session UUID (or `--last` for "
+                         "older runs); cwd is preserved either way. Skips git "
+                         "worktree creation. Mutually exclusive with --worktree.")
     ap.add_argument("--worktree-root", metavar="PATH", default=None,
                     help="parent directory for newly-created worktrees (used with --worktree). "
                          "Each run lands at <PATH>/<run_id>/. Default: <runs_dir>/<run_id>/wt/, "

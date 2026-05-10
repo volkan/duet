@@ -79,7 +79,9 @@ make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 Each agent keeps its own conversation memory:
 
 - Claude resumes with `claude -p --resume <session_id>`.
-- Codex resumes with `codex exec resume --last` in the working directory.
+- Codex resumes with `codex exec resume <session_id>` when duet captured one
+  from Codex's stderr, or `codex exec resume --last` in the working directory
+  as a fallback for older builds that don't print a session id.
 
 On each turn, duet sends the latest reply from one agent to the other. It
 continues until both agents accept convergence in back-to-back turns, `--turns`
@@ -220,9 +222,12 @@ notes live in [AGENTS.md](AGENTS.md).
 - `duet --continue <run>` starts a fresh run from a prior `state.json`, restores
   saved session ids, and reuses the previous worktree when available. It does
   not append to the old transcript.
-- Parallel Codex sessions in the same cwd are unsafe because
-  `codex exec resume --last` is cwd-based. `--worktree` isolates duet's Codex
-  cwd from the host repo, but do not start another Codex session inside that
+- Parallel Codex sessions in the same cwd are safe when duet captured a
+  session id from Codex's stderr — that turn pins to the UUID, not to recency.
+  When the UUID was not captured (old Codex builds, or continuing a pre-UUID
+  run), duet falls back to `codex exec resume --last`, which is cwd-based and
+  unsafe to share. `--worktree` isolates duet's Codex cwd from the host repo;
+  in `--last` fallback mode, do not start another Codex session inside that
   same worktree while the run is active.
 - Transcripts capture full agent text. Convergence detection only counts
   rationale-backed sentinels outside fenced markdown code blocks.

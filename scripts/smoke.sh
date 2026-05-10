@@ -236,6 +236,124 @@ assert "model_reasoning_effort=low" in resume, resume
 assert "model_reasoning_summary=concise" in resume, resume
 PY
 
+# Codex resume by parsed session UUID. call_codex must:
+#   1. Parse `session id: <uuid>` out of stderr and return that UUID, so
+#      run_duet writes a real id (not the "codex-current" sentinel) to
+#      state.json on the first turn.
+#   2. On the next turn, pin to that UUID with `codex exec resume <uuid>`
+#      (no `--last`, no `--sandbox`, no `--cd`).
+#   3. Keep the legacy `codex-current` sentinel routing through `--last`.
+#   4. Treat session_id=None as "no resume info" → fresh `codex exec`.
+#   5. Keep all options BEFORE the positional prompt.
+expect "codex resume by session id"          0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+cwd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+UUID = "019e12ad-0b1b-7732-bd7b-6acbbd04ab46"
+STDERR_WITH_UUID = (
+    "[codex] starting up\n"
+    f"session id: {UUID}\n"
+    "[codex] tool calls: 0\n"
+)
+
+# 1. Stderr parser returns the UUID lowercased; tolerates noise; rejects
+#    arbitrary UUIDs that aren't labeled as a session id.
+assert m._parse_codex_session_id(STDERR_WITH_UUID) == UUID
+assert m._parse_codex_session_id("nothing here") is None
+assert m._parse_codex_session_id(f"trace: {UUID} happened") is None
+assert m._parse_codex_session_id(f"Session ID: {UUID.upper()}") == UUID
+
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", STDERR_WITH_UUID
+
+m._run = fake_run
+
+# 2. Fresh first turn parses the UUID out of stderr and returns it.
+agent = m.Agent(name="codex-partner", backend="codex", role="coder")
+text, sid = m.call_codex(
+    agent, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=True,
+)
+assert sid == UUID, sid
+first = calls[-1]
+assert "--sandbox" in first, first
+assert "--cd" in first, first
+assert first[-1].startswith("=== ROLE ==="), first  # prompt is last
+
+# 3. With a real UUID stored, resume pins to it and drops --last/--sandbox/--cd.
+agent.session_id = UUID
+calls.clear()
+
+def fake_run_resume(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", STDERR_WITH_UUID  # codex re-emits same id on resume
+
+m._run = fake_run_resume
+m.call_codex(
+    agent, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=False,
+)
+resume = calls[-1]
+assert resume[:4] == ["codex", "exec", "resume", UUID], resume
+assert "--last" not in resume, resume
+assert "--sandbox" not in resume, resume
+assert "--cd" not in resume, resume
+assert resume[-1].startswith("=== ROLE ==="), resume  # options before prompt
+
+# 4. The "codex-current" sentinel still routes through --last (legacy state).
+agent.session_id = "codex-current"
+calls.clear()
+m.call_codex(
+    agent, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=False,
+)
+legacy = calls[-1]
+assert legacy[:4] == ["codex", "exec", "resume", "--last"], legacy
+assert "--sandbox" not in legacy, legacy
+assert "--cd" not in legacy, legacy
+
+# 5. session_id=None plus first_turn=False (anomalous, but possible if state
+#    was hand-edited) takes the safe path: fresh `codex exec` with --sandbox
+#    and --cd, never an unanchored resume.
+agent.session_id = None
+calls.clear()
+m.call_codex(
+    agent, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=False,
+)
+fallback = calls[-1]
+assert fallback[:2] == ["codex", "exec"], fallback
+assert "resume" not in fallback, fallback
+assert "--sandbox" in fallback, fallback
+
+# 6. If stderr has no UUID, fresh turn returns the legacy sentinel so the
+#    next turn still routes through --last instead of starting another
+#    fresh codex exec.
+def fake_run_no_uuid(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", "no session info here\n"
+
+m._run = fake_run_no_uuid
+agent2 = m.Agent(name="codex-partner", backend="codex", role="coder")
+_, sid2 = m.call_codex(
+    agent2, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=True,
+)
+assert sid2 == "codex-current", sid2
+PY
+
 # Role-scoped codex-fast: when the run has a codex:planner alongside a
 # codex:coder, fast must apply only to the coder. call_agent recomputes
 # `fast = cfg.codex_fast and agent.role == "coder"` so the planner keeps
