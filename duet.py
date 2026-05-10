@@ -436,15 +436,21 @@ def _markdown_fence(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def worktree_handoff_block(wt_path: pathlib.Path,
-                           wt_branch: Optional[str] = None) -> str:
-    """Tell the receiving agent exactly where the edited tree lives."""
+def _worktree_handoff_block(wt_path: pathlib.Path,
+                            wt_branch: Optional[str] = None) -> str:
+    """Tell the receiving agent exactly where the edited tree lives.
+
+    Worded for clean turns too — the worktree-agent may have only explored
+    this turn, so we say "any code changes" rather than asserting changes
+    exist. Suggested commands are intentionally project-agnostic; project
+    test commands belong in CLAUDE.md / README, not in this generic block.
+    """
     wt_display = str(wt_path)
     wt_arg = shlex.quote(wt_display)
     branch_line = f"- Branch: `{wt_branch}`\n" if wt_branch else ""
     return (
         "### review target\n"
-        "The code changes for this turn are in the git worktree below. "
+        "Any code changes for this turn are in the git worktree below. "
         "Your current cwd may be a clean checkout, so do not use that cwd's "
         "`git status` as evidence that these edits are absent.\n\n"
         f"- Worktree path: `{wt_display}`\n"
@@ -455,8 +461,6 @@ def worktree_handoff_block(wt_path: pathlib.Path,
         "```bash\n"
         f"git -C {wt_arg} status --short\n"
         f"git -C {wt_arg} diff HEAD\n"
-        f"make -C {wt_arg} test  # if this project uses make test; "
-        "otherwise run its normal checks here\n"
         "```\n"
     )
 
@@ -465,8 +469,10 @@ def append_worktree_diff(reply: str, wt_path: pathlib.Path,
                          wt_branch: Optional[str] = None) -> str:
     try:
         diff_block = git_diff_summary(wt_path)
-        handoff = worktree_handoff_block(wt_path, wt_branch)
-        return f"{reply}\n\n---\n#### worktree changes\n{handoff}\n{diff_block}"
+        handoff = _worktree_handoff_block(wt_path, wt_branch)
+        return (f"{reply}\n\n---\n"
+                f"#### worktree changes ({wt_path.name})\n{handoff}\n"
+                f"{diff_block}")
     except Exception as e:
         return f"{reply}\n\n[duet] git diff failed: {e}"
 
@@ -822,11 +828,16 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
         agent.session_id = new_sid
         return text
     if agent.backend == "codex":
+        # Fast mode is scoped to coder-role codex agents so it can't silently
+        # downgrade a planner/reviewer when a user pairs `--reasoning max`
+        # with `--codex-fast`. Config validation in main() warns when no
+        # codex:coder agent exists at all.
+        fast = cfg.codex_fast and agent.role == "coder"
         text, new_sid = call_codex(agent, sys_prompt, message, cfg.cwd,
                                    cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
                                    first_turn=first_turn_for_agent,
                                    reasoning=reasoning,
-                                   fast=cfg.codex_fast,
+                                   fast=fast,
                                    stderr_log_path=log_path,
                                    pid_file_path=pid_path)
         agent.session_id = new_sid
@@ -1381,7 +1392,9 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         return reason
     while True:
         print(f"\n[duet] loop ended (reason={reason}). "
-              f"Press Enter to finish, or type feedback to force another turn:")
+              f"Press Enter to finish, or type feedback to force another turn "
+              f"(your text is appended as a human-feedback message and sent "
+              f"to the next agent):")
         try:
             line = input("force> ").strip()
         except EOFError:
@@ -2181,6 +2194,33 @@ def main() -> int:
         validate_reasoning(agent.reasoning_effort, f"agent {agent.name} reasoning_effort")
     if cfg.worktree and cfg.worktree_path:
         raise SystemExit("--worktree and --worktree-path/worktree_path are mutually exclusive")
+
+    # Codex fast mode is scoped to coder-role codex agents (see call_agent).
+    # Surface that scoping at config time so a user who pairs `--reasoning max`
+    # with `--codex-fast --lead codex:planner` gets a loud signal rather than
+    # silently running the planner at low effort.
+    if cfg.codex_fast:
+        codex_agents = [a for a in cfg.agents if a.backend == "codex"]
+        codex_coders = [a for a in codex_agents if a.role == "coder"]
+        codex_non_coders = [a for a in codex_agents if a.role != "coder"]
+        if not codex_coders:
+            print(
+                "[duet] WARNING: --codex-fast had no effect — "
+                "no codex agent has role=coder in this duet. "
+                "Fast mode applies only to codex:coder; set per-agent "
+                "`reasoning_effort: low` if you really want fast on a "
+                "non-coder role.",
+                file=sys.stderr,
+            )
+            cfg.codex_fast = False
+        elif codex_non_coders:
+            roles = ", ".join(f"{a.name}({a.role})" for a in codex_non_coders)
+            print(
+                f"[duet] note: --codex-fast applies only to codex:coder; "
+                f"non-coder codex agents [{roles}] keep their normal "
+                f"reasoning effort.",
+                file=sys.stderr,
+            )
 
     # Sanity: are CLIs on PATH?
     if not cfg.dry_run:

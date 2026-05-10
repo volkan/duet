@@ -263,7 +263,7 @@ unnecessary ambiguity.
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `max` maps to `xhigh`. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`. High/max also add prompt nudges (`think hard` / `ultrathink`) for extra in-context guidance. |
-| `--codex-fast` | Codex-only fast mode: pin every codex turn to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Claude turns are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
+| `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path claude is allowed to read/write outside `--cwd` (repeatable). YAML key: `add_dirs:` |
@@ -407,7 +407,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 After any normal exit, if stdin is a TTY:
 
 ```
-[duet] loop ended (reason=converged). Press Enter to finish, or type feedback to force another turn:
+[duet] loop ended (reason=converged). Press Enter to finish, or type feedback to force another turn (your text is appended as a human-feedback message and sent to the next agent):
 force>
 ```
 
@@ -453,14 +453,18 @@ Source: [`[sandbox_workspace_write] network_access`](https://github.com/openai/c
 
 ### Codex fast mode
 
-`--codex-fast` (CLI) or `codex_fast: true` (YAML) pins **every codex turn** in this run to `model_reasoning_effort=low` and adds `model_reasoning_summary=concise`. It overrides `--reasoning` and per-agent `reasoning_effort` for codex agents only — Claude turns keep whatever effort you set. Fast mode uses `low`, not `minimal`, because current Codex tool-enabled runs reject `minimal` effort.
+`--codex-fast` (CLI) or `codex_fast: true` (YAML) pins **codex coder turns** in this run to `model_reasoning_effort=low` and adds `model_reasoning_summary=concise`. It overrides `--reasoning` and per-agent `reasoning_effort` for `codex:coder` agents only — Claude turns and non-coder codex agents (planner, reviewer, custom roles) keep whatever effort you set. Fast mode uses `low`, not `minimal`, because current Codex tool-enabled runs reject `minimal` effort.
+
+This role scoping is deliberate: it stops `--reasoning max --codex-fast --lead codex:planner` from silently running the planner at low effort. If no codex agent has role `coder` in your run, duet prints a `WARNING` to stderr and treats `--codex-fast` as a no-op. If only some codex agents are coders, duet prints a `note:` listing the non-coder codex agents that keep their normal effort.
+
+Escape hatch: if you really want fast on a non-coder codex role, set per-agent `reasoning_effort: low` in YAML for that agent.
 
 Use it when:
 
-- You want a cheap/snappy implementation pass and let the Claude planner do the heavy thinking. `--reasoning high --codex-fast` is the canonical combo.
+- You want a cheap/snappy implementation pass and let the Claude planner do the heavy thinking. `--reasoning high --codex-fast` with the default `claude:planner + codex:coder` is the canonical combo.
 - You're iterating on a tight feedback loop and don't need codex to deliberate over every change.
 
-Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:reviewer` reading a long diff). Fast mode is a Codex-only knob; setting it without any codex agent in the run is a no-op.
+Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:reviewer` reading a long diff, or `codex:planner` driving the work).
 
 ---
 
@@ -468,15 +472,14 @@ Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:
 
 `--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every worktree-agent turn duet appends a handoff block and diff to that agent's reply, so the other agent sees what actually changed — not just what the worktree agent claims changed.
 
-The handoff block names the exact worktree path and branch, warns that the receiving agent's current cwd may be a clean checkout, and gives review commands such as:
+The handoff block names the exact worktree path and branch, warns that the receiving agent's current cwd may be a clean checkout, and gives project-agnostic review commands:
 
 ```bash
 git -C <worktree-path> status --short
 git -C <worktree-path> diff HEAD
-make -C <worktree-path> test  # when this project uses make test
 ```
 
-The diff section then includes `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files.
+Project-specific test commands belong in `CLAUDE.md` / `README` — the handoff stays generic so it works in any project. The diff section then includes `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files.
 
 ### Where the worktree lives
 

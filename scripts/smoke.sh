@@ -127,12 +127,19 @@ wt_path = tmpd / "review wt"
 m.git_diff_summary = lambda path: "### git status\n M duet.py\n\n### diff\n..."
 out = m.append_worktree_diff("reply", wt_path, "duet/test-run")
 quoted = shlex.quote(str(wt_path))
-assert "#### worktree changes" in out, out
+# Heading restores the worktree basename; absolute path lives inside the block.
+assert f"#### worktree changes ({wt_path.name})" in out, out
 assert f"Worktree path: `{wt_path}`" in out, out
 assert "Branch: `duet/test-run`" in out, out
+# Wording must accept clean exploration turns: "Any code changes" not "The code changes".
+assert "Any code changes for this turn" in out, out
+assert "The code changes for this turn" not in out, out
 assert "Your current cwd may be a clean checkout" in out, out
 assert f"git -C {quoted} status --short" in out, out
 assert f"git -C {quoted} diff HEAD" in out, out
+# `make -C <wt> test` was project-specific noise; project test commands
+# belong in CLAUDE.md / README, not the generic handoff.
+assert "make -C" not in out, out
 PY
 
 # Codex fast mode: tag must show in dry-run codex output, and reasoning
@@ -202,6 +209,83 @@ assert resume[:4] == ["codex", "exec", "resume", "--last"], resume
 assert "model_reasoning_effort=low" in resume, resume
 assert "model_reasoning_summary=concise" in resume, resume
 PY
+
+# Role-scoped codex-fast: when the run has a codex:planner alongside a
+# codex:coder, fast must apply only to the coder. call_agent recomputes
+# `fast = cfg.codex_fast and agent.role == "coder"` so the planner keeps
+# its --reasoning effort and the coder gets pinned to low.
+expect "codex-fast scoped to coder"          0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+cwd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", ""
+m._run = fake_run
+
+planner = m.Agent(name="codex-lead", backend="codex", role="planner")
+coder = m.Agent(name="codex-partner", backend="codex", role="coder")
+cfg = m.DuetConfig(
+    cwd=cwd,
+    agents=[planner, coder],
+    task="x",
+    sandbox="workspace-write",
+    permission_mode="acceptEdits",
+    reasoning="high",
+    codex_fast=True,
+)
+m.call_agent(planner, "msg", cfg, first_turn_for_agent=True)
+planner_cmd = calls[-1]
+# Planner: high effort, no fast summary, no fast pinning.
+assert "model_reasoning_effort=high" in planner_cmd, planner_cmd
+assert "model_reasoning_effort=low" not in planner_cmd, planner_cmd
+assert "model_reasoning_summary=concise" not in planner_cmd, planner_cmd
+
+m.call_agent(coder, "msg", cfg, first_turn_for_agent=True)
+coder_cmd = calls[-1]
+# Coder: pinned to low, concise summary on.
+assert "model_reasoning_effort=low" in coder_cmd, coder_cmd
+assert "model_reasoning_effort=high" not in coder_cmd, coder_cmd
+assert "model_reasoning_summary=concise" in coder_cmd, coder_cmd
+PY
+
+# When --codex-fast is set but no codex:coder is in the run, duet must warn
+# on stderr and treat the flag as a no-op (cfg.codex_fast cleared).
+# Setup: --lead codex:planner --partner claude:coder --reasoning high.
+# Expect: stderr contains the warning; codex planner dry-run output shows
+# `reasoning=high`, NOT `reasoning=low`, and is NOT tagged ` fast`.
+expect "codex-fast warns when no codex coder" 0 bash -c '
+  out=$("$1" --dry-run --task "x" --cwd "$2" --reasoning high \
+         --lead codex:planner --partner claude:coder --codex-fast 2>&1)
+  echo "$out" | grep -q "WARNING: --codex-fast had no effect" \
+    || { echo "missing WARNING in stderr"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "\[dry-run codex/codex-lead.*reasoning=high" \
+    || { echo "codex-lead not at reasoning=high"; echo "$out"; exit 1; }
+  echo "$out" | grep -E "\[dry-run codex/codex-lead.* fast" >/dev/null \
+    && { echo "codex-lead got fast tag despite no coder"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
+
+# When --codex-fast is set and there is a codex:coder plus a non-coder codex
+# agent, duet prints a softer "note:" listing the non-coder. Setup:
+# --lead codex:planner --partner codex:coder --reasoning high.
+expect "codex-fast partial note" 0 bash -c '
+  out=$("$1" --dry-run --task "x" --cwd "$2" --reasoning high \
+         --lead codex:planner --partner codex:coder --codex-fast 2>&1)
+  echo "$out" | grep -q "note: --codex-fast applies only to codex:coder" \
+    || { echo "missing partial-scoping note"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
 
 # C2 - foreign-cwd defaults
 expect "foreign cwd creates .duet/runs/"     0 "$DUET" --task "x" --dry-run --cwd "$TMPD"

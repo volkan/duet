@@ -11,11 +11,15 @@ permission_mode: acceptEdits
 dry_run: false
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
-# Codex-only fast mode: pin every codex turn to low reasoning effort and
+# Codex-only fast mode: pin codex coder turns to low reasoning effort and
 # concise reasoning summaries, regardless of the `reasoning:` key or any
-# per-agent `reasoning_effort`. Claude turns are untouched. Useful when the
-# planner (claude) is doing the deep thinking and codex just needs to apply
-# edits quickly. Combine with `reasoning: high` for that split.
+# per-agent `reasoning_effort`. Role-scoped to codex:coder so it can't silently
+# downgrade a codex:planner / codex:reviewer; duet warns and treats it as a
+# no-op when no codex coder is present. Claude turns and non-coder codex
+# agents are untouched. Useful when the planner (claude) is doing the deep
+# thinking and codex just needs to apply edits quickly. Combine with
+# `reasoning: high` for that split. To force fast on a non-coder codex role,
+# set per-agent `reasoning_effort: low` instead.
 # codex_fast: false
 
 # Optional: where new git worktrees land when --worktree is on. Default is
