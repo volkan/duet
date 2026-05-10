@@ -20,8 +20,6 @@ make uninstall
 ./duet.py --config examples/hello.yaml           # 2-turn real run, no edits to disk
 ./duet.py --status runs/<id>/                    # health-probe a finished or in-flight run
 ./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
-python3 scripts/decision_from_transcript.py \
-    --transcript runs/<id>/transcript.md --out-dir ../   # rebuild deliverables when agents deadlocked
 ```
 
 There's no unit-test suite — `scripts/smoke.sh` is the regression net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
@@ -39,7 +37,7 @@ There's no unit-test suite — `scripts/smoke.sh` is the regression net. Each `e
 
 These break easily if you only update one place.
 
-1. **The reasoning translation layer.** Five duet-abstraction levels (`REASONING_LEVELS = ["minimal","low","medium","high","max"]`) → two backend-specific maps (`CLAUDE_REASONING_MAP`, `CODEX_REASONING_MAP`) → prompt-prefix table (`CLAUDE_REASONING_PROMPT_PREFIX`) → the actual `--effort`/`-c model_reasoning_effort=` emission inside `call_claude`/`call_codex`. Codex `medium` is intentionally a no-op (Codex's default; don't waste a flag). Codex `max` maps to `xhigh` (Codex's actual highest documented value). Claude `minimal` maps to `low` (Claude has no `minimal`). High/max also tack a "think hard"/"ultrathink" prefix onto the system prompt — those are prompt nudges, not authoritative effort controls. `examples/self-review.yaml` ships an inline Python verification one-liner that monkey-patches `_run` and asserts each level produces the right cmd; rerun it after touching any of these constants.
+1. **The reasoning translation layer.** Five duet-abstraction levels (`REASONING_LEVELS = ["minimal","low","medium","high","max"]`) → two backend-specific maps (`CLAUDE_REASONING_MAP`, `CODEX_REASONING_MAP`) → prompt-prefix table (`CLAUDE_REASONING_PROMPT_PREFIX`) → the actual `--effort`/`-c model_reasoning_effort=` emission inside `call_claude`/`call_codex`. Codex `medium` is intentionally a no-op (Codex's default; don't waste a flag). Codex `max` maps to `xhigh` (Codex's actual highest documented value). Claude `minimal` maps to `low` (Claude has no `minimal`). High/max also tack a "think hard"/"ultrathink" prefix onto the system prompt — those are prompt nudges, not authoritative effort controls. `scripts/check_reasoning_levels.py` monkey-patches `_run` and asserts each level produces the right cmd; rerun it after touching any of these constants.
 
    **Codex fast mode override.** `cfg.codex_fast` (CLI `--codex-fast`, YAML `codex_fast: true`) is a Codex-only short-circuit that pins this run's codex turns to `model_reasoning_effort=low` and adds `model_reasoning_summary=concise`, regardless of `cfg.reasoning` or `agent.reasoning_effort`. **Fast mode is role-scoped: it applies only to codex agents whose role is `coder`.** `call_agent` recomputes `fast = cfg.codex_fast and agent.role == "coder"` per turn, so a `--lead codex:planner --codex-fast` run no longer silently downgrades the planner. Config validation in `main()` warns on stderr and clears `cfg.codex_fast` when no codex:coder agent exists; it prints a softer note when fast is partial (some codex agents are coders, some aren't). The override happens inside `call_codex` (`effective = "low" if fast else reasoning`) so claude turns are unaffected — `--reasoning high --codex-fast` with the default `claude:planner + codex:coder` is the canonical "deep planner, fast coder" combo. If a user really wants fast on a non-coder codex role, they can set per-agent `reasoning_effort: low` in YAML — that's the documented escape hatch. Do not use Codex `minimal` here unless the default Codex tool set changes; real tool-enabled runs currently reject `minimal` effort. Dry-run output tags codex turns with ` fast` so smoke can grep for it; if you change the tag string, update `scripts/smoke.sh`'s `expect_stdout "codex-fast …"` lines.
 
@@ -59,7 +57,7 @@ These break easily if you only update one place.
 
 ### `str.replace("{SENTINEL}", ...)`, never `.format(...)`
 
-Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently contain literal `{...}` (JSON schema examples, jq patterns). `Agent.system_prompt` does `str.replace`, not `.format`, on purpose. If you change this, smoke won't catch it — but `examples/repo-compare.yaml`'s role_prompt would crash with "unexpected '{' in field name" on the first turn.
+Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently contain literal `{...}` (JSON schema examples, jq patterns). `Agent.system_prompt` does `str.replace`, not `.format`, on purpose. If you change this, smoke won't catch it — but any `role_prompt` containing literal `{json: schema}` examples would crash with "unexpected '{' in field name" on the first turn.
 
 ### Worktree mode
 
@@ -85,19 +83,15 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 ## Codex-specific quirks (bite often)
 
-- **Sandbox blocks network by default.** `--sandbox workspace-write` blocks outbound network — `gh`, `curl`, `npm install`, anything DNS — until you opt in. The fix lives in YAML as `extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`. Symptoms: every `gh` call fails with "error connecting to api.github.com". `examples/repo-compare.yaml` has the canonical opt-in.
+- **Sandbox blocks network by default.** `--sandbox workspace-write` blocks outbound network — `gh`, `curl`, `npm install`, anything DNS — until you opt in. The fix lives in YAML as `extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`. Symptoms: every `gh` call fails with "error connecting to api.github.com". `duet.example.yaml`'s commented `codex-partner` `extra_args` is the canonical opt-in to copy from.
 - **`--last` resume keys on cwd.** Codex doesn't expose a session id duet can pin; resume = "most recent codex session in this cwd". Don't run parallel codex sessions in the same cwd while a duet is live. `--worktree` isolates duet's Codex cwd from the host repo, but a parallel codex *inside* that same worktree still races.
 - **`extra_args` flags must be option-form only** and go before the positional prompt (see invariant 3 above).
 
 ## Claude-specific quirks
 
 - **Output is JSON-wrapped.** `claude -p ... --output-format json` returns `{"result":"...","session_id":"..."}`. We always re-read `session_id` and write it back to `agent.session_id` so the next turn picks up the rotated id (Claude rotates session ids on every reply). A malformed JSON output raises `RuntimeError` with a 500-char snippet — useful when claude crashes mid-stream.
-- **`--add-dir` is required for any path outside cwd.** Without it Claude silently refuses paths outside `cwd` with a generic permission error. YAML key `add_dirs:` (list); CLI flag `--add-dir` is repeatable. `examples/repo-compare.yaml` writes `../DECISION_v2.{md,html}` and pre-supplies `add_dirs: [..]` for that reason.
+- **`--add-dir` is required for any path outside cwd.** Without it Claude silently refuses paths outside `cwd` with a generic permission error. YAML key `add_dirs:` (list); CLI flag `--add-dir` is repeatable. Pre-supply `add_dirs: [..]` (or repeat `--add-dir`) whenever the task writes paths above `cwd`.
 - **`--effort` is the authoritative reasoning control;** the high/max prompt prefixes are belt-and-braces.
-
-## When agents deadlock or fail to write deliverables
-
-`scripts/decision_from_transcript.py` is a fallback that parses the codex turn-1 fenced JSON blocks out of `transcript.md` and rebuilds `DECISION_v2.{md,html}` directly. It exists because of one specific run (`runs/20260506-235839/`) where the agents produced all the per-repo JSON rubrics but the planner failed to write the deliverables (sandbox + add-dirs interaction). If you find yourself in a similar "transcript has the data but the deliverable file is missing" situation, that script is the template for a new salvager — copy and adapt rather than re-running the duet.
 
 ## Keep docs in sync with each change
 
@@ -108,10 +102,10 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | new / renamed / changed CLI flag | `docs/USAGE.md` flag table; `README.md` "Best recipes" if the flag shows up in a canonical recipe; `duet.example.yaml` if there's a corresponding YAML key; `scripts/smoke.sh` if the flag has dry-run-able exit-code semantics |
 | new / changed YAML config key | `duet.example.yaml` (commented example with default); `docs/USAGE.md` only if it warrants user-facing prose beyond the flag table |
 | new / changed exit code or `--status` output | `docs/USAGE.md` exit-code table; add an `expect` line in `scripts/smoke.sh` |
-| new / changed reasoning level or backend mapping | rerun the verification one-liner in `examples/self-review.yaml` and update its **expected output block** if values shift; `docs/USAGE.md` `--reasoning` row |
+| new / changed reasoning level or backend mapping | rerun `scripts/check_reasoning_levels.py` and update its `EXPECTED` dict if values shift; `docs/USAGE.md` `--reasoning` row |
 | new / changed Codex fast-mode behavior (`cfg.codex_fast`) | `docs/USAGE.md` `--codex-fast` flag-table row + "Codex fast mode" subsection; `duet.example.yaml` `codex_fast:` line; `README.md` "deep planner, fast coder" recipe; `scripts/smoke.sh` `codex-fast` expect lines |
 | new / changed output-dir layout (per-turn files, run dirs, worktree placement) | `docs/USAGE.md` "Output layout" block; `scripts/smoke.sh` side-effect assertions (the `[[ -d ... ]]` / `[[ -f ... ]]` / `grep -q` checks at the bottom); `README.md` if user-visible |
-| new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `examples/repo-compare.yaml` if its `extra_args` pattern is what users copy |
+| new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `duet.example.yaml`'s `extra_args` example if users copy that pattern |
 | new role or new ROLE_PROMPT entry | `ROLE_PROMPTS` in `duet.py`; the "Roles ship with" line in `docs/USAGE.md` |
 | stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` "What duet does" numbered list if user-visible |
 | change to the `/duet` slash-command recipe | the embedded skill body in `docs/USAGE.md` (the section starting "`/duet` Claude Code skill (optional)") |

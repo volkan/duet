@@ -290,7 +290,7 @@ unnecessary ambiguity.
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
-| `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs; YAML configs for self-review / repo-compare set their own higher cap) |
+| `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |

@@ -1,47 +1,62 @@
-# Minimal smoke test — prove the plumbing works end-to-end before running
-# anything serious.
+# Minimal smoke test — prove the duet plumbing works end-to-end before running
+# anything serious. Two real agent turns; the loop converges via pair agreement
+# instead of running out of turns.
 #
-# Run from ~/workspace/agent2agent/duet/:
+# Run from the duet/ folder:
 #   ./duet.py --config examples/hello.yaml
-#
-# Two turns total. No worktree, no reasoning override, no edits to disk.
-# Codex says hello, Claude confirms, both emit <<<LGTM>>>.
 #
 # What you should see in your terminal:
 #   - "[duet] run dir: runs/<ts>"
-#   - "--- Turn 1 :: codex-partner ---" then Codex's live stderr (its
-#     progress / thinking) streamed with a "  │ " prefix as it works
-#   - Codex's final stdout message printed after the turn ends
-#   - "--- Turn 2 :: claude-lead ---" then Claude's reply
-#   - Either turn emits <<<LGTM>>> on its own line → loop exits
-#   - "force> " prompt — press Enter to wrap
+#   - "--- Turn 1 :: codex-helper ---" then Codex's live stderr (its progress
+#     and reasoning) streamed with a "  │ " prefix as it works
+#   - Codex's final stdout printed after the turn ends, ending with an
+#     "LGTM rationale: …" line and "<<<LGTM>>>" on its own line
+#   - "--- Turn 2 :: claude-host ---" then Claude's reply with its own
+#     rationale + sentinel
+#   - duet detects pair-approved convergence after turn 2 and exits with
+#     reason=converged (not max_turns)
+#   - "force> " prompt — press Enter to wrap, or type feedback to push another
+#     round (any forced turn is preserved in the transcript)
+#
+# Why it converges instead of just printing the sentinel: duet only counts a
+# turn as proposing convergence when the reply has BOTH "LGTM rationale: …"
+# (≥20 chars of follow-up text, outside fenced code) AND "<<<LGTM>>>" on its
+# own line. The loop stops only when two back-to-back turns each propose
+# convergence — so a bare sentinel without rationale, or a single agent
+# accepting alone, doesn't end the run. This example exercises the full path.
 
 cwd: .
-max_turns: 2
+max_turns: 2                   # turns 1+2 = back-to-back convergence
 sentinel: "<<<LGTM>>>"
 per_turn_timeout: 120          # 2 min/turn — plenty for a 1-line answer
 runs_dir: runs
 
 sandbox: read-only             # no edits needed; safest setting
-permission_mode: plan          # claude in plan mode = read but don't write
+permission_mode: plan          # claude reads but cannot write
 
-# No worktree — too small to bother
-worktree: false
-# No reasoning override — default is fine for a hello-world
+worktree: false                # too small to bother
+# No reasoning override — default is fine for a hello-world.
 
 dry_run: false                 # real run
 
 task: |
-  Smoke test. Reply with EXACTLY this template, then a newline, then
-  the sentinel on its own line:
+  Smoke test. Reply with EXACTLY this 4-line block — substitute your agent
+  name and today's UTC date, keep the blank line, the rationale line, and the
+  sentinel on its own line:
 
       hello from <your agent name>; 2 + 2 = 4; today's UTC date is <YYYY-MM-DD>.
 
-  Then on the next line:
+      LGTM rationale: smoke-test answer is trivially correct (greeting + arithmetic + date). No files to verify and no further work to do; pair-converging here proves duet's session/turn/convergence plumbing works end-to-end.
       <<<LGTM>>>
 
   Do not write any files. Do not run any tools beyond reading the date.
-  Just produce the one-line answer + sentinel and stop.
+  Just produce that block and stop. Plain text only — do not wrap your
+  reply in a fenced code block (no triple backticks, no triple tildes),
+  because duet's convergence detector ignores fenced text and the run
+  would hit max_turns instead of converging. The point of this run is to
+  exercise the pair-agreement convergence path: both agents emit rationale
+  + sentinel in back-to-back turns, duet detects convergence, the loop
+  exits cleanly.
 
 agents:
   # agents[0] = LEAD: provides the seed message (here: the task itself).
@@ -54,6 +69,7 @@ agents:
   - name: codex-helper
     backend: codex
     role: coder
-    # If your codex needs an auto-approval flag, uncomment one:
+    # Codex 0.128+ with --sandbox read-only doesn't prompt for approval; if
+    # your codex still does, uncomment one of these:
     # extra_args: ["--full-auto"]
     # extra_args: ["--yolo"]

@@ -148,6 +148,12 @@ and Claude (coder) responds in turn 2 with the fixes. `--worktree-for lead`
 keeps the editable checkout under the coder. Keep `--codex-fast` off in this
 recipe: Codex is the reviewer, so max effort is the point.
 
+That same recipe is also packaged as a YAML config you can drop into any
+repo — `examples/pr-review.yaml` reviews `HEAD`'s diff with the same
+agent/effort/worktree pairing, with comments calling out which keys to swap
+for variants (review uncommitted changes, review a specific PR by number,
+faster iteration once review is mostly done).
+
 Review the latest commit plus an untracked notes file by seeding both into the
 task:
 

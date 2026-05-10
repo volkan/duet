@@ -1,0 +1,101 @@
+# Review the latest commit on the current branch — Codex reviews at max
+# effort, Claude applies only the fixes Codex explicitly requests, in an
+# isolated worktree. This is the canonical "review your own recent work"
+# duet recipe; matches the README's "Codex reviewer + Claude coder + max
+# effort" pattern as a YAML config you can drop into any repo.
+#
+# Run from inside the repo whose latest commit you want reviewed:
+#   duet --config /path/to/pr-review.yaml
+# or, if you've copied this file into the target repo:
+#   duet --config pr-review.yaml
+#
+# The partner agent speaks first (duet's default), so this pairing has:
+#   Turn 1 — codex-reviewer reads the diff and emits a numbered list of
+#            blocking issues (with file:line refs and severity).
+#   Turn 2 — claude-coder applies fixes inside the worktree, runs whatever
+#            quick checks the project supports, summarises the diff.
+#   Turn 3 — codex-reviewer reads the appended worktree diff and either
+#            escalates a new issue or accepts with an LGTM rationale +
+#            <<<LGTM>>> sentinel; claude must also accept in turn 4 for
+#            the loop to converge (pair agreement).
+# The worktree is left intact at exit; duet prints merge / drop commands.
+#
+# Key choices (and why):
+#   - reasoning: max          — the point of this recipe is a deep review.
+#                                Don't combine with codex_fast: true here.
+#   - worktree: true,          — claude (the coder, lead) edits a fresh
+#     worktree_for: lead          duet/<run_id> branch; codex (reviewer,
+#                                partner) reads the auto-appended diff each
+#                                turn from its own clean cwd.
+#   - permission_mode:         — claude can apply edits inside the worktree
+#       acceptEdits              without per-file approval prompts.
+#   - sandbox: workspace-write — codex can read freely and run small checks;
+#                                outbound network is OFF by default. If your
+#                                review needs `gh` (e.g. linked issue context)
+#                                see the `extra_args` block below.
+#   - max_turns: 6             — typical: 3-4 turns to converge, 1-2 buffer.
+#                                Bump for hairy reviews; the force> prompt
+#                                lets you push more rounds without restarting.
+#
+# Variants you'll commonly want:
+#   - Review uncommitted changes instead of HEAD:
+#       Replace task_from_cmd with the plain task: line and a `git diff` recipe.
+#   - Review a specific PR by number: replace task_from_cmd with
+#       'gh pr diff <N> --patch' and ensure the codex network override is on.
+#   - Faster iteration once review is mostly done: drop reasoning to "high".
+#
+# Compare with examples/hello.yaml (minimal smoke test) for the simplest
+# possible duet config you can run end-to-end.
+
+cwd: .                         # inside the repo whose HEAD you're reviewing
+max_turns: 6
+sentinel: "<<<LGTM>>>"
+per_turn_timeout: 1200          # 20 min/turn — review + patch can be slow at max effort
+runs_dir: runs                  # falls back to <cwd>/.duet/runs/ if cwd is foreign
+
+sandbox: workspace-write        # codex can read & run small checks
+permission_mode: acceptEdits    # claude applies edits inside the worktree
+
+worktree: true
+worktree_for: lead              # claude (the coder) gets the editable branch
+reasoning: max                  # deep review on both sides; no codex_fast here
+
+# Use the latest commit's diff + message as the kickoff. The command runs in
+# `cwd` and its stdout becomes the seed message handed to the first agent
+# (codex-reviewer). `--no-ext-diff` keeps the output stable across user
+# git config (no syntax-highlighters / pagers). Switch to a YAML block
+# scalar (`task_from_cmd: |`) if you want to chain extra shell — e.g. also
+# emit an untracked notes file: `git show … && printf "\n--- TODO.md ---\n" && cat TODO.md`.
+task_from_cmd: "git show --stat --patch --no-ext-diff HEAD"
+
+# Alternative: hard-code the task instead of running git. Use this when the
+# review is conceptual ("does this design hold up?") rather than diff-based.
+# Comment out task_from_cmd above and uncomment task below:
+# task: |
+#   Review the most recent change on this branch. Identify blocking issues
+#   only (correctness, security, regression risk). Skip nits.
+
+agents:
+  # agents[0] = LEAD: claude-coder, runs in the worktree (because
+  # worktree_for: lead). Applies fixes only when codex explicitly requests
+  # them; defers to codex on what's blocking vs. acceptable.
+  - name: claude-coder
+    backend: claude
+    role: coder
+
+  # agents[1] = PARTNER: codex-reviewer, speaks first (duet default).
+  # Opens turn 1 with the critique. Reads the auto-appended worktree diff
+  # in subsequent turns to verify claude actually addressed each item.
+  - name: codex-reviewer
+    backend: codex
+    role: reviewer
+    # Codex 0.128+ with --sandbox workspace-write defaults to approval=never.
+    # If your version still prompts, prepend "--full-auto" (older builds) or
+    # "--yolo" (community alias) to extra_args.
+    #
+    # Outbound network is BLOCKED by default in the workspace-write sandbox.
+    # Uncomment the network override only if your review needs to reach
+    # api.github.com (e.g. `gh issue view` for linked-issue context, `gh pr
+    # diff` for cross-PR comparisons). Keeping it off is the safer default.
+    # extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
+    extra_args: []
