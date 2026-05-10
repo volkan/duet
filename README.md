@@ -70,7 +70,9 @@ Install the `duet` command:
 
 ```bash
 make install      # symlinks duet.py to ~/.local/bin/duet
-make test         # runs scripts/smoke.sh dry-run regression checks
+make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run checks
+make unit-test    # only the stdlib unittest suite under tests/
+make smoke-test   # only scripts/smoke.sh dry-run regression checks
 make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 ```
 

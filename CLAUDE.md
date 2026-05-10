@@ -12,7 +12,9 @@ The single-file shape is a hard constraint. PyYAML is the one optional import, g
 
 ```bash
 make install            # symlink duet.py → ~/.local/bin/duet (PREFIX= to override)
-make test               # scripts/smoke.sh — ~20 --dry-run cases, all stdlib
+make test               # unit tests (tests/test_duet.py) + scripts/smoke.sh
+make unit-test          # only the stdlib unittest suite under tests/
+make smoke-test         # only scripts/smoke.sh dry-run cases
 make loop-test          # real Claude/Codex E2E loop suite; slow, writes runs/test-loop/
 make uninstall
 
@@ -22,7 +24,10 @@ make uninstall
 ./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
 ```
 
-There's no unit-test suite — `scripts/smoke.sh` is the regression net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
+Two regression nets, in order of granularity:
+
+1. `tests/test_duet.py` (run via `make unit-test` or `python3 -m unittest discover -s tests`) — pure-function unit tests, stdlib `unittest` only. Covers `_convergence_markers` / `convergence_proposed`, `_parse_codex_session_id`, `parse_recap_headers`, `extract_files_heuristic`, the reasoning maps + `validate_reasoning` / `effective_reasoning`, `parse_partner`, `_markdown_fence`, `_humanize_age`, and `derive_status_heuristic`. No subprocesses, no filesystem writes, no agent CLIs — runs in well under a second. Add a test in the same commit as any change to those helpers.
+2. `scripts/smoke.sh` (run via `make smoke-test` or as part of `make test`) — the integration net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
 
 ## Architecture you'll need to read multiple files to grasp
 
@@ -102,7 +107,8 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | new / renamed / changed CLI flag | `docs/USAGE.md` flag table; `README.md` "Best recipes" if the flag shows up in a canonical recipe; `duet.example.yaml` if there's a corresponding YAML key; `scripts/smoke.sh` if the flag has dry-run-able exit-code semantics |
 | new / changed YAML config key | `duet.example.yaml` (commented example with default); `docs/USAGE.md` only if it warrants user-facing prose beyond the flag table |
 | new / changed exit code or `--status` output | `docs/USAGE.md` exit-code table; add an `expect` line in `scripts/smoke.sh` |
-| new / changed reasoning level or backend mapping | rerun `scripts/check_reasoning_levels.py` and update its `EXPECTED` dict if values shift; `docs/USAGE.md` `--reasoning` row |
+| new / changed reasoning level or backend mapping | rerun `scripts/check_reasoning_levels.py` and update its `EXPECTED` dict if values shift; extend `tests/test_duet.py::TestReasoningHelpers` for the data side; `docs/USAGE.md` `--reasoning` row |
+| new / changed pure helper covered by `tests/test_duet.py` (convergence detector, codex session-id parser, recap header parser, file-path heuristic, partner spec parser, markdown fence sizer, age formatter, status heuristic) | add a case to `tests/test_duet.py` describing the new behavior in the same commit |
 | new / changed Codex fast-mode behavior (`cfg.codex_fast`) | `docs/USAGE.md` `--codex-fast` flag-table row + "Codex fast mode" subsection; `duet.example.yaml` `codex_fast:` line; `README.md` "deep planner, fast coder" recipe; `scripts/smoke.sh` `codex-fast` expect lines |
 | new / changed output-dir layout (per-turn files, run dirs, worktree placement) | `docs/USAGE.md` "Output layout" block; `scripts/smoke.sh` side-effect assertions (the `[[ -d ... ]]` / `[[ -f ... ]]` / `grep -q` checks at the bottom); `README.md` if user-visible |
 | new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `duet.example.yaml`'s `extra_args` example if users copy that pattern |
@@ -111,7 +117,7 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | change to the `/duet` slash-command recipe | the embedded skill body in `docs/USAGE.md` (the section starting "`/duet` Claude Code skill (optional)") |
 | breaking semantics or limit change | `README.md` "Limits / future" |
 
-If a change is worth doing, it's worth a smoke case. `scripts/smoke.sh` is the executable part of the docs — drift between it and `duet.py` is the failure mode hardest to spot. Add the `expect` line in the same commit as the code, not later.
+If a change is worth doing, it's worth a smoke case. `scripts/smoke.sh` is the executable part of the docs — drift between it and `duet.py` is the failure mode hardest to spot. Add the `expect` line in the same commit as the code, not later. For the pure helpers listed in the table row above, add the corresponding `tests/test_duet.py` case in the same commit too — unit tests catch contract drift that a `--dry-run` exit code can't see.
 
 When the change is purely internal (helper refactor, no user-visible surface), update the relevant section of **this file** (`CLAUDE.md`) if it falsifies anything in the "Architecture you'll need to read multiple files to grasp" or "Hard constraints" sections.
 
