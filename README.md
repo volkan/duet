@@ -130,6 +130,14 @@ Gate convergence on P0/P1 review findings:
     --cwd ~/workspace/project
 ```
 
+Deep planner, fast coder — Claude plans at high effort, Codex coder turns drop to low for latency (uses the default `claude:planner + codex:coder` pairing):
+
+```bash
+./duet.py --reasoning high --codex-fast \
+    --task "Fix the issue" \
+    --cwd ~/workspace/project
+```
+
 Compact live debug view — see only what each turn produced, in real time:
 
 ```bash

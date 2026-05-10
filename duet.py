@@ -239,7 +239,7 @@ class DuetConfig:
     reasoning: Optional[str] = None           # default reasoning effort for both agents
     codex_fast: bool = False                  # Codex-only "fast mode": pin reasoning to
                                               # low and add `model_reasoning_summary=concise`
-                                              # for every codex turn this run, regardless of
+                                              # for codex coder turns this run, regardless of
                                               # cfg.reasoning / agent.reasoning_effort. Claude's
                                               # effort is untouched, so `--reasoning high
                                               # --codex-fast` keeps the planner deep and the
@@ -2035,11 +2035,11 @@ def main() -> int:
                          "(max → xhigh). Claude: passes `--effort <v>` "
                          "(minimal → low) and adds high/max prompt nudges.")
     ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
-                    help="Codex-only fast mode: pin every codex turn to "
+                    help="Codex-only fast mode: pin codex coder turns to "
                          "`model_reasoning_effort=low` and "
                          "`model_reasoning_summary=concise`, regardless of "
                          "--reasoning / per-agent reasoning_effort. Trades "
-                         "depth for latency on codex turns; claude is "
+                         "depth for latency on codex coder turns; claude is "
                          "unaffected, so `--reasoning high --codex-fast` is "
                          "a real and useful combo. YAML key: `codex_fast: true`.")
     ap.add_argument("--status", metavar="RUN_DIR_OR_ID", default=None,
