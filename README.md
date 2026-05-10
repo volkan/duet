@@ -130,6 +130,38 @@ Gate convergence on P0/P1 review findings:
     --cwd ~/workspace/project
 ```
 
+Review a recent implementation - Codex reviews at max effort, Claude applies
+only requested fixes:
+
+```bash
+./duet.py --recap \
+    --task "Review the current main branch changes. Codex should act as reviewer: identify any blocking issues in the latest commit. Claude should act as coder: implement only the fixes Codex explicitly requests. Preserve project constraints and run make test before convergence." \
+    --lead codex:reviewer \
+    --partner claude:coder \
+    --reasoning max \
+    --worktree \
+    --turns 6
+```
+
+Keep `--codex-fast` off in that recipe: Codex is the reviewer, so max effort is
+the point.
+
+Review the latest commit plus an untracked notes file by seeding both into the
+task:
+
+```bash
+./duet.py --recap \
+    --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD && printf "\n\n--- TODO.md ---\n" && cat TODO.md' \
+    --lead codex:reviewer \
+    --partner claude:coder \
+    --reasoning max \
+    --worktree \
+    --turns 6
+```
+
+Fresh worktrees start from committed `HEAD`; commit the notes first if the coder
+must edit them as a normal tracked file.
+
 Deep planner, fast coder — Claude plans at high effort, Codex coder turns drop to low for latency (uses the default `claude:planner + codex:coder` pairing):
 
 ```bash

@@ -103,6 +103,41 @@ duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
 When `--cwd` points at a different directory and `--runs-dir` is omitted, run artifacts land under that project at `.duet/runs/<run_id>/`. Pass `--runs-dir runs` to keep the legacy invocation-relative `runs/<run_id>/` layout.
 
+### Real examples: review an implementation
+
+Use Codex as the reviewer and Claude as the coder when you want a high-effort
+review pass over recent implementation work:
+
+```bash
+duet --recap \
+     --task "Review the current main branch changes. Codex should act as reviewer: identify any blocking issues in the latest commit. Claude should act as coder: implement only the fixes Codex explicitly requests. Preserve project constraints and run make test before convergence." \
+     --lead codex:reviewer \
+     --partner claude:coder \
+     --reasoning max \
+     --worktree \
+     --turns 6
+```
+
+Do not add `--codex-fast` here. Codex is the reviewer, so the point of
+`--reasoning max` is to keep the review deep.
+
+If the review needs an untracked notes file too, seed the latest commit and the
+file contents into the task:
+
+```bash
+duet --recap \
+     --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD && printf "\n\n--- TODO.md ---\n" && cat TODO.md' \
+     --lead codex:reviewer \
+     --partner claude:coder \
+     --reasoning max \
+     --worktree \
+     --turns 6
+```
+
+That second command gives both agents the untracked file contents as context.
+The fresh worktree still starts from committed `HEAD`; commit the file first if
+the coder must edit it as a normal tracked file in the worktree.
+
 ### Concrete walkthrough: read a GitHub issue, fix the implementation
 
 **Dry-run first** (verify the recipe builds the right cmd; no agent calls):
