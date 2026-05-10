@@ -111,13 +111,16 @@ review pass over recent implementation work:
 ```bash
 duet --recap \
      --task "Review the current main branch changes. Codex should act as reviewer: identify any blocking issues in the latest commit. Claude should act as coder: implement only the fixes Codex explicitly requests. Preserve project constraints and run make test before convergence." \
-     --lead codex:reviewer \
-     --partner claude:coder \
+     --lead claude:coder \
+     --partner codex:reviewer \
      --reasoning max \
-     --worktree \
+     --worktree --worktree-for lead \
      --turns 6
 ```
 
+The partner agent speaks first in the loop, so this pairing has Codex open
+turn 1 with the review and Claude reply in turn 2 with the requested fixes.
+`--worktree-for lead` keeps the editable worktree under the coder (the lead).
 Do not add `--codex-fast` here. Codex is the reviewer, so the point of
 `--reasoning max` is to keep the review deep.
 
@@ -127,10 +130,10 @@ file contents into the task:
 ```bash
 duet --recap \
      --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD && printf "\n\n--- TODO.md ---\n" && cat TODO.md' \
-     --lead codex:reviewer \
-     --partner claude:coder \
+     --lead claude:coder \
+     --partner codex:reviewer \
      --reasoning max \
-     --worktree \
+     --worktree --worktree-for lead \
      --turns 6
 ```
 

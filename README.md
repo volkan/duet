@@ -136,15 +136,17 @@ only requested fixes:
 ```bash
 ./duet.py --recap \
     --task "Review the current main branch changes. Codex should act as reviewer: identify any blocking issues in the latest commit. Claude should act as coder: implement only the fixes Codex explicitly requests. Preserve project constraints and run make test before convergence." \
-    --lead codex:reviewer \
-    --partner claude:coder \
+    --lead claude:coder \
+    --partner codex:reviewer \
     --reasoning max \
-    --worktree \
+    --worktree --worktree-for lead \
     --turns 6
 ```
 
-Keep `--codex-fast` off in that recipe: Codex is the reviewer, so max effort is
-the point.
+The partner speaks first, so Codex (reviewer) opens turn 1 with its critique
+and Claude (coder) responds in turn 2 with the fixes. `--worktree-for lead`
+keeps the editable checkout under the coder. Keep `--codex-fast` off in this
+recipe: Codex is the reviewer, so max effort is the point.
 
 Review the latest commit plus an untracked notes file by seeding both into the
 task:
@@ -152,10 +154,10 @@ task:
 ```bash
 ./duet.py --recap \
     --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD && printf "\n\n--- TODO.md ---\n" && cat TODO.md' \
-    --lead codex:reviewer \
-    --partner claude:coder \
+    --lead claude:coder \
+    --partner codex:reviewer \
     --reasoning max \
-    --worktree \
+    --worktree --worktree-for lead \
     --turns 6
 ```
 
