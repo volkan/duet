@@ -16,30 +16,36 @@ Use duet when you want:
 
 ## Quick Start
 
-Recommended split: Codex plans and reviews, Claude implements.
+Pair-programming pattern: plan with codex in its own session first, then hand
+the session id to duet — codex implements with the plan in context while
+claude reviews each turn.
 
 ```bash
 cd ~/code/myrepo
 
+# Find the codex session you just planned in:
+#   ls -lt ~/.codex/sessions/ | head
+# or look for `session id: <uuid>` on `codex exec`'s stderr.
+
 ./duet.py \
-    --recap \
-    --task-from-cmd 'gh issue view 1234 --json number,title,state,body,comments' \
-    --lead claude:coder \
-    --partner codex:planner \
-    --worktree --worktree-for lead \
-    --turns 4
+    --resume-codex <codex-session-id> \
+    --worktree \
+    --reasoning max \
+    --task "Implement the plan from your codex planning session."
 ```
 
-Use this when you want a planner-led implementation pass on something concrete
-— a bug report, a feature request, a chore. Codex reads the issue, shapes the
-plan, and reviews each turn; Claude writes the patch in an isolated worktree
-until both agents converge or you stop them.
+Four flags carry their weight; everything else is a default. Codex (resumed,
+with the plan in context) speaks first as the coder. Claude reviews each
+turn as the planner. The worktree keeps the host checkout clean until you
+merge. Sentinel + rationale convergence rules are baked into both role
+prompts — you do not need to restate them in `--task`.
 
-For fresh `--task` input, duet sends the first real turn to the partner agent.
-That is why this recipe makes Codex the partner planner and uses
-`--worktree-for lead` to isolate Claude's implementation turns.
+The symmetric `--resume-claude <session-id>` does the inverse — plan in
+claude, hand off to codex — and is duet's founding workflow, documented in
+[docs/USAGE.md](docs/USAGE.md).
 
-For a task you already have in words, pass it directly:
+Have a task in words but no prior planning session? Let codex plan inside
+the loop while claude implements:
 
 ```bash
 ./duet.py \
