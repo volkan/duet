@@ -40,6 +40,11 @@ turn as the planner. The worktree keeps the host checkout clean until you
 merge. Sentinel + rationale convergence rules are baked into both role
 prompts — you do not need to restate them in `--task`.
 
+Resume flags attach to the matching backend even when you override
+`--lead`/`--partner`. A resumed Claude agent is normalized to lead so duet can
+extract its latest message as the seed; a resumed Codex agent is normalized to
+partner/coder so it speaks first with its existing plan in context.
+
 The symmetric `--resume-claude <session-id>` does the inverse — plan in
 claude, hand off to codex — and is duet's founding workflow, documented in
 [docs/USAGE.md](docs/USAGE.md).

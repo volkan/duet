@@ -427,6 +427,109 @@ class TestParsePartner(unittest.TestCase):
             duet.parse_partner("")
 
 
+# ---------- apply_resume_overrides ----------
+
+
+class TestApplyResumeOverrides(unittest.TestCase):
+    def test_resume_codex_partner_gets_session(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="claude-lead", backend="claude", role="planner"),
+                duet.Agent(name="codex-partner", backend="codex", role="coder"),
+            ],
+            resume_codex="codex-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].name, "claude-lead")
+        self.assertIsNone(agents[0].session_id)
+        self.assertEqual(agents[1].name, "codex-partner")
+        self.assertEqual(agents[1].session_id, "codex-sid")
+
+    def test_resume_codex_preserves_explicit_codex_lead(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="codex-planner", backend="codex", role="planner"),
+                duet.Agent(name="codex-reviewer", backend="codex", role="reviewer"),
+            ],
+            resume_codex="codex-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].name, "codex-lead")
+        self.assertEqual(agents[0].role, "planner")
+        self.assertIsNone(agents[0].session_id)
+        self.assertEqual(agents[1].name, "codex-partner")
+        self.assertEqual(agents[1].role, "reviewer")
+        self.assertEqual(agents[1].session_id, "codex-sid")
+
+    def test_resume_codex_lead_moves_to_partner(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="codex-planner", backend="codex", role="planner"),
+                duet.Agent(name="claude-coder", backend="claude", role="coder"),
+            ],
+            resume_codex="codex-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].name, "claude-lead")
+        self.assertEqual(agents[0].role, "planner")
+        self.assertIsNone(agents[0].session_id)
+        self.assertEqual(agents[1].name, "codex-partner")
+        self.assertEqual(agents[1].role, "coder")
+        self.assertEqual(agents[1].session_id, "codex-sid")
+
+    def test_resume_claude_partner_moves_to_lead(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="codex-planner", backend="codex", role="planner"),
+                duet.Agent(name="claude-coder", backend="claude", role="coder"),
+            ],
+            resume_claude="claude-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].name, "claude-lead")
+        self.assertEqual(agents[0].backend, "claude")
+        self.assertEqual(agents[0].role, "planner")
+        self.assertEqual(agents[0].session_id, "claude-sid")
+        self.assertEqual(agents[1].name, "codex-partner")
+        self.assertEqual(agents[1].role, "coder")
+
+    def test_resume_claude_preserves_explicit_claude_partner(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="claude-planner", backend="claude", role="planner"),
+                duet.Agent(name="claude-reviewer", backend="claude",
+                           role="reviewer"),
+            ],
+            resume_claude="claude-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].name, "claude-lead")
+        self.assertEqual(agents[0].role, "planner")
+        self.assertEqual(agents[0].session_id, "claude-sid")
+        self.assertEqual(agents[1].name, "claude-partner")
+        self.assertEqual(agents[1].role, "reviewer")
+        self.assertIsNone(agents[1].session_id)
+
+    def test_resume_both_yields_claude_lead_and_codex_partner(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(name="codex-planner", backend="codex", role="planner"),
+                duet.Agent(name="claude-coder", backend="claude", role="coder"),
+            ],
+            resume_claude="claude-sid",
+            resume_codex="codex-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual([(a.backend, a.session_id) for a in agents],
+                         [("claude", "claude-sid"), ("codex", "codex-sid")])
+
+
 # ---------- _markdown_fence ----------
 
 

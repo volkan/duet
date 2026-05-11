@@ -299,8 +299,8 @@ ambiguity if any of them hit the fallback.
 
 | flag | purpose |
 |---|---|
-| `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent |
-| `--resume-codex SESSION_ID` | (advanced) seed Codex with a session id |
+| `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
+| `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
@@ -454,6 +454,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 ## How session memory works
 
+- **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner` because the intended Codex workflow is "resume Codex with the existing plan in context, then let Claude review." If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
 - **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. `--worktree` gives duet's Codex agent its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 

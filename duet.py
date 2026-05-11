@@ -1567,6 +1567,134 @@ def parse_partner(spec: str, default_role: str = "coder") -> Agent:
     return Agent(name=f"{backend}-{role}", backend=backend, role=role)
 
 
+def _slot_name(backend: str, idx: int) -> str:
+    slot = "lead" if idx == 0 else "partner"
+    return f"{backend}-{slot}"
+
+
+def _slot_agent(agent: Agent, idx: int, *, rename: bool) -> Agent:
+    if not rename:
+        return dataclasses.replace(agent)
+    return dataclasses.replace(agent, name=_slot_name(agent.backend, idx))
+
+
+def _default_slot_agent(backend: str, idx: int, *, rename: bool) -> Agent:
+    role = "planner" if idx == 0 else "coder"
+    name = _slot_name(backend, idx) if rename else f"{backend}-{role}"
+    return Agent(name=name, backend=backend, role=role)
+
+
+def _slot_default_role(idx: int) -> str:
+    return "planner" if idx == 0 else "coder"
+
+
+def _find_backend_idx(agents: list[Agent], backend: str,
+                      preferred_idx: int) -> Optional[int]:
+    if len(agents) > preferred_idx and agents[preferred_idx].backend == backend:
+        return preferred_idx
+    for i, agent in enumerate(agents):
+        if agent.backend == backend:
+            return i
+    return None
+
+
+def _force_resume_slot(
+    agents: list[Agent],
+    *,
+    backend: str,
+    slot_idx: int,
+    session_id: str,
+    rename_slots: bool,
+) -> list[Agent]:
+    """Move/create a resumed backend into its conventional slot.
+
+    If the user already put the backend in that slot, preserve their role. If
+    we have to move it from the other slot, reset moved agents to the slot
+    default roles so `--resume-codex --lead codex:planner --partner
+    claude:coder` becomes the useful `claude/planner + codex/coder` topology.
+    """
+    idx = _find_backend_idx(agents, backend, slot_idx)
+    other_idx = 1 - slot_idx
+
+    if idx is None:
+        target = _default_slot_agent(backend, slot_idx, rename=rename_slots)
+    else:
+        moved = idx != slot_idx
+        target = dataclasses.replace(
+            agents[idx],
+            role=(_slot_default_role(slot_idx) if moved else agents[idx].role),
+        )
+    target = dataclasses.replace(
+        _slot_agent(target, slot_idx, rename=rename_slots),
+        session_id=session_id,
+    )
+
+    if idx == other_idx:
+        candidate = agents[slot_idx]
+        moved_other = True
+    else:
+        candidate = agents[other_idx]
+        moved_other = False
+
+    other = dataclasses.replace(
+        candidate,
+        role=(
+            _slot_default_role(other_idx)
+            if moved_other else candidate.role
+        ),
+    )
+    other = _slot_agent(other, other_idx, rename=rename_slots)
+
+    out = [agents[0], agents[1]]
+    out[slot_idx] = target
+    out[other_idx] = other
+    return out
+
+
+def apply_resume_overrides(
+    agents: list[Agent],
+    *,
+    resume_claude: Optional[str] = None,
+    resume_codex: Optional[str] = None,
+    rename_slots: bool = False,
+) -> list[Agent]:
+    """Attach CLI resume ids to the matching backend without silently dropping.
+
+    Claude resume is the historical "lead supplies the seed" path, so a
+    resumed Claude agent is normalized into the lead slot. Codex resume is the
+    quick-start "Codex implements with its prior plan in context" path, so a
+    resumed Codex agent is normalized into the partner slot. Existing roles are
+    preserved only when the backend was already in its conventional slot.
+    """
+    normalized = [_slot_agent(a, i, rename=rename_slots)
+                  for i, a in enumerate(agents)]
+    if len(normalized) != 2:
+        return normalized
+
+    if resume_claude:
+        normalized = _force_resume_slot(
+            normalized,
+            backend="claude",
+            slot_idx=0,
+            session_id=resume_claude,
+            rename_slots=rename_slots,
+        )
+
+    if resume_codex:
+        normalized = _force_resume_slot(
+            normalized,
+            backend="codex",
+            slot_idx=1,
+            session_id=resume_codex,
+            rename_slots=rename_slots,
+        )
+
+    if rename_slots:
+        normalized = [_slot_agent(a, i, rename=True)
+                      for i, a in enumerate(normalized)]
+    return normalized
+
+
 def load_yaml_or_json(path: pathlib.Path) -> dict:
     text = path.read_text()
     if path.suffix in {".yaml", ".yml"}:
@@ -2294,7 +2422,7 @@ def main() -> int:
                     help="codex --sandbox: read-only|workspace-write|danger-full-access")
     ap.add_argument("--permission-mode", default="acceptEdits",
                     help="claude --permission-mode: default|acceptEdits|plan|bypassPermissions")
-    ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-claude)")
+    ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     ap.add_argument("--worktree", action="store_true",
                     help="run the partner agent in a throwaway git worktree on a fresh branch; "
                          "the worktree is left intact at the end so you can review/merge/drop it.")
@@ -2435,9 +2563,11 @@ def main() -> int:
             reasoning=args.reasoning or raw.get("reasoning"),
             codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
         )
-        # CLI overrides for resume
-        if args.resume_claude and cfg.agents and cfg.agents[0].backend == "claude":
-            cfg.agents[0].session_id = args.resume_claude
+        cfg.agents = apply_resume_overrides(
+            cfg.agents,
+            resume_claude=args.resume_claude,
+            resume_codex=args.resume_codex,
+        )
     else:
         cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
         task, kickoff = resolve_seed_inputs(
@@ -2450,21 +2580,22 @@ def main() -> int:
             stdin_cache=stdin_cache,
         )
         runs_dir = choose_runs_dir(args.runs_dir, cfg_cwd)
-        # Build agents from --lead / --partner / --resume-claude
-        if args.resume_claude:
-            lead = Agent(name="claude-lead", backend="claude",
-                         role="planner", session_id=args.resume_claude)
-        else:
-            lead = parse_partner(args.lead, default_role="planner")
-            lead.name = f"{lead.backend}-lead"
+        # Build agents from --lead / --partner, then attach any resume ids to
+        # the matching backend. This keeps explicit topologies working: if a
+        # user puts resumed Codex in the lead slot, duet extracts that session's
+        # latest message as the seed instead of silently dropping the UUID.
+        lead = parse_partner(args.lead, default_role="planner")
         partner = parse_partner(args.partner, default_role="coder")
-        partner.name = f"{partner.backend}-partner"
-        if args.resume_codex and partner.backend == "codex":
-            partner.session_id = args.resume_codex
+        agents = apply_resume_overrides(
+            [lead, partner],
+            resume_claude=args.resume_claude,
+            resume_codex=args.resume_codex,
+            rename_slots=True,
+        )
 
         cfg = DuetConfig(
             cwd=cfg_cwd,
-            agents=[lead, partner],
+            agents=agents,
             task=task,
             kickoff=kickoff,
             max_turns=args.turns,
