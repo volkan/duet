@@ -159,15 +159,10 @@ JSON
 expect_stdout "verify_cmd cli overrides yaml" 0 "reason=converged" "$DUET" --config "$TMPD/cfg-verify-override.json" --verify-cmd "true"
 
 expect_stdout "verify success allows convergence" 0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD" --verify-cmd "true"
-VERIFY_FAIL_RUNS="$TMPD/verify-fail-runs"
-expect_stdout "verify failure prevents convergence" 0 "reason=max_turns" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD" --runs-dir "$VERIFY_FAIL_RUNS" --verify-cmd "false"
-VERIFY_FAIL_RUN=$(ls -1d "$VERIFY_FAIL_RUNS"/2*/ 2>/dev/null | head -1 || true)
-[[ -n "$VERIFY_FAIL_RUN" ]] && grep -q "\[duet verify failed\]" "$VERIFY_FAIL_RUN/transcript.md" \
-    || { echo "FAIL: verify failure block missing from transcript"; FAIL=$((FAIL+1)); }
-[[ -n "$VERIFY_FAIL_RUN" ]] && grep -q '"ok": false' "$VERIFY_FAIL_RUN/state.json" \
-    || { echo "FAIL: failed verify result missing from state.json"; FAIL=$((FAIL+1)); }
-[[ -n "$VERIFY_FAIL_RUN" ]] && [[ -f "$VERIFY_FAIL_RUN/turn-01-verify.log" ]] \
-    || { echo "FAIL: verify log missing"; FAIL=$((FAIL+1)); }
+VERIFY_DRY_MARKER="$TMPD/verify-dry-run-marker"
+expect_stdout "dry-run skips verify command" 0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD" --verify-cmd "touch '$VERIFY_DRY_MARKER'; false"
+[[ ! -e "$VERIFY_DRY_MARKER" ]] \
+    || { echo "FAIL: dry-run executed verify command"; FAIL=$((FAIL+1)); }
 
 expect "verify failure fed to next turn"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util

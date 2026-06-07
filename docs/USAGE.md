@@ -315,7 +315,7 @@ ambiguity if any of them hit the fallback.
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
-| `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. YAML key: `verify_cmd:` |
+| `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |
 | `--permission-mode` | claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
@@ -506,7 +506,8 @@ exits 0. A non-zero exit, timeout, or command execution error suppresses the
 proposal, leaves the normal loop running, and appends a capped `[duet verify
 failed]` block to both the transcript and the next agent prompt. Repeated
 verify failures still finish through the existing `--turns` limit rather than
-a special finish reason.
+a special finish reason. Dry-run mode skips command execution while still
+showing and recording the configured verifier.
 
 While duet is at the `force>` prompt, `duet --status RUN_DIR` from another terminal returns exit 1 with `state: between turns / awaiting force> prompt`.
 

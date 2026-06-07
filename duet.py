@@ -1559,7 +1559,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         raw_reply = reply
         convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
         verify_state: Optional[dict] = None
-        if convergence_hit and cfg.verify_cmd:
+        if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
             verify_result = run_verify_command(
                 cfg, run_dir, f"{turn:02d}", wt_path
             )
@@ -1730,7 +1730,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         raw_reply = reply
         convergence_hit = convergence_proposed(reply, cfg.sentinel)
         verify_state: Optional[dict] = None
-        if convergence_hit and cfg.verify_cmd:
+        if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
             verify_result = run_verify_command(
                 cfg, transcript_path.parent, f"{forced_turn:02d}-forced", wt_path
             )

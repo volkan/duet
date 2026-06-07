@@ -110,7 +110,8 @@ sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 If you pass `--verify-cmd`, duet runs that shell command before counting a
 valid convergence proposal. Exit code 0 allows the proposal to count; any
 non-zero exit, timeout, or execution error feeds a capped failure block to the
-next agent turn.
+next agent turn. `--dry-run` records and prints the configured command but
+does not execute it.
 
 After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
 feedback to force another round; duet sends the next agent the previous reply
