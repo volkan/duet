@@ -107,6 +107,11 @@ is reached, a timeout happens, or you press Ctrl-C. A convergence proposal must
 include an `LGTM rationale:` explaining why the work is done, followed by the
 sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 
+If you pass `--verify-cmd`, duet runs that shell command before counting a
+valid convergence proposal. Exit code 0 allows the proposal to count; any
+non-zero exit, timeout, or execution error feeds a capped failure block to the
+next agent turn.
+
 After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
 feedback to force another round; duet sends the next agent the previous reply
 plus your feedback, including any appended worktree handoff block and diff.
@@ -143,6 +148,17 @@ Use a repeatable config:
 
 ```bash
 ./duet.py --config duet.example.yaml
+```
+
+Require a mechanical check before convergence:
+
+```bash
+./duet.py \
+  --task "Fix the issue" \
+  --lead claude:coder \
+  --partner codex:reviewer \
+  --worktree --worktree-for lead \
+  --verify-cmd 'make test'
 ```
 
 Check an in-progress run from another terminal:
@@ -223,7 +239,8 @@ Every run writes a directory containing:
 - `recap.md` - compact per-turn debug view when `--recap` is enabled; `--status` shows this path when present.
 - `state.json` - run state, agent roles, session ids, finish reason, worktree metadata, and `recap_path` for recap runs.
 - `turn-*.stderr.log` - live stderr from each agent invocation.
-- `turn-*.pid` - present only while a turn is running.
+- `turn-*-verify.log` - verify command metadata, stdout, and stderr when `--verify-cmd` runs.
+- `turn-*.pid` - present only while an agent or verify command is running.
 - `wt/` - the git worktree, when `--worktree` is enabled.
 
 When a worktree agent replies, duet appends a handoff block to that reply before

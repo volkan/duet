@@ -138,6 +138,229 @@ PY
 expect_stdout "one proposal not enough"      0 "reason=max_turns" "$DUET" --dry-run --turns 1 --task "x" --cwd "$TMPD"
 expect_stdout "two proposals converge"       0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD"
 
+VERIFY_CLI_RUNS="$TMPD/verify-cli-runs"
+expect "verify-cmd cli parsed"              0 "$DUET" --dry-run --turns 1 --task "x" --cwd "$TMPD" --runs-dir "$VERIFY_CLI_RUNS" --verify-cmd "true"
+VERIFY_CLI_RUN=$(ls -1d "$VERIFY_CLI_RUNS"/2*/ 2>/dev/null | head -1 || true)
+[[ -n "$VERIFY_CLI_RUN" ]] && grep -q '"verify_cmd": "true"' "$VERIFY_CLI_RUN/state.json" \
+    || { echo "FAIL: verify_cmd missing from CLI state.json"; FAIL=$((FAIL+1)); }
+
+cat > "$TMPD/cfg-verify.json" <<JSON
+{"cwd":"$TMPD","dry_run":true,"task":"x","max_turns":1,"verify_cmd":"true","agents":[{"name":"claude-lead","backend":"claude","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
+JSON
+VERIFY_CFG_RUNS="$TMPD/verify-cfg-runs"
+expect "verify_cmd yaml key"                0 "$DUET" --config "$TMPD/cfg-verify.json" --runs-dir "$VERIFY_CFG_RUNS"
+VERIFY_CFG_RUN=$(ls -1d "$VERIFY_CFG_RUNS"/2*/ 2>/dev/null | head -1 || true)
+[[ -n "$VERIFY_CFG_RUN" ]] && grep -q '"verify_cmd": "true"' "$VERIFY_CFG_RUN/state.json" \
+    || { echo "FAIL: verify_cmd missing from config state.json"; FAIL=$((FAIL+1)); }
+
+cat > "$TMPD/cfg-verify-override.json" <<JSON
+{"cwd":"$TMPD","dry_run":true,"task":"x","max_turns":2,"verify_cmd":"false","agents":[{"name":"claude-lead","backend":"claude","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
+JSON
+expect_stdout "verify_cmd cli overrides yaml" 0 "reason=converged" "$DUET" --config "$TMPD/cfg-verify-override.json" --verify-cmd "true"
+
+expect_stdout "verify success allows convergence" 0 "reason=converged" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD" --verify-cmd "true"
+VERIFY_FAIL_RUNS="$TMPD/verify-fail-runs"
+expect_stdout "verify failure prevents convergence" 0 "reason=max_turns" "$DUET" --dry-run --turns 2 --task "x" --cwd "$TMPD" --runs-dir "$VERIFY_FAIL_RUNS" --verify-cmd "false"
+VERIFY_FAIL_RUN=$(ls -1d "$VERIFY_FAIL_RUNS"/2*/ 2>/dev/null | head -1 || true)
+[[ -n "$VERIFY_FAIL_RUN" ]] && grep -q "\[duet verify failed\]" "$VERIFY_FAIL_RUN/transcript.md" \
+    || { echo "FAIL: verify failure block missing from transcript"; FAIL=$((FAIL+1)); }
+[[ -n "$VERIFY_FAIL_RUN" ]] && grep -q '"ok": false' "$VERIFY_FAIL_RUN/state.json" \
+    || { echo "FAIL: failed verify result missing from state.json"; FAIL=$((FAIL+1)); }
+[[ -n "$VERIFY_FAIL_RUN" ]] && [[ -f "$VERIFY_FAIL_RUN/turn-01-verify.log" ]] \
+    || { echo "FAIL: verify log missing"; FAIL=$((FAIL+1)); }
+
+expect "verify failure fed to next turn"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+messages = []
+def fake_call_agent(agent, message, cfg, **kwargs):
+    messages.append(message)
+    return (
+        "LGTM rationale: task is satisfied, checks were attempted, and no "
+        "blocking follow-ups remain.\n<<<LGTM>>>"
+    )
+
+m.call_agent = fake_call_agent
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+    runs_dir=tmpd / "verify-feed-runs",
+    verify_cmd="false",
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "max_turns", state
+assert len(messages) == 2, messages
+assert "[duet verify failed]" in messages[1], messages[1]
+assert "command: false" in messages[1], messages[1]
+PY
+
+expect "bare sentinel does not run verify"   0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+marker = tmpd / "bare-sentinel-verify-ran"
+def fake_call_agent(agent, message, cfg, **kwargs):
+    return "done\n<<<LGTM>>>"
+
+m.call_agent = fake_call_agent
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=1,
+    runs_dir=tmpd / "verify-bare-runs",
+    verify_cmd=f"touch {marker}",
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "max_turns", state
+assert state["last_verify"] is None, state
+assert not marker.exists()
+PY
+
+expect "verify writes pid path"              0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+seen = {}
+def fake_run(cmd, **kwargs):
+    seen["pid_file_path"] = kwargs.get("pid_file_path")
+    return 0, "", ""
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    verify_cmd="true",
+)
+run_dir = tmpd / "verify-pid-runs"
+run_dir.mkdir()
+m.run_verify_command(cfg, run_dir, "01", None)
+assert seen["pid_file_path"] == run_dir / "turn-01-verify.pid", seen
+PY
+
+expect "verify runs in worktree"             0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+host = tmpd / "verify-host"
+wt = tmpd / "verify-wt"
+host.mkdir()
+wt.mkdir()
+
+def fake_call_agent(agent, message, cfg, **kwargs):
+    return (
+        "LGTM rationale: task is satisfied, checks were attempted, and no "
+        "blocking follow-ups remain.\n<<<LGTM>>>"
+    )
+
+m.call_agent = fake_call_agent
+cfg = m.DuetConfig(
+    cwd=host,
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=1,
+    runs_dir=tmpd / "verify-wt-runs",
+    verify_cmd="pwd > verify-pwd.txt",
+    worktree_path=wt,
+)
+m.run_duet(cfg)
+assert (wt / "verify-pwd.txt").read_text().strip() == str(wt.resolve())
+assert not (host / "verify-pwd.txt").exists()
+PY
+
+expect "verify output capped in prompt"      0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import shlex
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+messages = []
+def fake_call_agent(agent, message, cfg, **kwargs):
+    messages.append(message)
+    return (
+        "LGTM rationale: task is satisfied, checks were attempted, and no "
+        "blocking follow-ups remain.\n<<<LGTM>>>"
+    )
+
+m.call_agent = fake_call_agent
+script = 'import sys; print("A"*9000); print("TAILMARK"); sys.exit(1)'
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+    runs_dir=tmpd / "verify-cap-runs",
+    verify_cmd=f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}",
+)
+m.run_duet(cfg)
+prompt = messages[1]
+assert "TAILMARK" in prompt, prompt[-500:]
+assert "output truncated to last" in prompt, prompt[-500:]
+assert "A" * (m.VERIFY_OUTPUT_TAIL_CHARS + 1) not in prompt
+PY
+
 expect "worktree handoff names review target" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util
 import pathlib

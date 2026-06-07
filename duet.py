@@ -61,6 +61,8 @@ DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
+VERIFY_OUTPUT_TAIL_CHARS = 4000
+VERIFY_LIVE_PREFIX = "  │ [verify] "
 
 RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
 
@@ -247,6 +249,8 @@ class DuetConfig:
     permission_mode: str = "acceptEdits"      # claude
     dry_run: bool = False
     recap: bool = False
+    verify_cmd: Optional[str] = None          # shell command that must pass before
+                                             # a convergence proposal can count
     worktree: bool = False                    # run partner in a throwaway git worktree
     worktree_for: str = "partner"             # "partner" (idx 1) or "lead" (idx 0)
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
@@ -267,6 +271,19 @@ class DuetConfig:
                                               # coder snappy.
     start_speaker_idx: int = 1                # default loop starts with partner replying
     continue_from: Optional[str] = None       # prior run dir/id when created by --continue
+
+
+@dataclasses.dataclass
+class VerifyResult:
+    ok: bool
+    cmd: str
+    cwd: pathlib.Path
+    exit_code: Optional[int]
+    stdout_tail: str
+    stderr_tail: str
+    log_path: pathlib.Path
+    timed_out: bool = False
+    error: Optional[str] = None
 
 
 # ---------- active child process tracking ----------
@@ -566,7 +583,8 @@ def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
 
 
 def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
-                     activity_event, interval: int = 20) -> None:
+                     activity_event, interval: int = 20,
+                     prefix: str = LIVE_PREFIX) -> None:
     """Print "[duet] still working…" when a subprocess goes quiet.
 
     Most subprocesses emit rich stderr live (codex, gh, npm). Some don't
@@ -586,7 +604,7 @@ def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
             return
         try:
             elapsed = int(time.monotonic() - start_monotonic)
-            mirror_to.write(f"{LIVE_PREFIX}[duet] still working… ({elapsed}s; "
+            mirror_to.write(f"{prefix}[duet] still working… ({elapsed}s; "
                             "subprocess silent — typical for `claude -p`)\n")
             mirror_to.flush()
         except Exception:
@@ -595,12 +613,15 @@ def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
 
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
          stderr_log_path: Optional[pathlib.Path] = None,
-         pid_file_path: Optional[pathlib.Path] = None) -> tuple[int, str, str]:
+         pid_file_path: Optional[pathlib.Path] = None,
+         live_prefix: Optional[str] = None,
+         mirror_stdout: bool = False) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
-    to our stderr line-by-line as it's produced. stdout is always captured
-    silently — duet logs the final answer to the transcript afterwards.
+    to our stderr line-by-line as it's produced. stdout is captured silently
+    unless `mirror_stdout` is set — duet logs agent final answers to the
+    transcript afterwards.
 
     If `stderr_log_path` is set, the child's stderr is also tee'd line-by-line
     to that file (append mode) — useful for post-hoc forensics on long agent
@@ -613,6 +634,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     emit no stderr during their long API call.
     """
     mirror = sys.stderr if (LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty()) else None
+    prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
     out_chunks: list[str] = []
     err_chunks: list[str] = []
     stderr_file = None
@@ -651,10 +673,13 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                       file=sys.stderr)
         activity_event = threading.Event()
         t_out = threading.Thread(target=_stream_reader,
-                                 args=(proc.stdout, out_chunks, None, "", None, activity_event),
+                                 args=(proc.stdout, out_chunks,
+                                       mirror if mirror_stdout else None,
+                                       prefix if mirror_stdout else "",
+                                       None, activity_event),
                                  daemon=True)
         t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, mirror, LIVE_PREFIX,
+                                 args=(proc.stderr, err_chunks, mirror, prefix,
                                        stderr_file, activity_event),
                                  daemon=True)
         t_out.start(); t_err.start()
@@ -662,7 +687,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         # stderr/stdout). Useful for `claude -p`, which stays silent on
         # stderr during the API call. No-op if mirror is None (--quiet).
         t_hb = threading.Thread(target=_quiet_heartbeat,
-                                args=(proc, mirror, time.monotonic(), activity_event),
+                                args=(proc, mirror, time.monotonic(), activity_event, 20, prefix),
                                 daemon=True)
         t_hb.start()
 
@@ -699,6 +724,156 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                 pid_file_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+# ---------- verification gate ----------
+
+def effective_verify_cwd(cfg: DuetConfig,
+                         worktree_path: Optional[pathlib.Path]) -> pathlib.Path:
+    """Return the directory where the convergence verify command should run."""
+    return worktree_path or cfg.cwd
+
+
+def _tail_text(text: str, max_chars: int = VERIFY_OUTPUT_TAIL_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return (
+        f"[duet] output truncated to last {max_chars} chars\n"
+        + text[-max_chars:]
+    )
+
+
+def _display_output(text: str) -> str:
+    return text.rstrip() if text else "(empty)"
+
+
+def _format_verify_log(turn_label: str, result: VerifyResult,
+                       stdout: str, stderr: str) -> str:
+    lines = [
+        "# duet verify",
+        f"turn: {turn_label}",
+        f"command: {result.cmd}",
+        f"cwd: {result.cwd}",
+        f"exit_code: {result.exit_code if result.exit_code is not None else 'n/a'}",
+        f"timed_out: {'yes' if result.timed_out else 'no'}",
+    ]
+    if result.error:
+        lines.append(f"error: {result.error}")
+    lines += [
+        "",
+        "## stdout",
+        stdout if stdout else "(empty)\n",
+        "",
+        "## stderr",
+        stderr if stderr else "(empty)\n",
+    ]
+    return "\n".join(lines)
+
+
+def verify_result_state(result: VerifyResult) -> dict:
+    data = {
+        "ok": result.ok,
+        "command": result.cmd,
+        "cwd": str(result.cwd),
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "log_path": str(result.log_path),
+        "stdout_tail": result.stdout_tail,
+        "stderr_tail": result.stderr_tail,
+    }
+    if result.error:
+        data["error"] = result.error
+    return data
+
+
+def format_verify_success_block(result: VerifyResult) -> str:
+    return (
+        "[duet verify passed]\n"
+        f"command: {result.cmd}\n"
+        f"cwd: {result.cwd}\n"
+        "exit_code: 0\n"
+        f"log: {result.log_path}\n"
+        "[/duet verify passed]"
+    )
+
+
+def format_verify_failure_block(result: VerifyResult) -> str:
+    exit_code = result.exit_code if result.exit_code is not None else "n/a"
+    lines = [
+        "[duet verify failed]",
+        f"command: {result.cmd}",
+        f"cwd: {result.cwd}",
+        f"exit_code: {exit_code}",
+    ]
+    if result.timed_out:
+        lines.append("timed_out: yes")
+    if result.error:
+        lines.append(f"error: {result.error}")
+    lines += [
+        f"log: {result.log_path}",
+        "",
+        "stdout tail:",
+        _display_output(result.stdout_tail),
+        "",
+        "stderr tail:",
+        _display_output(result.stderr_tail),
+        "[/duet verify failed]",
+    ]
+    return "\n".join(lines)
+
+
+def run_verify_command(cfg: DuetConfig, run_dir: pathlib.Path, turn_label: str,
+                       worktree_path: Optional[pathlib.Path]) -> VerifyResult:
+    """Run the configured verification command for a convergence proposal."""
+    if not cfg.verify_cmd:
+        raise ValueError("run_verify_command called without cfg.verify_cmd")
+    cwd = effective_verify_cwd(cfg, worktree_path)
+    log_path = run_dir / f"turn-{turn_label}-verify.log"
+    pid_path = run_dir / f"turn-{turn_label}-verify.pid"
+    started = dt.datetime.now().isoformat(timespec="seconds")
+    print(f"[duet] verify turn {turn_label}: {cfg.verify_cmd} (cwd={cwd})")
+    try:
+        rc, stdout, stderr = _run(
+            ["sh", "-c", cfg.verify_cmd],
+            cwd=cwd,
+            stdin="",
+            timeout=cfg.per_turn_timeout,
+            live_prefix=VERIFY_LIVE_PREFIX,
+            mirror_stdout=True,
+            pid_file_path=pid_path,
+        )
+        timed_out = rc == 124
+        result = VerifyResult(
+            ok=(rc == 0),
+            cmd=cfg.verify_cmd,
+            cwd=cwd,
+            exit_code=rc,
+            stdout_tail=_tail_text(stdout),
+            stderr_tail=_tail_text(stderr),
+            log_path=log_path,
+            timed_out=timed_out,
+        )
+    except Exception as e:
+        stdout = ""
+        stderr = ""
+        result = VerifyResult(
+            ok=False,
+            cmd=cfg.verify_cmd,
+            cwd=cwd,
+            exit_code=None,
+            stdout_tail="",
+            stderr_tail="",
+            log_path=log_path,
+            error=str(e),
+        )
+    finished = dt.datetime.now().isoformat(timespec="seconds")
+    log_text = (
+        f"started: {started}\n"
+        f"finished: {finished}\n\n"
+        + _format_verify_log(turn_label, result, stdout, stderr)
+    )
+    write_text_atomic(log_path, log_text)
+    return result
 
 
 def call_claude(agent: Agent, system_prompt: str, message: str,
@@ -1235,6 +1410,8 @@ def run_duet(cfg: DuetConfig) -> dict:
         print(f"[duet] recap:      {recap_path}")
     else:
         print(f"[duet] run dir: {run_dir}")
+    if cfg.verify_cmd:
+        print(f"[duet] verify cmd: {cfg.verify_cmd}")
     if cfg.agents[0].session_id:
         print(f"[duet] {cfg.agents[0].name} resumes session {cfg.agents[0].session_id}")
 
@@ -1252,6 +1429,8 @@ def run_duet(cfg: DuetConfig) -> dict:
             "finished_reason": "dry_run",
             "transcript_path": str(transcript_path),
             "recap_path": str(recap_path),
+            "verify_cmd": cfg.verify_cmd,
+            "last_verify": None,
             "worktree": None,
             "worktree_branch": None,
             "worktree_for": cfg.worktree_for,
@@ -1317,6 +1496,8 @@ def run_duet(cfg: DuetConfig) -> dict:
             "history": history,
             "finished_reason": "force_stop",
             "transcript_path": str(transcript_path),
+            "verify_cmd": cfg.verify_cmd,
+            "last_verify": None,
             "worktree": str(wt_path) if wt_path else None,
             "worktree_branch": wt_branch,
             "worktree_for": cfg.worktree_for,
@@ -1339,6 +1520,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     speaker_idx = cfg.start_speaker_idx
     finished_reason = "max_turns"
     previous_convergence_proposal = False
+    last_verify_state: Optional[dict] = None
 
     for turn in range(1, cfg.max_turns + 1):
         if stop.requested:
@@ -1376,6 +1558,18 @@ def run_duet(cfg: DuetConfig) -> dict:
         elapsed = time.time() - t0
         raw_reply = reply
         convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
+        verify_state: Optional[dict] = None
+        if convergence_hit and cfg.verify_cmd:
+            verify_result = run_verify_command(
+                cfg, run_dir, f"{turn:02d}", wt_path
+            )
+            verify_state = verify_result_state(verify_result)
+            last_verify_state = verify_state
+            if verify_result.ok:
+                reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
+            else:
+                reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
+                convergence_hit = False
 
         if cfg.recap:
             parsed = parse_recap_headers(raw_reply)
@@ -1398,13 +1592,18 @@ def run_duet(cfg: DuetConfig) -> dict:
             reply = append_worktree_diff(reply, wt_path, wt_branch)
 
         log(speaker.name, speaker.role, reply)
-        history.append({"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
-                        "len_chars": len(reply), "session_id": speaker.session_id})
+        history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
+                         "len_chars": len(reply), "session_id": speaker.session_id}
+        if verify_state is not None:
+            history_entry["verify"] = verify_state
+        history.append(history_entry)
         turn_state = {
             "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
             "agents": [agent_state(a) for a in cfg.agents],
             "history": history, "finished_reason": None,
             "transcript_path": str(transcript_path),
+            "verify_cmd": cfg.verify_cmd,
+            "last_verify": last_verify_state,
             "worktree": str(wt_path) if wt_path else None,
             "worktree_branch": wt_branch,
             "worktree_for": cfg.worktree_for,
@@ -1432,9 +1631,13 @@ def run_duet(cfg: DuetConfig) -> dict:
     else:
         finished_reason = "max_turns"
 
-    finished_reason = ask_force(cfg, history, transcript_path, state_path,
-                                last_msg, speaker_idx, seen_first_turn,
-                                finished_reason, wt_path, wt_branch)
+    finished_reason, forced_verify_state = ask_force(
+        cfg, history, transcript_path, state_path,
+        last_msg, speaker_idx, seen_first_turn,
+        finished_reason, wt_path, wt_branch
+    )
+    if forced_verify_state is not None:
+        last_verify_state = forced_verify_state
 
     state = {
         "task": cfg.task,
@@ -1444,6 +1647,8 @@ def run_duet(cfg: DuetConfig) -> dict:
         "history": history,
         "finished_reason": finished_reason,
         "transcript_path": str(transcript_path),
+        "verify_cmd": cfg.verify_cmd,
+        "last_verify": last_verify_state,
         "continue_from": cfg.continue_from,
         "duet_pid": os.getpid(),
     }
@@ -1471,10 +1676,11 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               state_path: pathlib.Path, last_msg: str, speaker_idx: int,
               seen_first_turn: dict, reason: str,
               wt_path: Optional[pathlib.Path] = None,
-              wt_branch: Optional[str] = None) -> str:
+              wt_branch: Optional[str] = None) -> tuple[str, Optional[dict]]:
     """Post-loop interactive prompt: human can push another turn or accept."""
     if not sys.stdin.isatty():
-        return reason
+        return reason, None
+    last_verify_state: Optional[dict] = None
     while True:
         print(f"\n[duet] loop ended (reason={reason}). "
               f"Press Enter to finish, or type feedback to force another turn "
@@ -1483,9 +1689,9 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         try:
             line = input("force> ").strip()
         except EOFError:
-            return reason
+            return reason, last_verify_state
         if not line:
-            return reason
+            return reason, last_verify_state
         # Inject human feedback as the next "message" to the next-up speaker.
         next_speaker = cfg.agents[speaker_idx]
         # Append a human note to transcript
@@ -1521,7 +1727,20 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             _stop_recap_inflight(*inflight)
         elapsed = time.time() - t0
         seen_first_turn[next_speaker.name] = True
+        raw_reply = reply
         convergence_hit = convergence_proposed(reply, cfg.sentinel)
+        verify_state: Optional[dict] = None
+        if convergence_hit and cfg.verify_cmd:
+            verify_result = run_verify_command(
+                cfg, transcript_path.parent, f"{forced_turn:02d}-forced", wt_path
+            )
+            verify_state = verify_result_state(verify_result)
+            last_verify_state = verify_state
+            if verify_result.ok:
+                reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
+            else:
+                reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
+                convergence_hit = False
         if wt_path is not None and next_speaker.cwd_override == wt_path:
             reply = append_worktree_diff(reply, wt_path, wt_branch)
         recap_block = ""
@@ -1545,7 +1764,8 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         )
         history.append({"turn": len(history) + 1, "agent": next_speaker.name,
                         "forced": True, "len_chars": len(reply),
-                        "session_id": next_speaker.session_id})
+                        "session_id": next_speaker.session_id,
+                        **({"verify": verify_state} if verify_state is not None else {})})
         if cfg.recap:
             print(_format_live_recap_block(recap_block), end="")
         else:
@@ -1554,7 +1774,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         speaker_idx = 1 - speaker_idx
         reason = "forced_continuation"
         if convergence_hit:
-            return "converged_after_force"
+            return "converged_after_force", last_verify_state
 
 # ---------- config / cli parsing ----------
 
@@ -1565,6 +1785,17 @@ def parse_partner(spec: str, default_role: str = "coder") -> Agent:
         raise SystemExit(f"bad partner spec '{spec}', expected backend or backend:role")
     role = role or default_role
     return Agent(name=f"{backend}-{role}", backend=backend, role=role)
+
+
+def normalize_verify_cmd(value, parser: argparse.ArgumentParser) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        parser.error("verify_cmd must be a string")
+    cmd = value.strip()
+    if not cmd:
+        parser.error("verify_cmd must not be empty")
+    return cmd
 
 
 def _slot_name(backend: str, idx: int) -> str:
@@ -2256,6 +2487,10 @@ def build_continue_config(run_arg: str,
         permission_mode=args.permission_mode,
         dry_run=args.dry_run,
         recap=args.recap or bool(state.get("recap_path")),
+        verify_cmd=normalize_verify_cmd(
+            args.verify_cmd if args.verify_cmd is not None else state.get("verify_cmd"),
+            parser,
+        ),
         worktree=False,
         worktree_for=worktree_for,
         worktree_path=worktree_path,
@@ -2417,6 +2652,10 @@ def main() -> int:
                     help="convergence sentinel; requires an LGTM rationale and "
                          "back-to-back proposals from both agents")
     ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-turn timeout seconds")
+    ap.add_argument("--verify-cmd", metavar="CMD", default=None,
+                    help="shell command that must exit 0 before a convergence "
+                         "proposal can count. Runs only for valid LGTM+rationale "
+                         "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",
                     help="codex --sandbox: read-only|workspace-write|danger-full-access")
@@ -2533,6 +2772,10 @@ def main() -> int:
         raw_runs_dir = args.runs_dir if args.runs_dir is not None else raw.get("runs_dir")
         runs_dir = choose_runs_dir(raw_runs_dir, cfg_cwd)
         agents = [Agent(**a) for a in raw.get("agents", [])]
+        verify_cmd = normalize_verify_cmd(
+            args.verify_cmd if args.verify_cmd is not None else raw.get("verify_cmd"),
+            ap,
+        )
         cfg = DuetConfig(
             cwd=cfg_cwd,
             agents=agents,
@@ -2546,6 +2789,7 @@ def main() -> int:
             permission_mode=raw.get("permission_mode", "acceptEdits"),
             dry_run=bool(raw.get("dry_run", False)),
             recap=bool(raw.get("recap", False)) or args.recap,
+            verify_cmd=verify_cmd,
             worktree=bool(raw.get("worktree", False)) or args.worktree,
             worktree_for=raw.get("worktree_for") or args.worktree_for or "partner",
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
@@ -2606,6 +2850,7 @@ def main() -> int:
             permission_mode=args.permission_mode,
             dry_run=args.dry_run,
             recap=args.recap,
+            verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
             worktree=args.worktree,
             worktree_for=args.worktree_for or "partner",
             worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()

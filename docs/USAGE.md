@@ -77,6 +77,12 @@ With a YAML config:
 ./duet.py --config duet.example.yaml
 ```
 
+The same config can set a mechanical convergence gate:
+
+```yaml
+verify_cmd: "make test"
+```
+
 Roles ship with: `planner`, `coder`, `reviewer`, `triage-reviewer`. Override via `role_prompt` in YAML config to define new ones.
 
 ---
@@ -309,6 +315,7 @@ ambiguity if any of them hit the fallback.
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
+| `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. YAML key: `verify_cmd:` |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | codex sandbox: `read-only`, `workspace-write`, `danger-full-access` |
 | `--permission-mode` | claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
@@ -341,16 +348,23 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     state.json                               # task, agents, session_ids, history,
                                              # finished_reason, duet_pid,
                                              # worktree/worktree_for if present,
+                                             # verify_cmd/last_verify if present,
                                              # recap_path if --recap,
                                              # continue_from for --continue runs
     turn-01-codex-coder.stderr.log           # live stderr from each agent invocation
     turn-01-codex-coder.pid                  # PID file (only present while the turn runs)
+    turn-01-verify.log                       # verify stdout/stderr and metadata, if --verify-cmd runs
+    turn-01-verify.pid                       # PID file while the verify command runs
     turn-02-claude-reviewer.stderr.log
     …
     wt/                                      # the git worktree (if --worktree)
 ```
 
 The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn.
+
+When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
+command, cwd, exit code, stdout, and stderr for each verification run.
+`state.json` also records `verify_cmd` and a capped `last_verify` summary.
 
 ### Recap view
 
@@ -487,6 +501,13 @@ outside fenced code, and the immediately previous agent turn also proposed
 convergence with rationale. This lets one agent propose "I think this is done"
 while the partner can still reject the rationale and ask for another round.
 
+With `--verify-cmd`, that valid proposal is only counted after the command
+exits 0. A non-zero exit, timeout, or command execution error suppresses the
+proposal, leaves the normal loop running, and appends a capped `[duet verify
+failed]` block to both the transcript and the next agent prompt. Repeated
+verify failures still finish through the existing `--turns` limit rather than
+a special finish reason.
+
 While duet is at the `force>` prompt, `duet --status RUN_DIR` from another terminal returns exit 1 with `state: between turns / awaiting force> prompt`.
 
 ---
@@ -548,6 +569,10 @@ git -C <worktree-path> diff HEAD
 ```
 
 Project-specific test commands belong in `CLAUDE.md` / `README` — the handoff stays generic so it works in any project. The diff section then includes `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files.
+
+If `--verify-cmd` is configured and an effective worktree path exists, duet
+runs verification in that worktree, not the host checkout. Without a worktree,
+verification runs in `--cwd`.
 
 ### Where the worktree lives
 
