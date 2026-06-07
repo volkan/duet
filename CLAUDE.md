@@ -104,6 +104,8 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 ## Keep docs in sync with each change
 
+All commits in this repository must use Conventional Commits (`type: summary`, for example `docs: update commit guidance`).
+
 Every change to `duet.py` (or anything else under this repo) must update the related documents in the **same commit**. Drift between code and docs is the dominant failure mode here — there's no CI, no schema validation, just these files. Use this table as a checklist before you commit:
 
 | change in `duet.py` | also update |
