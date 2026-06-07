@@ -857,7 +857,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--reasoning",
-        choices=["minimal", "low", "medium", "high", "max"],
+        choices=["minimal", "low", "medium", "high", "xhigh", "max"],
         default=None,
         help="optional duet reasoning level for all scenarios",
     )
