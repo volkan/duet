@@ -59,6 +59,24 @@ expect "triage-reviewer role"                0 "$DUET" --task "x" --dry-run --cw
 expect_stdout "resume-codex lead normalized" 0 "Turn 1 :: codex-partner" "$DUET" --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude partner moved"  0 "Turn 1 :: codex-partner" "$DUET" --resume-claude claude-sid --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude keeps claude partner" 0 "Turn 1 :: claude-partner (claude/reviewer)" "$DUET" --resume-claude claude-sid --lead claude:planner --partner claude:reviewer --task "x" --turns 1 --dry-run --cwd "$TMPD"
+expect "same-backend codex dry-run slots"   0 bash -c '
+  out=$("$1" --task "x" --turns 2 --dry-run --cwd "$2" \
+         --lead codex:planner --partner codex:coder)
+  echo "$out" | grep -q "Turn 1 :: codex-partner" \
+    || { echo "missing codex partner turn"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: codex-lead" \
+    || { echo "missing codex lead turn"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
+expect "same-backend claude dry-run slots"   0 bash -c '
+  out=$("$1" --task "x" --turns 2 --dry-run --cwd "$2" \
+         --lead claude:planner --partner claude:reviewer)
+  echo "$out" | grep -q "Turn 1 :: claude-partner" \
+    || { echo "missing claude partner turn"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: claude-lead" \
+    || { echo "missing claude lead turn"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
 echo "kickoff from file" > "$TMPD/k.txt"
 expect "kickoff @file"                       0 "$DUET" --kickoff @"$TMPD/k.txt" --dry-run --cwd "$TMPD"
 printf "kickoff stdin\n" > "$TMPD/stdin-kickoff.txt"
@@ -73,6 +91,14 @@ head -c 524289 /dev/zero > "$TMPD/large.txt"
 expect "task too large -> error"             2 "$DUET" --task @"$TMPD/large.txt" --dry-run --cwd "$TMPD"
 expect "from-cmd nonzero -> error"           2 "$DUET" --task-from-cmd 'false' --dry-run --cwd "$TMPD"
 expect "from-cmd empty stdout -> error"      2 "$DUET" --task-from-cmd 'true' --dry-run --cwd "$TMPD"
+cat > "$TMPD/cfg-dupe-agents.json" <<EOF
+{"cwd":"$TMPD","dry_run":true,"task":"x","agents":[{"name":"same","backend":"codex","role":"planner"},{"name":"same","backend":"codex","role":"coder"}]}
+EOF
+expect "duplicate agent names -> error"      2 "$DUET" --config "$TMPD/cfg-dupe-agents.json"
+cat > "$TMPD/cfg-bad-worktree-for.json" <<EOF
+{"cwd":"$TMPD","dry_run":true,"task":"x","worktree_for":"nonexistent-agent","agents":[{"name":"codex-lead","backend":"codex","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
+EOF
+expect "bad worktree_for -> error"           2 "$DUET" --config "$TMPD/cfg-bad-worktree-for.json"
 
 # Config key support (JSON keeps the smoke stdlib-only).
 cat > "$TMPD/cfg.json" <<JSON
@@ -573,6 +599,306 @@ _, sid2 = m.call_codex(
     dry=False, first_turn=True,
 )
 assert sid2 == "codex-current", sid2
+PY
+
+# Same-cwd codex/codex peers are safe only when each peer yields a UUID before
+# any later resume. This mocked loop proves UUID-pinned resume never falls back
+# to `--last` when both first turns emit ids.
+expect "codex-codex shared cwd uuid safe"    0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+UUIDS = [
+    "019e12ad-0b1b-7732-bd7b-6acbbd04ab41",
+    "019e12ad-0b1b-7732-bd7b-6acbbd04ab42",
+    "019e12ad-0b1b-7732-bd7b-6acbbd04ab41",
+]
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    sid = UUIDS[len(calls) - 1]
+    return 0, f"reply {len(calls)}", f"session id: {sid}\n"
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-uuid-safe-runs",
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=3,
+    start_speaker_idx=0,
+)
+m.run_duet(cfg)
+assert len(calls) == 3, calls
+assert calls[2][:4] == ["codex", "exec", "resume", UUIDS[0]], calls[2]
+assert "--last" not in calls[2], calls[2]
+PY
+
+expect "codex-codex no uuid fatal"           0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "reply without uuid", ""
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-no-uuid-runs",
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=4,
+)
+try:
+    m.run_duet(cfg)
+except SystemExit as e:
+    assert "cannot safely continue codex/codex" in str(e), e
+    assert len(calls) == 1, calls
+else:
+    raise AssertionError("expected shared-cwd codex/codex missing UUID to fail")
+PY
+
+expect "codex-codex seed last fatal"         0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "should not run", ""
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-seed-last-runs",
+    agents=[
+        m.Agent(
+            name="codex-lead",
+            backend="codex",
+            role="planner",
+            session_id="codex-current",
+        ),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+)
+try:
+    m.run_duet(cfg)
+except SystemExit as e:
+    assert "cannot safely continue codex/codex" in str(e), e
+    assert calls == [], calls
+else:
+    raise AssertionError("expected seed extraction with --last to fail")
+PY
+
+expect "codex-codex partial uuid fatal"      0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+UUID = "019e12ad-0b1b-7732-bd7b-6acbbd04ab51"
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    err = f"session id: {UUID}\n" if len(calls) == 1 else ""
+    return 0, f"reply {len(calls)}", err
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-partial-uuid-runs",
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=4,
+    start_speaker_idx=0,
+)
+try:
+    m.run_duet(cfg)
+except SystemExit as e:
+    assert "cannot safely continue codex/codex" in str(e), e
+    assert len(calls) == 2, calls
+else:
+    raise AssertionError("expected partial UUID capture to fail")
+PY
+
+expect "codex-codex partner first lead uuid fatal" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+UUID = "019e12ad-0b1b-7732-bd7b-6acbbd04ab71"
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    err = f"session id: {UUID}\n" if len(calls) == 1 else ""
+    return 0, f"reply {len(calls)}", err
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-partner-first-lead-missing-runs",
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+)
+try:
+    m.run_duet(cfg)
+except SystemExit as e:
+    assert "cannot safely continue codex/codex" in str(e), e
+    assert len(calls) == 2, calls
+else:
+    raise AssertionError("expected lead's first missing UUID to fail")
+PY
+
+expect "codex-codex isolated cwd allows last" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+partner_cwd = tmpd / "codex-peer-cwd"
+partner_cwd.mkdir(exist_ok=True)
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, f"reply {len(calls)}", ""
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "codex-isolated-last-runs",
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(
+            name="codex-partner",
+            backend="codex",
+            role="coder",
+            cwd_override=partner_cwd,
+        ),
+    ],
+    task="x",
+    max_turns=3,
+)
+m.run_duet(cfg)
+assert len(calls) == 3, calls
+assert calls[2][:4] == ["codex", "exec", "resume", "--last"], calls[2]
+PY
+
+expect "same-backend stderr logs distinct"  0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+UUIDS = [
+    "019e12ad-0b1b-7732-bd7b-6acbbd04ab61",
+    "019e12ad-0b1b-7732-bd7b-6acbbd04ab62",
+]
+calls = []
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    log_path = kwargs.get("stderr_log_path")
+    if log_path is not None:
+        m.write_text_atomic(log_path, f"log file: {log_path.name}\n")
+    return 0, f"reply {len(calls)}", f"session id: {UUIDS[len(calls) - 1]}\n"
+
+m._run = fake_run
+runs_dir = tmpd / "codex-log-runs"
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=runs_dir,
+    agents=[
+        m.Agent(name="codex-lead", backend="codex", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+    start_speaker_idx=0,
+)
+m.run_duet(cfg)
+run_dir = sorted(p for p in runs_dir.iterdir() if p.is_dir())[-1]
+lead_log = run_dir / "turn-01-codex-lead.stderr.log"
+partner_log = run_dir / "turn-02-codex-partner.stderr.log"
+assert lead_log.exists(), lead_log
+assert partner_log.exists(), partner_log
+lead_text = lead_log.read_text()
+partner_text = partner_log.read_text()
+assert "turn-01-codex-lead.stderr.log" in lead_text, lead_text
+assert "turn-02-codex-partner.stderr.log" in partner_text, partner_text
+assert lead_text != partner_text, (lead_text, partner_text)
 PY
 
 # Role-scoped codex-fast: when the run has a codex:planner alongside a

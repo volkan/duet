@@ -68,3 +68,27 @@ agents:
     # role_prompt: |
     #   You are a senior engineer. Be terse. Apply edits. Run tests.
     #   When done, include an LGTM rationale and {SENTINEL} on its own line.
+
+# Same-backend variants:
+#
+# Codex planner + Codex coder. Prefer worktree mode so one Codex peer gets a
+# separate cwd; without cwd isolation, both peers must emit session UUIDs on
+# their first turns or duet aborts before using the cwd-based --last fallback.
+# worktree: true
+# agents:
+#   - name: codex-lead
+#     backend: codex
+#     role: planner
+#   - name: codex-partner
+#     backend: codex
+#     role: coder
+#
+# Claude coder + Claude reviewer. Reviewer prompts tell Claude to inspect
+# actual files, diffs, and test output instead of relying only on summaries.
+# agents:
+#   - name: claude-lead
+#     backend: claude
+#     role: coder
+#   - name: claude-partner
+#     backend: claude
+#     role: reviewer
