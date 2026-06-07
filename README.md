@@ -152,6 +152,11 @@ Use a repeatable config:
 ./duet.py --config duet.example.yaml
 ```
 
+Useful packaged configs:
+
+- `examples/pr-review.yaml` - deep review of the latest commit.
+- `examples/codex-test-fix.yaml` - Codex planner diagnoses failing checks; Codex coder fixes them in a worktree.
+
 Same-backend peering:
 
 ```bash

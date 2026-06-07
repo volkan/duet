@@ -326,6 +326,11 @@ peer does not, duet exits immediately because the legacy
 peer's session. `--worktree` or `--worktree-for lead` gives one peer a separate
 cwd, so the fallback remains isolated.
 
+For a ready-to-run same-backend workflow, see
+`examples/codex-test-fix.yaml`: it captures failing `make test` output, has a
+Codex planner diagnose the failure, and lets a Codex coder fix it in a
+worktree gated by `verify_cmd`.
+
 ---
 
 ## CLI flags

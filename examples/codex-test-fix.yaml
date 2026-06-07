@@ -1,0 +1,86 @@
+# Codex planner + Codex coder for failing checks.
+#
+# Use this when a project check is failing and you want one Codex peer to
+# diagnose the failure before another Codex peer edits. It is intentionally
+# same-backend: useful when you want role separation and a compact loop, not
+# model diversity.
+#
+# Run from inside the repo whose tests you want fixed:
+#   duet --config /path/to/examples/codex-test-fix.yaml
+# or, if you've copied this file into the target repo:
+#   duet --config codex-test-fix.yaml
+#
+# Turn order:
+#   Turn 1 - codex-planner reads the captured check output, identifies the
+#            likely root cause, and gives codex-coder a concrete fix plan.
+#   Turn 2 - codex-coder edits in a fresh worktree and runs quick checks.
+#   Later  - codex-planner reviews the appended worktree diff and either asks
+#            for a follow-up fix or accepts with LGTM rationale + sentinel.
+#
+# Why the worktree matters for codex/codex:
+#   `codex exec resume --last` is cwd-based when no UUID is available. This
+#   config puts the coder in a worktree (`worktree_for: lead`) while the planner
+#   stays in the host checkout, so even legacy fallback state is cwd-isolated.
+#   The worktree is left intact at exit; duet prints merge/drop commands.
+#
+# Adapt this file:
+#   - Replace `make test` in both task_from_cmd and verify_cmd with `pytest`,
+#     `npm test`, `cargo test`, etc.
+#   - Keep task_from_cmd's `exit 0`: a failing test command is expected input,
+#     not a config error. verify_cmd is the actual convergence gate.
+#   - If your test command needs network, add the Codex sandbox network override
+#     under both agents' extra_args.
+
+cwd: .
+max_turns: 6
+sentinel: "<<<LGTM>>>"
+per_turn_timeout: 1200
+runs_dir: runs
+
+sandbox: workspace-write
+worktree: true
+worktree_for: lead
+
+reasoning: high
+codex_fast: true              # applies only to codex-coder; planner stays high
+
+verify_cmd: "make test"
+
+task_from_cmd: |
+  tmp="${TMPDIR:-/tmp}/duet-test-fix-$$.log"
+  rm -f "$tmp"
+  if make test >"$tmp" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  printf 'Investigate the project check below.\n\n'
+  printf 'Command: make test\n'
+  printf 'Exit code: %s\n\n' "$status"
+  printf 'Instructions:\n'
+  printf -- '- If the command failed, identify the root cause and fix it with the smallest safe change.\n'
+  printf -- '- If the command passed, do not invent work; confirm no change is needed.\n'
+  printf -- '- Before convergence, the configured verify_cmd must pass in the worktree.\n\n'
+  printf -- '--- command output ---\n'
+  cat "$tmp"
+  rm -f "$tmp"
+  exit 0
+
+agents:
+  # agents[0] = LEAD: codex-coder. Because worktree_for: lead, this agent edits
+  # a fresh branch under runs/<id>/wt and gets codex_fast's low-effort override.
+  - name: codex-coder
+    backend: codex
+    role: coder
+    extra_args: []
+    # If tests need network, uncomment:
+    # extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
+
+  # agents[1] = PARTNER: codex-planner. Partner speaks first, diagnoses the
+  # failing output, and later reviews the appended worktree diff.
+  - name: codex-planner
+    backend: codex
+    role: planner
+    extra_args: []
+    # If diagnosis needs network, uncomment:
+    # extra_args: ["-c", "sandbox_workspace_write.network_access=true"]
