@@ -144,42 +144,47 @@ EXTRACT_LATEST_PROMPT = (
 
 # User-facing reasoning levels accepted by --reasoning / `reasoning:` in YAML.
 # These are the *duet abstraction*; per-backend translation happens below so
-# the user doesn't have to remember backend-specific names like Codex's `xhigh`
-# or Claude's lack of a `minimal` effort value.
-REASONING_LEVELS = ["minimal", "low", "medium", "high", "max"]
+# users can choose the common `xhigh` level directly while still getting useful
+# aliases for backend-specific gaps (`minimal` for Codex, `max` for Claude).
+REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
 # Claude Code exposes thinking control through `--effort`. We still add small
-# prompt nudges for high/max because they are useful natural-language guidance,
-# and `ultrathink` is a recognized one-turn in-context nudge in current Claude
-# Code. The CLI flag below is the authoritative effort control.
+# prompt nudges for high/xhigh/max because they are useful natural-language
+# guidance. `ultrathink` is a recognized one-turn in-context nudge in current
+# Claude Code; the CLI flag below remains the authoritative effort control.
 CLAUDE_REASONING_PROMPT_PREFIX = {
     "minimal": "",
     "low":     "",
     "medium":  "",
     "high":    "think hard and reason step-by-step before answering. Cover edge cases.\n\n",
+    "xhigh":   "think very hard and reason carefully before answering. Cover "
+               "edge cases, alternatives, and risks.\n\n",
     "max":     "ultrathink — reason exhaustively before answering. Enumerate edge "
                "cases, alternatives, and risks. Do not skim.\n\n",
 }
 
 # Claude Code `--effort` accepts low, medium, high, xhigh, max. The duet
-# abstraction has `minimal` for Codex, so Claude gets its lowest documented
-# level for that user-facing value.
+# abstraction has `minimal` for Codex, so Claude maps that user-facing value to
+# its lowest documented level.
 CLAUDE_REASONING_MAP = {
     "minimal": "low",
     "low":     "low",
     "medium":  "medium",
     "high":    "high",
+    "xhigh":   "xhigh",
     "max":     "max",
 }
 
 # Codex CLI takes a config override `-c model_reasoning_effort=<value>`.
 # Its accepted values, lowest→highest, are: minimal, low, medium, high, xhigh.
-# We map duet's `max` to Codex's `xhigh` (its actual highest).
+# We also map duet's `max` alias to Codex's `xhigh` because Codex does not
+# document a separate `max` effort value.
 CODEX_REASONING_MAP = {
     "minimal": "minimal",
     "low":     "low",
     "medium":  "medium",
     "high":    "high",
+    "xhigh":   "xhigh",
     "max":     "xhigh",
 }
 
@@ -2796,7 +2801,7 @@ def main() -> int:
                     help="reasoning effort for both agents. Codex: passes "
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
-                         "(minimal → low) and adds high/max prompt nudges.")
+                         "(minimal → low) and adds high/xhigh/max prompt nudges.")
     ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
                     help="Codex-only fast mode: pin codex coder turns to "
                          "`model_reasoning_effort=low` and "

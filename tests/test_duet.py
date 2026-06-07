@@ -445,8 +445,13 @@ class TestReasoningHelpers(unittest.TestCase):
                 self.assertIn(level, duet.CLAUDE_REASONING_PROMPT_PREFIX)
 
     def test_codex_max_maps_to_xhigh(self) -> None:
-        # Documented: duet's `max` maps to Codex's `xhigh` (its actual top).
+        # Codex documents `xhigh` but not `max`; duet keeps `max` as a
+        # backend-normalized alias for the highest Codex effort.
         self.assertEqual(duet.CODEX_REASONING_MAP["max"], "xhigh")
+
+    def test_xhigh_maps_to_xhigh_for_both_backends(self) -> None:
+        self.assertEqual(duet.CLAUDE_REASONING_MAP["xhigh"], "xhigh")
+        self.assertEqual(duet.CODEX_REASONING_MAP["xhigh"], "xhigh")
 
     def test_claude_minimal_maps_to_low(self) -> None:
         # Claude has no `minimal`; we route it to `low`.

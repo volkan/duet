@@ -44,6 +44,7 @@ expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --d
 expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
+expect_stdout "reasoning xhigh accepted"     0 "reasoning=xhigh"    "$DUET" --task "x" --dry-run --cwd "$TMPD" --reasoning xhigh
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)

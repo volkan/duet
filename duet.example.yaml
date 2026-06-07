@@ -11,6 +11,11 @@ permission_mode: acceptEdits
 dry_run: false
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
+# Optional reasoning effort for both agents:
+# minimal | low | medium | high | xhigh | max
+# Codex: max maps to xhigh. Claude: minimal maps to low.
+# reasoning: high
+
 # Optional: shell command that must exit 0 before a valid LGTM+rationale
 # convergence proposal can count. Runs in the worktree when worktree mode has
 # an effective worktree path; otherwise runs in cwd.

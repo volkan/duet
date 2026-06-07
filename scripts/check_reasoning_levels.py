@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Verify duet's reasoning-effort translation layer end-to-end.
 
-Five duet-abstraction levels (`minimal`, `low`, `medium`, `high`, `max`) map to
-backend-specific cmd-line flags / values via four constants in `duet.py`:
+Six duet-abstraction levels (`minimal`, `low`, `medium`, `high`, `xhigh`,
+`max`) map to backend-specific cmd-line flags / values via four constants in
+`duet.py`:
 `REASONING_LEVELS`, `CLAUDE_REASONING_MAP`, `CODEX_REASONING_MAP`,
 `CLAUDE_REASONING_PROMPT_PREFIX`. Drift between any of them is a P0 because
 the user-facing flag values silently lie about which effort is in use.
@@ -13,8 +14,8 @@ level, and asserts:
   - codex is invoked with `-c model_reasoning_effort=<mapped>` (or no `-c`
     flag at all for `medium`, which is Codex's default)
   - the system-prompt prefix contains the right reasoning-nudge marker for
-    `high` (`think hard`) and `max` (`ultrathink`); minimal/low/medium have
-    no nudge
+    `high` (`think hard`), `xhigh` (`think very hard`), and `max`
+    (`ultrathink`); minimal/low/medium have no nudge
 
 Exits 0 on full match, 1 on any row mismatch (with the offending rows
 flagged in the printed table). CLAUDE.md's reasoning-translation invariant
@@ -40,6 +41,7 @@ EXPECTED = {
     "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low"},
     "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)"},
     "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high"},
+    "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh"},
     "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh"},
 }
 
@@ -126,7 +128,7 @@ def main() -> int:
             if not ok:
                 print(f"  {lvl}: {'; '.join(problems)}", file=sys.stderr)
         return 1
-    print("\nOK: all 5 reasoning levels map to the expected backend args.")
+    print(f"\nOK: all {len(m.REASONING_LEVELS)} reasoning levels map to the expected backend args.")
     return 0
 
 
