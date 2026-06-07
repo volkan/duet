@@ -392,7 +392,7 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     wt/                                      # the git worktree (if --worktree)
 ```
 
-The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn.
+The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn. If an agent timeout or command error ends the run, duet writes an error block to `transcript.md`, records the failing turn in `state.json["history"]`, and includes the matching stderr log path.
 
 When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
 command, cwd, exit code, stdout, and stderr for each verification run.
@@ -468,7 +468,7 @@ Exit codes:
 
 | exit | meaning |
 |---|---|
-| `0` | run finished (`finished_reason` set, e.g. `converged` / `max_turns` / `force_stop`) |
+| `0` | run finished (`finished_reason` set, e.g. `converged` / `max_turns` / `force_stop` / `timeout` / `agent_error`) |
 | `1` | running — either an in-flight turn (`.pid` file present) or between turns / awaiting `force>` (verified via `state["duet_pid"]` matching a live duet process) |
 | `2` | stuck/crashed — no `.pid` file, no `finished_reason`, AND duet's recorded PID is gone or the PID has been recycled by an unrelated process |
 | `3` | `--status` itself errored (bad path, malformed `state.json`) |
@@ -490,7 +490,7 @@ $ duet --list
   3 run(s). Per-run health: duet --status <run-id>
 ```
 
-Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · 🟢 running (in-flight or between turns) · ⚠ crashed/stuck · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
+Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · ⏱ timeout · ⚠ agent_error / crashed / stuck · 🟢 running (in-flight or between turns) · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
 
 `duet --cwd /other/project …` records its run under `/other/project/.duet/runs/<id>/`, but it also drops a symlink at `~/.duet/runs/<cwd-slug>/<run_id>/` so the run is visible to `duet --list` (and `duet --status <run_id>`) from any cwd. Runs surfaced via both the cwd-relative path and the home-index symlink show as one row (deduped on resolved real path); the cwd-relative path wins for display because that's usually the more informative one. Runs created before this index existed get backfilled the first time `--list` walks their dir — idempotent and silent.
 
@@ -516,7 +516,13 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
-| per-turn timeout | turn rc=124, error inserted, loop stops with `reason=force_stop` |
+| per-turn agent timeout | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
+| agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
+
+`force_stop` is reserved for intentional human interruption: Ctrl-C or a
+user-requested force-prompt stop. Agent/runtime failures are recorded as
+`timeout` or `agent_error`, so `state.json`, `duet --status`, and `duet --list`
+do not make them look like a deliberate stop.
 
 After any normal exit, if stdin is a TTY:
 
@@ -635,7 +641,7 @@ If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No cra
 
 ## After a run finishes
 
-When duet exits — converged, max-turns, force-stopped, or you Ctrl-C'd — the run dir is preserved at `<runs_dir>/<run_id>/`. Three things to do, usually in order:
+When duet exits — converged, max-turns, force-stopped, timed out, hit an agent error, or you Ctrl-C'd — the run dir is preserved at `<runs_dir>/<run_id>/`. Three things to do, usually in order:
 
 ### 1. See what happened
 

@@ -108,15 +108,20 @@ is reached, a timeout happens, or you press Ctrl-C. A convergence proposal must
 include an `LGTM rationale:` explaining why the work is done, followed by the
 sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
 
+Finished runs record the reason in `state.json`: user interruption stays
+`force_stop`, per-turn agent timeouts are `timeout`, and non-timeout agent
+command failures or malformed required output are `agent_error`.
+
 If you pass `--verify-cmd`, duet runs that shell command before counting a
 valid convergence proposal. Exit code 0 allows the proposal to count; any
 non-zero exit, timeout, or execution error feeds a capped failure block to the
 next agent turn. `--dry-run` records and prints the configured command but
 does not execute it.
 
-After the loop, duet opens a `force> ` prompt. Press Enter to finish, or type
-feedback to force another round; duet sends the next agent the previous reply
-plus your feedback, including any appended worktree handoff block and diff.
+After normal loop endings, duet opens a `force> ` prompt. Press Enter to
+finish, or type feedback to force another round; duet sends the next agent the
+previous reply plus your feedback, including any appended worktree handoff
+block and diff.
 
 ## Common Recipes
 

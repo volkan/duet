@@ -383,6 +383,169 @@ assert "output truncated to last" in prompt, prompt[-500:]
 assert "A" * (m.VERIFY_OUTPUT_TAIL_CHARS + 1) not in prompt
 PY
 
+expect "agent timeout finish reason"         0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+def fake_run(cmd, **kwargs):
+    log_path = kwargs.get("stderr_log_path")
+    if log_path is not None:
+        m.write_text_atomic(log_path, "timeout stderr\n")
+    return 124, "", "timeout stderr\n[duet] TIMEOUT after 1s"
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "agent-timeout-runs",
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "timeout", state
+assert state["turns_used"] == 1, state
+last = state["history"][-1]
+assert last["finished_reason"] == "timeout", last
+assert "codex exited 124" in last["error"], last
+log_path = pathlib.Path(last["stderr_log_path"])
+assert "timeout stderr" in log_path.read_text(), log_path
+transcript = pathlib.Path(state["transcript_path"]).read_text()
+assert "finished_reason: timeout" in transcript, transcript
+assert "TIMEOUT" in transcript, transcript
+assert str(log_path) in transcript, transcript
+PY
+
+expect "agent nonzero finish reason"         0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+def fake_run(cmd, **kwargs):
+    log_path = kwargs.get("stderr_log_path")
+    if log_path is not None:
+        m.write_text_atomic(log_path, "fatal backend stderr\n")
+    return 7, "", "fatal backend stderr"
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "agent-error-runs",
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+    max_turns=2,
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "agent_error", state
+last = state["history"][-1]
+assert last["finished_reason"] == "agent_error", last
+assert "codex exited 7" in last["error"], last
+log_path = pathlib.Path(last["stderr_log_path"])
+assert "fatal backend stderr" in log_path.read_text(), log_path
+transcript = pathlib.Path(state["transcript_path"]).read_text()
+assert "finished_reason: agent_error" in transcript, transcript
+assert "fatal backend stderr" in transcript, transcript
+assert str(log_path) in transcript, transcript
+PY
+
+expect "seed extract timeout finish reason"  0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+def fake_run(cmd, **kwargs):
+    log_path = kwargs.get("stderr_log_path")
+    if log_path is not None:
+        m.write_text_atomic(log_path, "seed timeout stderr\n")
+    return 124, "", "seed timeout stderr\n[duet] TIMEOUT after 1s"
+
+m._run = fake_run
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "seed-timeout-runs",
+    agents=[
+        m.Agent(
+            name="claude-lead",
+            backend="claude",
+            role="planner",
+            session_id="seed-session",
+        ),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    max_turns=2,
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "timeout", state
+assert state["turns_used"] == 0, state
+last = state["history"][-1]
+assert last["kind"] == "seed_extract", last
+assert last["finished_reason"] == "timeout", last
+log_path = pathlib.Path(last["stderr_log_path"])
+assert "seed timeout stderr" in log_path.read_text(), log_path
+assert str(log_path) in pathlib.Path(state["transcript_path"]).read_text()
+PY
+
+expect "sigint remains force_stop"           0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+def fake_install_sigint(stop):
+    stop.request("SIGINT")
+
+m._install_sigint = fake_install_sigint
+cfg = m.DuetConfig(
+    cwd=tmpd,
+    runs_dir=tmpd / "sigint-runs",
+    agents=[
+        m.Agent(name="claude-lead", backend="claude", role="planner"),
+        m.Agent(name="codex-partner", backend="codex", role="coder"),
+    ],
+    task="x",
+)
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "force_stop", state
+assert state["turns_used"] == 0, state
+PY
+
 expect "worktree handoff names review target" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util
 import pathlib
@@ -1029,6 +1192,31 @@ JSON
 # Use `bash -c` to put the `cd` inside the SUT (a child shell) instead of
 # wrapping `expect` in a subshell — that would lose the PASS/FAIL counters.
 expect "status by bare run id"            0 bash -c "cd '$TMPD' && '$DUET_ABS' --status '$FAKE_ID'"
+
+FINISHED_SYNTH="$TMPD/finished-synth"
+mkdir -p "$FINISHED_SYNTH/20260507-100001" "$FINISHED_SYNTH/20260507-100002" "$FINISHED_SYNTH/20260507-100003"
+cat > "$FINISHED_SYNTH/20260507-100001/state.json" <<JSON
+{"task":"x","cwd":"$TMPD","turns_used":1,"agents":[],"history":[],"finished_reason":"timeout"}
+JSON
+cat > "$FINISHED_SYNTH/20260507-100002/state.json" <<JSON
+{"task":"x","cwd":"$TMPD","turns_used":1,"agents":[],"history":[],"finished_reason":"agent_error"}
+JSON
+cat > "$FINISHED_SYNTH/20260507-100003/state.json" <<JSON
+{"task":"x","cwd":"$TMPD","turns_used":1,"agents":[],"history":[],"finished_reason":"force_stop"}
+JSON
+expect_stdout "status timeout distinct"      0 "finished_reason: 'timeout'" "$DUET" --status "$FINISHED_SYNTH/20260507-100001"
+expect_stdout "status agent_error distinct"  0 "finished_reason: 'agent_error'" "$DUET" --status "$FINISHED_SYNTH/20260507-100002"
+expect_stdout "status force_stop preserved"  0 "finished_reason: 'force_stop'" "$DUET" --status "$FINISHED_SYNTH/20260507-100003"
+expect "list failure labels distinct"        0 bash -c '
+  out=$("$1" --list "$2")
+  echo "$out" | grep -q "timeout" \
+    || { echo "missing timeout row"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "agent_error" \
+    || { echo "missing agent_error row"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "force_stop" \
+    || { echo "missing force_stop row"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$FINISHED_SYNTH"
 
 # Bogus id → exit 3 with helpful "use --list" error.
 expect "status nonexistent id -> exit 3"  3 bash -c "cd '$TMPD' && '$DUET_ABS' --status '99999999-999999'"

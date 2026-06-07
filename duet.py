@@ -65,6 +65,21 @@ VERIFY_OUTPUT_TAIL_CHARS = 4000
 VERIFY_LIVE_PREFIX = "  │ [verify] "
 SUPPORTED_BACKENDS = {"claude", "codex"}
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
+FINISHED_CONVERGED = "converged"
+FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
+FINISHED_FORCED_CONTINUATION = "forced_continuation"
+FINISHED_MAX_TURNS = "max_turns"
+FINISHED_FORCE_STOP = "force_stop"
+FINISHED_TIMEOUT = "timeout"
+FINISHED_AGENT_ERROR = "agent_error"
+
+
+class AgentRunError(RuntimeError):
+    """Agent/backend failure that should finish the run with a specific reason."""
+
+    def __init__(self, finished_reason: str, message: str) -> None:
+        super().__init__(message)
+        self.finished_reason = finished_reason
 
 RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
 
@@ -826,6 +841,39 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                 pass
 
 
+def _agent_finished_reason(exc: Exception) -> str:
+    if isinstance(exc, AgentRunError):
+        return exc.finished_reason
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return FINISHED_TIMEOUT
+    return FINISHED_AGENT_ERROR
+
+
+def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
+               stdin: Optional[str], timeout: int,
+               stderr_log_path: Optional[pathlib.Path],
+               pid_file_path: Optional[pathlib.Path]) -> tuple[int, str, str]:
+    try:
+        return _run(
+            cmd,
+            cwd=cwd,
+            stdin=stdin,
+            timeout=timeout,
+            stderr_log_path=stderr_log_path,
+            pid_file_path=pid_file_path,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AgentRunError(
+            FINISHED_TIMEOUT,
+            f"{backend} timed out after {e.timeout}s",
+        ) from e
+    except Exception as e:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"{backend} invocation failed: {e}",
+        ) from e
+
+
 # ---------- verification gate ----------
 
 def effective_verify_cwd(cfg: DuetConfig,
@@ -1016,17 +1064,27 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     if agent.model:
         cmd += ["--model", agent.model]
     cmd += agent.extra_args
-    rc, out, err = _run(cmd, cwd=eff_cwd, stdin=None, timeout=timeout,
-                        stderr_log_path=stderr_log_path,
-                        pid_file_path=pid_file_path)
+    rc, out, err = _agent_run(
+        cmd,
+        backend="claude",
+        cwd=eff_cwd,
+        stdin=None,
+        timeout=timeout,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
     if rc != 0:
-        raise RuntimeError(f"claude exited {rc}\nstderr:\n{err}")
+        reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+        raise AgentRunError(reason, f"claude exited {rc}\nstderr:\n{err}")
     try:
         payload = json.loads(out)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
     except json.JSONDecodeError:
         snippet = out[:500].strip()
-        raise RuntimeError(f"claude returned malformed JSON output: {snippet!r}")
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"claude returned malformed JSON output: {snippet!r}",
+        )
 
 
 # Codex's `codex exec` prints a line like `session id: 019e12ad-0b1b-7732-bd7b-6acbbd04ab46`
@@ -1141,11 +1199,21 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             cmd = ["codex", "exec", "resume", "--last",
                    *options, full_prompt]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
-    rc, out, err = _run(cmd, cwd=eff_cwd, stdin="", timeout=timeout,
-                        stderr_log_path=stderr_log_path,
-                        pid_file_path=pid_file_path)
+    rc, out, err = _agent_run(
+        cmd,
+        backend="codex",
+        cwd=eff_cwd,
+        stdin="",
+        timeout=timeout,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
     if rc != 0:
-        raise RuntimeError(f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…")
+        reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+        raise AgentRunError(
+            reason,
+            f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…",
+        )
     # Prefer a freshly-parsed UUID from stderr; fall back to whatever id we
     # were already carrying; finally fall back to the "codex-current"
     # sentinel so the next turn at least knows a prior turn happened.
@@ -1192,6 +1260,19 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
         agent.session_id = new_sid
         return text
     raise SystemExit(f"unknown backend '{agent.backend}'")
+
+
+def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
+                         agent: Agent, run_dir: pathlib.Path) -> str:
+    kind = "TIMEOUT" if reason == FINISHED_TIMEOUT else "AGENT ERROR"
+    log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
+    return "\n".join([
+        f"[duet] {kind}: turn {turn_label} failed for "
+        f"{agent.name} ({agent.backend}/{agent.role})",
+        f"[duet] finished_reason: {reason}",
+        f"[duet] error: {exc}",
+        f"[duet] stderr log: {log_path}",
+    ])
 
 # ---------- loop ----------
 
@@ -1593,7 +1674,7 @@ def run_duet(cfg: DuetConfig) -> dict:
             "turns_used": 0,
             "agents": [agent_state(a) for a in cfg.agents],
             "history": history,
-            "finished_reason": "force_stop",
+            "finished_reason": FINISHED_FORCE_STOP,
             "transcript_path": str(transcript_path),
             "verify_cmd": cfg.verify_cmd,
             "last_verify": None,
@@ -1608,11 +1689,58 @@ def run_duet(cfg: DuetConfig) -> dict:
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
 
-    if not cfg.kickoff and cfg.agents[0].session_id:
-        guard_codex_shared_cwd_before_call(
-            cfg, cfg.agents[0], first_turn_for_agent=False
+    seed_t0 = time.time()
+    try:
+        if not cfg.kickoff and cfg.agents[0].session_id:
+            guard_codex_shared_cwd_before_call(
+                cfg, cfg.agents[0], first_turn_for_agent=False
+            )
+        seed = derive_seed(cfg, run_dir=run_dir)
+    except Exception as e:
+        failure_reason = _agent_finished_reason(e)
+        seed_agent = cfg.agents[0]
+        reply = _agent_failure_block(
+            failure_reason, e, "00-extract", seed_agent, run_dir
         )
-    seed = derive_seed(cfg, run_dir=run_dir)
+        log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
+        elapsed = time.time() - seed_t0
+        history.append({
+            "turn": 0,
+            "agent": seed_agent.name,
+            "kind": "seed_extract",
+            "elapsed_s": elapsed,
+            "len_chars": len(reply),
+            "session_id": seed_agent.session_id,
+            "finished_reason": failure_reason,
+            "error": str(e),
+            "stderr_log_path": str(
+                run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
+            ),
+        })
+        state = {
+            "task": cfg.task,
+            "cwd": str(cfg.cwd),
+            "turns_used": 0,
+            "agents": [agent_state(a) for a in cfg.agents],
+            "history": history,
+            "finished_reason": failure_reason,
+            "transcript_path": str(transcript_path),
+            "verify_cmd": cfg.verify_cmd,
+            "last_verify": None,
+            "worktree": str(wt_path) if wt_path else None,
+            "worktree_branch": wt_branch,
+            "worktree_for": cfg.worktree_for,
+            "continue_from": cfg.continue_from,
+            "duet_pid": os.getpid(),
+        }
+        if cfg.recap:
+            state["recap_path"] = str(recap_path)
+        write_text_atomic(state_path, json.dumps(state, indent=2))
+        print(reply)
+        print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
+        if cfg.recap:
+            print(f"[duet] recap: {recap_path}")
+        return state
     log(cfg.agents[0].name, cfg.agents[0].role, seed, kind="seed")
     last_msg = seed
 
@@ -1620,13 +1748,13 @@ def run_duet(cfg: DuetConfig) -> dict:
     # `--continue` may set this to the other agent so the next speaker matches
     # the previous run's last completed turn.
     speaker_idx = cfg.start_speaker_idx
-    finished_reason = "max_turns"
+    finished_reason = FINISHED_MAX_TURNS
     previous_convergence_proposal = False
     last_verify_state: Optional[dict] = None
 
     for turn in range(1, cfg.max_turns + 1):
         if stop.requested:
-            finished_reason = "force_stop"
+            finished_reason = FINISHED_FORCE_STOP
             break
         speaker = cfg.agents[speaker_idx]
         first_turn_for_agent = not seen_first_turn[speaker.name]
@@ -1643,21 +1771,26 @@ def run_duet(cfg: DuetConfig) -> dict:
                   f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
             sys.stdout.flush()
         call_succeeded = False
+        failure_reason: Optional[str] = None
+        failure_message: Optional[str] = None
         try:
             reply = call_agent(speaker, last_msg, cfg,
                                first_turn_for_agent=first_turn_for_agent,
                                run_dir=run_dir, turn_label=f"{turn:02d}")
             call_succeeded = True
         except Exception as e:
+            failure_reason = _agent_finished_reason(e)
+            failure_message = str(e)
             if cfg.recap and inflight is not None:
                 _stop_recap_inflight(*inflight)
+                inflight = None
                 elapsed = time.time() - t0
                 print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
                       f"ERROR after {int(round(elapsed))}s — "
                       f"see turn-{turn:02d}-{speaker.name}.stderr.log")
-                raise
-            reply = f"[duet] AGENT ERROR: {e}"
-            stop.request(f"agent_error: {e}")
+            reply = _agent_failure_block(
+                failure_reason, e, f"{turn:02d}", speaker, run_dir
+            )
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
         if call_succeeded:
@@ -1702,13 +1835,19 @@ def run_duet(cfg: DuetConfig) -> dict:
         log(speaker.name, speaker.role, reply)
         history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                          "len_chars": len(reply), "session_id": speaker.session_id}
+        if failure_reason is not None:
+            history_entry["finished_reason"] = failure_reason
+            history_entry["error"] = failure_message
+            history_entry["stderr_log_path"] = str(
+                run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log"
+            )
         if verify_state is not None:
             history_entry["verify"] = verify_state
         history.append(history_entry)
         turn_state = {
             "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
             "agents": [agent_state(a) for a in cfg.agents],
-            "history": history, "finished_reason": None,
+            "history": history, "finished_reason": failure_reason,
             "transcript_path": str(transcript_path),
             "verify_cmd": cfg.verify_cmd,
             "last_verify": last_verify_state,
@@ -1726,24 +1865,29 @@ def run_duet(cfg: DuetConfig) -> dict:
         else:
             print(reply)
 
+        if failure_reason is not None:
+            finished_reason = failure_reason
+            break
         if convergence_hit and previous_convergence_proposal:
-            finished_reason = "converged"
+            finished_reason = FINISHED_CONVERGED
             break
         if stop.requested:
-            finished_reason = "force_stop"
+            finished_reason = FINISHED_FORCE_STOP
             break
 
         last_msg = reply
         previous_convergence_proposal = convergence_hit
         speaker_idx = 1 - speaker_idx
     else:
-        finished_reason = "max_turns"
+        finished_reason = FINISHED_MAX_TURNS
 
-    finished_reason, forced_verify_state = ask_force(
-        cfg, history, transcript_path, state_path,
-        last_msg, speaker_idx, seen_first_turn,
-        finished_reason, wt_path, wt_branch
-    )
+    forced_verify_state = None
+    if finished_reason not in (FINISHED_TIMEOUT, FINISHED_AGENT_ERROR):
+        finished_reason, forced_verify_state = ask_force(
+            cfg, history, transcript_path, state_path,
+            last_msg, speaker_idx, seen_first_turn,
+            finished_reason, wt_path, wt_branch
+        )
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
 
@@ -1819,6 +1963,8 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             inflight = _start_recap_inflight(forced_turn, next_speaker.name,
                                              next_speaker.role, t0)
         call_succeeded = False
+        failure_reason: Optional[str] = None
+        failure_message: Optional[str] = None
         try:
             reply = call_agent(next_speaker, forced_msg, cfg,
                                first_turn_for_agent=first_turn_for_agent,
@@ -1826,15 +1972,20 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
                                turn_label=f"{forced_turn:02d}-forced")
             call_succeeded = True
         except Exception as e:
+            failure_reason = _agent_finished_reason(e)
+            failure_message = str(e)
             if cfg.recap and inflight is not None:
                 _stop_recap_inflight(*inflight)
+                inflight = None
                 elapsed = time.time() - t0
                 print(f"Turn {forced_turn:02d} | {next_speaker.name} "
                       f"({next_speaker.role}) · ERROR after "
                       f"{int(round(elapsed))}s — see "
                       f"turn-{forced_turn:02d}-forced-{next_speaker.name}.stderr.log")
-                raise
-            reply = f"[duet] AGENT ERROR: {e}"
+            reply = _agent_failure_block(
+                failure_reason, e, f"{forced_turn:02d}-forced",
+                next_speaker, transcript_path.parent
+            )
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
         if call_succeeded:
@@ -1876,19 +2027,29 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             transcript_path,
             f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
         )
-        history.append({"turn": len(history) + 1, "agent": next_speaker.name,
-                        "forced": True, "len_chars": len(reply),
-                        "session_id": next_speaker.session_id,
-                        **({"verify": verify_state} if verify_state is not None else {})})
+        history_entry = {"turn": len(history) + 1, "agent": next_speaker.name,
+                         "forced": True, "len_chars": len(reply),
+                         "session_id": next_speaker.session_id,
+                         **({"verify": verify_state} if verify_state is not None else {})}
+        if failure_reason is not None:
+            history_entry["finished_reason"] = failure_reason
+            history_entry["error"] = failure_message
+            history_entry["stderr_log_path"] = str(
+                transcript_path.parent
+                / f"turn-{forced_turn:02d}-forced-{next_speaker.name}.stderr.log"
+            )
+        history.append(history_entry)
         if cfg.recap:
             print(_format_live_recap_block(recap_block), end="")
         else:
             print(reply)
+        if failure_reason is not None:
+            return failure_reason, last_verify_state
         last_msg = reply
         speaker_idx = 1 - speaker_idx
-        reason = "forced_continuation"
+        reason = FINISHED_FORCED_CONTINUATION
         if convergence_hit:
-            return "converged_after_force", last_verify_state
+            return FINISHED_CONVERGED_AFTER_FORCE, last_verify_state
 
 # ---------- config / cli parsing ----------
 
@@ -2342,12 +2503,13 @@ def print_run_status(arg: str) -> int:
 
 # Status glyphs — same vocabulary as print_run_status, packed for table cols.
 _LIST_STATUS_FINISHED = {
-    "converged":           ("✅", "converged"),
-    "converged_after_force": ("✅", "converged"),
-    "max_turns":           ("⏰", "max_turns"),
-    "force_stop":          ("🔴", "force_stop"),
-    "forced_continuation": ("🟡", "forced"),
-    "agent_error":         ("⚠", "agent_error"),
+    FINISHED_CONVERGED:             ("✅", "converged"),
+    FINISHED_CONVERGED_AFTER_FORCE: ("✅", "converged"),
+    FINISHED_MAX_TURNS:             ("⏰", "max_turns"),
+    FINISHED_FORCE_STOP:            ("🔴", "force_stop"),
+    FINISHED_TIMEOUT:               ("⏱", "timeout"),
+    FINISHED_FORCED_CONTINUATION:   ("🟡", "forced"),
+    FINISHED_AGENT_ERROR:           ("⚠", "agent_error"),
 }
 
 
