@@ -15,8 +15,10 @@ or (alongside the smoke suite):
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 import unittest
+from unittest import mock
 
 # Make `import duet` work without installing — duet.py lives in the repo
 # root, this file in tests/.
@@ -227,6 +229,71 @@ class TestVerifyHelpers(unittest.TestCase):
         self.assertIn("stdout tail", block)
         self.assertIn("stderr tail", block)
         self.assertIn("[/duet verify failed]", block)
+
+
+# ---------- agent finish reasons ----------
+
+
+class TestAgentFinishReasons(unittest.TestCase):
+    def test_codex_rc_124_maps_to_timeout(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 124, "", "[duet] TIMEOUT after 1s"
+
+        agent = duet.Agent(name="codex-partner", backend="codex", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_codex(
+                    agent, "sys", "msg", _ROOT, "workspace-write", 1,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_TIMEOUT)
+        self.assertIn("codex exited 124", str(ctx.exception))
+
+    def test_subprocess_timeout_exception_maps_to_timeout(self) -> None:
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 1)
+
+        agent = duet.Agent(name="claude-lead", backend="claude", role="planner")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_claude(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 1,
+                    dry=False,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_TIMEOUT)
+        self.assertIn("claude timed out", str(ctx.exception))
+
+    def test_nonzero_agent_exit_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 2, "", "backend failed"
+
+        agent = duet.Agent(name="claude-lead", backend="claude", role="planner")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_claude(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 60,
+                    dry=False,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("backend failed", str(ctx.exception))
+
+    def test_malformed_claude_json_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 0, "not json", ""
+
+        agent = duet.Agent(name="claude-lead", backend="claude", role="planner")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_claude(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 60,
+                    dry=False,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("malformed JSON", str(ctx.exception))
 
 
 # ---------- _parse_codex_session_id ----------
