@@ -3,9 +3,10 @@
 Two CLI agents in conversation. One Python file. Stdlib only.
 
 `duet.py` runs two command-line coding agents, usually Claude and Codex, in
-alternating turns. One agent can plan or review while the other implements. The
-loop stops when they agree, the turn limit is reached, a timeout happens, or
-you stop them.
+alternating turns. You can also pair two agents from the same backend, such as
+Codex planner + Codex coder or Claude coder + Claude reviewer. One agent can
+plan or review while the other implements. The loop stops when they agree, the
+turn limit is reached, a timeout happens, or you stop them.
 
 Use duet when you want:
 
@@ -150,6 +151,25 @@ Use a repeatable config:
 ```bash
 ./duet.py --config duet.example.yaml
 ```
+
+Same-backend peering:
+
+```bash
+# Codex planner + Codex coder. The worktree gives one Codex peer a separate cwd.
+./duet.py --task "Fix the issue" \
+    --lead codex:planner --partner codex:coder \
+    --worktree --turns 6
+
+# Claude coder + Claude reviewer.
+./duet.py --task "Review and fix the current change" \
+    --lead claude:coder --partner claude:reviewer \
+    --turns 6
+```
+
+For `codex`/`codex` runs in one cwd, duet requires both peers to produce Codex
+session UUIDs on their first turns. If either peer would fall back to
+`codex exec resume --last`, duet aborts rather than risk resuming the other
+peer's session. Use `--worktree` when in doubt.
 
 Require a mechanical check before convergence:
 

@@ -584,6 +584,89 @@ class TestApplyResumeOverrides(unittest.TestCase):
                          [("claude", "claude-sid"), ("codex", "codex-sid")])
 
 
+# ---------- validate_config / Codex isolation guards ----------
+
+
+class TestConfigValidation(unittest.TestCase):
+    def _cfg(self, agents: list[duet.Agent]) -> duet.DuetConfig:
+        return duet.DuetConfig(cwd=_ROOT, agents=agents, task="x")
+
+    def test_same_backend_unique_names_are_valid(self) -> None:
+        cfg = self._cfg([
+            duet.Agent(name="codex-lead", backend="codex", role="planner"),
+            duet.Agent(name="codex-partner", backend="codex", role="coder"),
+        ])
+        duet.validate_config(cfg)
+
+    def test_duplicate_agent_names_fail(self) -> None:
+        cfg = self._cfg([
+            duet.Agent(name="codex-peer", backend="codex", role="planner"),
+            duet.Agent(name="codex-peer", backend="codex", role="coder"),
+        ])
+        with self.assertRaises(SystemExit):
+            duet.validate_config(cfg)
+
+    def test_unknown_backend_fails(self) -> None:
+        cfg = self._cfg([
+            duet.Agent(name="claude-lead", backend="claude", role="planner"),
+            duet.Agent(name="other-partner", backend="other", role="coder"),
+        ])
+        with self.assertRaises(SystemExit):
+            duet.validate_config(cfg)
+
+    def test_invalid_worktree_for_fails(self) -> None:
+        cfg = self._cfg([
+            duet.Agent(name="claude-lead", backend="claude", role="planner"),
+            duet.Agent(name="codex-partner", backend="codex", role="coder"),
+        ])
+        cfg.worktree_for = "nonexistent-agent"
+        with self.assertRaises(SystemExit):
+            duet.validate_config(cfg)
+
+
+class TestCodexSharedCwdGuards(unittest.TestCase):
+    def test_missing_uuid_after_first_turn_fails_for_shared_cwd(self) -> None:
+        lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
+        partner = duet.Agent(name="codex-partner", backend="codex", role="coder")
+        cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
+        partner.session_id = "codex-current"
+
+        with self.assertRaises(SystemExit):
+            duet.guard_codex_shared_cwd_after_call(
+                cfg, partner, first_turn_for_agent=True
+            )
+
+    def test_missing_uuid_allowed_when_codex_peers_have_different_cwds(self) -> None:
+        lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
+        partner = duet.Agent(
+            name="codex-partner",
+            backend="codex",
+            role="coder",
+            cwd_override=_ROOT.parent,
+        )
+        cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
+        partner.session_id = "codex-current"
+
+        duet.guard_codex_shared_cwd_after_call(
+            cfg, partner, first_turn_for_agent=True
+        )
+
+    def test_legacy_resume_marker_fails_before_call_for_shared_cwd(self) -> None:
+        lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
+        partner = duet.Agent(
+            name="codex-partner",
+            backend="codex",
+            role="coder",
+            session_id="codex-current",
+        )
+        cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
+
+        with self.assertRaises(SystemExit):
+            duet.guard_codex_shared_cwd_before_call(
+                cfg, partner, first_turn_for_agent=False
+            )
+
+
 # ---------- _markdown_fence ----------
 
 

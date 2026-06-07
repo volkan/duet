@@ -63,6 +63,8 @@ TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 VERIFY_LIVE_PREFIX = "  │ [verify] "
+SUPPORTED_BACKENDS = {"claude", "codex"}
+WORKTREE_FOR_CHOICES = {"lead", "partner"}
 
 RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
 
@@ -105,9 +107,11 @@ ROLE_PROMPTS = {
     "reviewer": (
         "You are the REVIEWER half of a duet. Read the partner agent's "
         "latest message and critically evaluate it: bugs, missing tests, "
-        "security, simpler designs. Be specific and brief. If the work meets "
-        "the task and you have no material issues, follow the convergence "
-        "instructions."
+        "security, simpler designs. When reviewing concrete code changes, "
+        "inspect the actual files, diffs, and test output rather than relying "
+        "only on the partner's summary. Be specific and brief. If the work "
+        "meets the task and you have no material issues, follow the "
+        "convergence instructions."
     ),
     "triage-reviewer": (
         "You are the TRIAGE REVIEWER half of a duet. Read the partner agent's "
@@ -118,7 +122,9 @@ ROLE_PROMPTS = {
         "check blocker. [P1] means a real bug, logic gap, or missing edge case "
         "that should block this loop. [P2] means a small bug, polish issue, "
         "or naming/readability fix that is nice to handle. [P3] means a "
-        "follow-up, future refactor, or scope creep. Be specific and brief. "
+        "follow-up, future refactor, or scope creep. When reviewing concrete "
+        "code changes, inspect the actual files, diffs, and test output rather "
+        "than relying only on the partner's summary. Be specific and brief. "
         "If the coder reasonably argues a finding is over-scored, either "
         "accept the lower score or explain why the higher score still applies. "
         "Emit convergence only when no unfixed [P0] or [P1] findings remain. "
@@ -271,6 +277,95 @@ class DuetConfig:
                                               # coder snappy.
     start_speaker_idx: int = 1                # default loop starts with partner replying
     continue_from: Optional[str] = None       # prior run dir/id when created by --continue
+
+
+def _config_error(message: str,
+                  parser: Optional[argparse.ArgumentParser] = None) -> None:
+    if parser is not None:
+        parser.error(message)
+    raise SystemExit(message)
+
+
+def validate_config(cfg: DuetConfig,
+                    parser: Optional[argparse.ArgumentParser] = None) -> None:
+    """Validate final topology after CLI/YAML parsing and resume normalization."""
+    if len(cfg.agents) != 2:
+        _config_error(f"duet expects exactly 2 agents, got {len(cfg.agents)}", parser)
+    if cfg.start_speaker_idx not in (0, 1):
+        _config_error(
+            f"start_speaker_idx must be 0 or 1, got {cfg.start_speaker_idx}",
+            parser,
+        )
+    if cfg.worktree_for not in WORKTREE_FOR_CHOICES:
+        choices = "|".join(sorted(WORKTREE_FOR_CHOICES))
+        _config_error(
+            f"worktree_for must be one of {choices}, got {cfg.worktree_for!r}",
+            parser,
+        )
+
+    seen_names: set[str] = set()
+    for agent in cfg.agents:
+        if agent.backend not in SUPPORTED_BACKENDS:
+            choices = "|".join(sorted(SUPPORTED_BACKENDS))
+            _config_error(
+                f"unknown backend {agent.backend!r} for agent {agent.name!r}; "
+                f"expected {choices}",
+                parser,
+            )
+        if agent.name in seen_names:
+            _config_error(
+                f"duplicate agent name {agent.name!r}; agent names must be unique",
+                parser,
+            )
+        seen_names.add(agent.name)
+
+
+def effective_agent_cwd(agent: Agent, default_cwd: pathlib.Path) -> pathlib.Path:
+    return (agent.cwd_override or default_cwd).resolve()
+
+
+def shared_cwd_codex_peers(cfg: DuetConfig) -> bool:
+    codex_agents = [a for a in cfg.agents if a.backend == "codex"]
+    if len(codex_agents) != 2:
+        return False
+    return (
+        effective_agent_cwd(codex_agents[0], cfg.cwd)
+        == effective_agent_cwd(codex_agents[1], cfg.cwd)
+    )
+
+
+def codex_session_is_uuid(agent: Agent) -> bool:
+    return bool(agent.session_id and _CODEX_UUID_RE.match(agent.session_id))
+
+
+def codex_shared_cwd_isolation_error(agent: Agent) -> str:
+    return (
+        "[duet] fatal: cannot safely continue codex/codex peering in one cwd "
+        f"because {agent.name} did not produce a Codex session UUID. "
+        "`codex exec resume --last` is cwd-based and could resume the other "
+        "Codex peer's session. Use --worktree/--worktree-for to isolate one "
+        "peer, or use a Codex build that reliably emits `session id: <uuid>`."
+    )
+
+
+def guard_codex_shared_cwd_before_call(cfg: DuetConfig,
+                                       agent: Agent,
+                                       first_turn_for_agent: bool) -> None:
+    if cfg.dry_run or agent.backend != "codex" or not shared_cwd_codex_peers(cfg):
+        return
+    if (not first_turn_for_agent
+            and agent.session_id
+            and not codex_session_is_uuid(agent)):
+        raise SystemExit(codex_shared_cwd_isolation_error(agent))
+
+
+def guard_codex_shared_cwd_after_call(cfg: DuetConfig,
+                                      agent: Agent,
+                                      first_turn_for_agent: bool) -> None:
+    if cfg.dry_run or agent.backend != "codex" or not first_turn_for_agent:
+        return
+    if shared_cwd_codex_peers(cfg) and not codex_session_is_uuid(agent):
+        raise SystemExit(codex_shared_cwd_isolation_error(agent))
 
 
 @dataclasses.dataclass
@@ -891,7 +986,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         claude_value = CLAUDE_REASONING_MAP.get(reasoning, reasoning)
         reasoning_args = ["--effort", claude_value]
     if dry:
-        new_sid = agent.session_id or f"dry-claude-{int(time.time())}"
+        new_sid = agent.session_id or f"dry-claude-{agent.name}-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
         rn = f" reasoning={reasoning}" if reasoning else ""
         return (
@@ -979,7 +1074,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # preserves tool compatibility and still trades depth for latency.
     effective = "low" if fast else reasoning
     if dry:
-        new_sid = agent.session_id or f"dry-codex-{int(time.time())}"
+        new_sid = agent.session_id or f"dry-codex-{agent.name}-{int(time.time())}"
         wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
         rn = f" reasoning={effective}" if effective else ""
         fast_note = " fast" if fast else ""
@@ -1342,10 +1437,7 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
 def run_duet(cfg: DuetConfig) -> dict:
     global RECAP_MODE
     RECAP_MODE = cfg.recap
-    if len(cfg.agents) != 2:
-        raise SystemExit(f"duet expects exactly 2 agents, got {len(cfg.agents)}")
-    if cfg.start_speaker_idx not in (0, 1):
-        raise SystemExit(f"start_speaker_idx must be 0 or 1, got {cfg.start_speaker_idx}")
+    validate_config(cfg)
 
     try:
         cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1393,6 +1485,8 @@ def run_duet(cfg: DuetConfig) -> dict:
     stop = StopFlag()
     _install_sigint(stop)
 
+    # Tracks whether an agent has resume context or has actually been invoked.
+    # A plain task/kickoff seed logged as agent[0] is not a CLI invocation.
     seen_first_turn = {a.name: bool(a.session_id) for a in cfg.agents}
     history: list[dict] = []
     transcript = ""
@@ -1509,9 +1603,12 @@ def run_duet(cfg: DuetConfig) -> dict:
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
 
+    if not cfg.kickoff and cfg.agents[0].session_id:
+        guard_codex_shared_cwd_before_call(
+            cfg, cfg.agents[0], first_turn_for_agent=False
+        )
     seed = derive_seed(cfg, run_dir=run_dir)
     log(cfg.agents[0].name, cfg.agents[0].role, seed, kind="seed")
-    seen_first_turn[cfg.agents[0].name] = True
     last_msg = seed
 
     # Partner (agent[1]) normally speaks first in the loop, replying to the seed.
@@ -1527,6 +1624,8 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = "force_stop"
             break
         speaker = cfg.agents[speaker_idx]
+        first_turn_for_agent = not seen_first_turn[speaker.name]
+        guard_codex_shared_cwd_before_call(cfg, speaker, first_turn_for_agent)
         t0 = time.time()
         inflight: Optional[tuple[threading.Event, threading.Thread]] = None
         if cfg.recap:
@@ -1538,10 +1637,12 @@ def run_duet(cfg: DuetConfig) -> dict:
             print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
                   f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
             sys.stdout.flush()
+        call_succeeded = False
         try:
             reply = call_agent(speaker, last_msg, cfg,
-                               first_turn_for_agent=not seen_first_turn[speaker.name],
+                               first_turn_for_agent=first_turn_for_agent,
                                run_dir=run_dir, turn_label=f"{turn:02d}")
+            call_succeeded = True
         except Exception as e:
             if cfg.recap and inflight is not None:
                 _stop_recap_inflight(*inflight)
@@ -1554,6 +1655,8 @@ def run_duet(cfg: DuetConfig) -> dict:
             stop.request(f"agent_error: {e}")
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
+        if call_succeeded:
+            guard_codex_shared_cwd_after_call(cfg, speaker, first_turn_for_agent)
         seen_first_turn[speaker.name] = True
         elapsed = time.time() - t0
         raw_reply = reply
@@ -1694,6 +1797,8 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             return reason, last_verify_state
         # Inject human feedback as the next "message" to the next-up speaker.
         next_speaker = cfg.agents[speaker_idx]
+        first_turn_for_agent = not seen_first_turn[next_speaker.name]
+        guard_codex_shared_cwd_before_call(cfg, next_speaker, first_turn_for_agent)
         # Append a human note to transcript
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
@@ -1708,11 +1813,13 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         if cfg.recap:
             inflight = _start_recap_inflight(forced_turn, next_speaker.name,
                                              next_speaker.role, t0)
+        call_succeeded = False
         try:
             reply = call_agent(next_speaker, forced_msg, cfg,
-                               first_turn_for_agent=not seen_first_turn[next_speaker.name],
+                               first_turn_for_agent=first_turn_for_agent,
                                run_dir=transcript_path.parent,
                                turn_label=f"{forced_turn:02d}-forced")
+            call_succeeded = True
         except Exception as e:
             if cfg.recap and inflight is not None:
                 _stop_recap_inflight(*inflight)
@@ -1725,6 +1832,8 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             reply = f"[duet] AGENT ERROR: {e}"
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
+        if call_succeeded:
+            guard_codex_shared_cwd_after_call(cfg, next_speaker, first_turn_for_agent)
         elapsed = time.time() - t0
         seen_first_turn[next_speaker.name] = True
         raw_reply = reply
@@ -2862,6 +2971,7 @@ def main() -> int:
             codex_fast=bool(args.codex_fast),
         )
 
+    validate_config(cfg, ap)
     validate_reasoning(cfg.reasoning, "config reasoning")
     for agent in cfg.agents:
         validate_reasoning(agent.reasoning_effort, f"agent {agent.name} reasoning_effort")

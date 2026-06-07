@@ -10,6 +10,7 @@ mode, force prompt, and session memory.
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
 - [Real loop test](#real-loop-test)
+- [Same-backend peering](#same-backend-peering)
 - [CLI flags](#cli-flags)
 - [Output layout and status mode](#output-layout-and-status-mode)
 - [How session memory works](#how-session-memory-works)
@@ -301,6 +302,32 @@ ambiguity if any of them hit the fallback.
 
 ---
 
+## Same-backend peering
+
+`--lead` and `--partner` may use the same backend when you want role separation
+without model diversity:
+
+```bash
+# Codex planner + Codex coder. Partner speaks first and runs in the worktree.
+./duet.py --task "Fix the issue" \
+     --lead codex:planner --partner codex:coder \
+     --worktree --turns 6
+
+# Claude coder + Claude reviewer.
+./duet.py --task "Review and fix the current change" \
+     --lead claude:coder --partner claude:reviewer \
+     --turns 6
+```
+
+For `codex`/`codex` peers sharing the same effective cwd, duet requires both
+Codex agents to emit a `session id: <uuid>` on their first turns. If either
+peer does not, duet exits immediately because the legacy
+`codex exec resume --last` fallback is cwd-based and could resume the other
+peer's session. `--worktree` or `--worktree-for lead` gives one peer a separate
+cwd, so the fallback remains isolated.
+
+---
+
 ## CLI flags
 
 | flag | purpose |
@@ -311,8 +338,8 @@ ambiguity if any of them hit the fallback.
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
-| `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner` |
-| `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder` |
+| `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. May use the same backend as `--partner` |
+| `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. May use the same backend as `--lead` |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
@@ -470,7 +497,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 - **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner` because the intended Codex workflow is "resume Codex with the existing plan in context, then let Claude review." If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
 - **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
-- **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. `--worktree` gives duet's Codex agent its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
+- **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 
 ---
 
