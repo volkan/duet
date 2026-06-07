@@ -11,6 +11,11 @@ permission_mode: acceptEdits
 dry_run: false
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
+# Optional: shell command that must exit 0 before a valid LGTM+rationale
+# convergence proposal can count. Runs in the worktree when worktree mode has
+# an effective worktree path; otherwise runs in cwd.
+# verify_cmd: "make test"
+
 # Codex-only fast mode: pin codex coder turns to low reasoning effort and
 # concise reasoning summaries, regardless of the `reasoning:` key or any
 # per-agent `reasoning_effort`. Role-scoped to codex:coder so it can't silently

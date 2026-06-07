@@ -175,6 +175,60 @@ class TestConvergenceMarkers(unittest.TestCase):
         self.assertEqual((s, r), (False, True))
 
 
+# ---------- verification helpers ----------
+
+
+class TestVerifyHelpers(unittest.TestCase):
+    def test_effective_verify_cwd_prefers_worktree(self) -> None:
+        cfg = duet.DuetConfig(
+            cwd=pathlib.Path("/host"),
+            agents=[
+                duet.Agent(name="a", backend="claude"),
+                duet.Agent(name="b", backend="codex"),
+            ],
+        )
+        self.assertEqual(
+            duet.effective_verify_cwd(cfg, pathlib.Path("/host/runs/1/wt")),
+            pathlib.Path("/host/runs/1/wt"),
+        )
+
+    def test_effective_verify_cwd_falls_back_to_cfg_cwd(self) -> None:
+        cfg = duet.DuetConfig(
+            cwd=pathlib.Path("/host"),
+            agents=[
+                duet.Agent(name="a", backend="claude"),
+                duet.Agent(name="b", backend="codex"),
+            ],
+        )
+        self.assertEqual(duet.effective_verify_cwd(cfg, None), pathlib.Path("/host"))
+
+    def test_tail_text_caps_from_the_end(self) -> None:
+        text = "a" * (duet.VERIFY_OUTPUT_TAIL_CHARS + 25) + "TAIL"
+        out = duet._tail_text(text)
+        self.assertIn("output truncated", out)
+        self.assertTrue(out.endswith("TAIL"))
+        self.assertNotIn("a" * (duet.VERIFY_OUTPUT_TAIL_CHARS + 1), out)
+
+    def test_failure_block_includes_metadata_and_tails(self) -> None:
+        result = duet.VerifyResult(
+            ok=False,
+            cmd="make test",
+            cwd=pathlib.Path("/repo/wt"),
+            exit_code=2,
+            stdout_tail="stdout tail",
+            stderr_tail="stderr tail",
+            log_path=pathlib.Path("/repo/runs/1/turn-01-verify.log"),
+        )
+        block = duet.format_verify_failure_block(result)
+        self.assertIn("[duet verify failed]", block)
+        self.assertIn("command: make test", block)
+        self.assertIn("cwd: /repo/wt", block)
+        self.assertIn("exit_code: 2", block)
+        self.assertIn("stdout tail", block)
+        self.assertIn("stderr tail", block)
+        self.assertIn("[/duet verify failed]", block)
+
+
 # ---------- _parse_codex_session_id ----------
 
 
