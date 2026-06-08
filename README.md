@@ -87,11 +87,18 @@ Install the `duet` command:
 
 ```bash
 make install      # symlinks duet.py to ~/.local/bin/duet
+make ci           # everything the CI gate runs: unit + reasoning + smoke + complexity
 make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run checks
 make unit-test    # only the stdlib unittest suite under tests/
 make smoke-test   # only scripts/smoke.sh dry-run regression checks
+make complexity   # cyclomatic-complexity/length gate (single-file sprawl guard)
 make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 ```
+
+CI (`.github/workflows/ci.yml`) runs `make ci`'s checks on every PR across
+Python 3.9/3.11/3.13. To make them block merges, mark them required in branch
+protection — see [`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md)
+(admins can still force-merge).
 
 ## How It Works
 

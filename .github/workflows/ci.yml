@@ -1,0 +1,50 @@
+name: ci
+
+# duet has no other CI; this is the merge gate. Every job here should pass
+# before a PR merges (configure them as required status checks in branch
+# protection — see .github/BRANCH_PROTECTION.md). Admins can still force-merge.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # duet targets Python 3.9+. Pin the floor, a mid, and a recent release.
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Configure git identity (smoke touches git)
+        run: |
+          git config --global user.email "ci@duet.invalid"
+          git config --global user.name "duet ci"
+      - name: Syntax check (py_compile, stdlib-only)
+        run: python -m py_compile duet.py scripts/check_complexity.py scripts/check_reasoning_levels.py
+      - name: Unit tests
+        run: make unit-test
+      - name: Reasoning-level mapping check
+        run: python scripts/check_reasoning_levels.py
+      - name: Smoke tests (dry-run regression suite)
+        run: make smoke-test
+
+  complexity:
+    name: complexity gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cyclomatic-complexity / function-length gate
+        run: make complexity

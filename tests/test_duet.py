@@ -14,6 +14,8 @@ or (alongside the smoke suite):
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import pathlib
 import subprocess
 import sys
@@ -147,6 +149,31 @@ class TestConvergenceMarkers(unittest.TestCase):
         )
         # Combined: "short. Continuing the rationale across multiple lines now."
         # → well above 20 chars.
+        self.assertConverged(text)
+
+    def test_paragraph_separated_rationale_accumulates(self) -> None:
+        # A blank line between rationale lines must not stop collection: each
+        # part is short on its own but accumulates past the min-chars threshold.
+        # Agents routinely write rationale as separate paragraphs.
+        text = (
+            "LGTM rationale: first part.\n"
+            "\n"
+            "second part adds more.\n"
+            f"{SENTINEL}\n"
+        )
+        self.assertLess(len("first part."), duet.CONVERGENCE_RATIONALE_MIN_CHARS)
+        self.assertConverged(text)
+
+    def test_multiple_sentinels_still_converge(self) -> None:
+        # An agent that repeats the sentinel (for emphasis, or by accident)
+        # after a valid rationale still converges — the first sentinel sets the
+        # flag and extra ones are harmless.
+        text = (
+            "LGTM rationale: tests pass and the change is complete.\n"
+            f"{SENTINEL}\n"
+            "Thanks — shipping it.\n"
+            f"{SENTINEL}\n"
+        )
         self.assertConverged(text)
 
     def test_sentinel_before_rationale_does_not_converge(self) -> None:
@@ -402,6 +429,15 @@ class TestParseRecapHeaders(unittest.TestCase):
         text = "\n".join([f"line{i}" for i in range(10)]) + "\nRECAP: late\n"
         self.assertIsNone(duet.parse_recap_headers(text)["recap"])
 
+    def test_partial_headers_some_present_some_absent(self) -> None:
+        # A real turn often emits RECAP and FILES but omits the optional
+        # STATUS line. Present headers parse; the absent one stays None.
+        text = "RECAP: did the thing\nFILES: a.py\n\nbody...\n"
+        self.assertEqual(
+            duet.parse_recap_headers(text),
+            {"recap": "did the thing", "files": "a.py", "status": None},
+        )
+
     def test_lowercase_header_does_not_match(self) -> None:
         # Regex is uppercase-only; this is the documented format.
         self.assertIsNone(
@@ -448,6 +484,14 @@ class TestExtractFilesHeuristic(unittest.TestCase):
         self.assertEqual(
             duet.extract_files_heuristic(text),
             ["bar.md", "foo.py"],
+        )
+
+    def test_same_file_in_backticks_and_plain_dedups(self) -> None:
+        # The same path appearing both in backticks and in plain prose is
+        # emitted once — the backtick pass adds it, the plain pass dedups.
+        self.assertEqual(
+            duet.extract_files_heuristic("see `foo.py` then foo.py again"),
+            ["foo.py"],
         )
 
     def test_path_with_directory_separator(self) -> None:
@@ -825,6 +869,110 @@ class TestDeriveStatusHeuristic(unittest.TestCase):
         self.assertEqual(
             duet.derive_status_heuristic("custom", False), "unknown"
         )
+
+    def test_sentinel_overrides_custom_role(self) -> None:
+        # The sentinel short-circuits before any role check, so even a role
+        # with no mapping reports converged when the sentinel fired.
+        self.assertEqual(
+            duet.derive_status_heuristic("custom", True), "converged"
+        )
+
+
+# ---------- _next_speaker_idx_from_state (continue mode) ----------
+
+
+class TestNextSpeakerIdx(unittest.TestCase):
+    def _agents(self) -> list:
+        return [
+            duet.Agent(name="claude-lead", backend="claude", role="planner"),
+            duet.Agent(name="codex-partner", backend="codex", role="coder"),
+        ]
+
+    def test_next_is_the_other_agent_from_last_history_turn(self) -> None:
+        # Last speaker was the partner → the lead speaks next, and vice versa.
+        agents = self._agents()
+        self.assertEqual(
+            duet._next_speaker_idx_from_state(
+                agents, {"history": [{"agent": "codex-partner"}]}), 0)
+        self.assertEqual(
+            duet._next_speaker_idx_from_state(
+                agents, {"history": [{"agent": "claude-lead"}]}), 1)
+
+    def test_falls_back_to_turn_parity_without_history(self) -> None:
+        # No history: partner (idx 1) leads, so an even turn count means the
+        # partner is up next, an odd count means the lead.
+        agents = self._agents()
+        self.assertEqual(
+            duet._next_speaker_idx_from_state(agents, {"turns_used": 0}), 1)
+        self.assertEqual(
+            duet._next_speaker_idx_from_state(agents, {"turns_used": 3}), 0)
+
+    def test_malformed_turns_used_defaults_to_partner(self) -> None:
+        agents = self._agents()
+        self.assertEqual(
+            duet._next_speaker_idx_from_state(agents, {"turns_used": "x"}), 1)
+
+
+# ---------- _resolve_opt_path ----------
+
+
+class TestResolveOptPath(unittest.TestCase):
+    def test_none_when_all_empty(self) -> None:
+        self.assertIsNone(duet._resolve_opt_path())
+        self.assertIsNone(duet._resolve_opt_path(None, "", None))
+
+    def test_first_truthy_wins(self) -> None:
+        # CLI flag (first arg) takes precedence over a config-file value.
+        result = duet._resolve_opt_path("/tmp/cli", "/tmp/cfg")
+        self.assertEqual(result, pathlib.Path("/tmp/cli").expanduser().resolve())
+
+    def test_falls_back_to_later_candidate(self) -> None:
+        result = duet._resolve_opt_path(None, "/tmp/cfg")
+        self.assertEqual(result, pathlib.Path("/tmp/cfg").expanduser().resolve())
+
+    def test_returns_absolute_resolved_path(self) -> None:
+        result = duet._resolve_opt_path("relative/dir")
+        self.assertTrue(result.is_absolute())
+
+
+# ---------- _format_byte_size ----------
+
+
+class TestFormatByteSize(unittest.TestCase):
+    def test_bytes_below_one_kib(self) -> None:
+        self.assertEqual(duet._format_byte_size(0), "0B")
+        self.assertEqual(duet._format_byte_size(1023), "1023B")
+
+    def test_kib_threshold_and_rounding(self) -> None:
+        self.assertEqual(duet._format_byte_size(1024), "1.0KB")
+        self.assertEqual(duet._format_byte_size(1536), "1.5KB")
+
+
+# ---------- normalize_verify_cmd ----------
+
+
+class TestNormalizeVerifyCmd(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parser = duet.argparse.ArgumentParser()
+
+    def test_none_passes_through(self) -> None:
+        self.assertIsNone(duet.normalize_verify_cmd(None, self.parser))
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        self.assertEqual(
+            duet.normalize_verify_cmd("  make test  ", self.parser), "make test")
+
+    def test_empty_string_errors(self) -> None:
+        # parser.error prints usage to stderr before exiting; swallow it so the
+        # test log stays clean.
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet.normalize_verify_cmd("   ", self.parser)
+
+    def test_non_string_errors(self) -> None:
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet.normalize_verify_cmd(123, self.parser)
 
 
 if __name__ == "__main__":
