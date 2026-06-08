@@ -52,7 +52,7 @@ import sys
 import textwrap
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 # ---------- defaults ----------
 
@@ -1354,11 +1354,6 @@ def convergence_proposed(text: str, sentinel: str) -> bool:
     return sentinel_seen and rationale_seen
 
 
-def converged(text: str, sentinel: str) -> bool:
-    """Backward-compatible name for a single reply's convergence proposal."""
-    return convergence_proposed(text, sentinel)
-
-
 def parse_recap_headers(text: str) -> dict[str, Optional[str]]:
     """Parse agent-emitted recap headers from the top of a reply."""
     parsed: dict[str, Optional[str]] = {"recap": None, "files": None, "status": None}
@@ -1520,11 +1515,220 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
                      "--kickoff, or --resume-claude <session_id>")
 
 
-def run_duet(cfg: DuetConfig) -> dict:
-    global RECAP_MODE
-    RECAP_MODE = cfg.recap
-    validate_config(cfg)
+def _setup_run_worktree(
+    cfg: DuetConfig, run_id: str, run_dir: pathlib.Path,
+) -> tuple[Optional[pathlib.Path], Optional[str]]:
+    """Resolve this run's optional git worktree and return (path, branch).
 
+    Honors `--worktree-path` (reuse an existing tree) and `--worktree` (create
+    a fresh `duet/<run_id>` branch), points the selected agent's `cwd_override`
+    at it as a side effect, and returns (None, ...) when no worktree applies or
+    setup fails — duet then runs same-repo. A failed *create* still reports the
+    intended branch name, matching the pre-extraction behavior.
+    """
+    wt_idx = {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
+    if cfg.worktree_path:
+        existing = pathlib.Path(cfg.worktree_path).expanduser().resolve()
+        if not existing.is_dir():
+            print(f"[duet] WARNING: --worktree-path {existing} doesn't exist. "
+                  f"Falling back to same-repo mode.", file=sys.stderr)
+            return None, None
+        # Recover the branch name for logging/state; failure is non-fatal.
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(existing), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            wt_branch = r.stdout.strip() if r.returncode == 0 else None
+        except Exception:
+            wt_branch = None
+        cfg.agents[wt_idx].cwd_override = existing
+        print(f"[duet] reusing worktree: {existing} (branch {wt_branch}, "
+              f"agent {cfg.agents[wt_idx].name})")
+        return existing, wt_branch
+
+    if cfg.worktree:
+        if not is_git_repo(cfg.cwd):
+            print(f"[duet] WARNING: --worktree requested but {cfg.cwd} is not a "
+                  f"git repo. Falling back to same-repo mode.", file=sys.stderr)
+            return None, None
+        wt_branch = f"duet/{run_id}"
+        # Default lives next to the transcript/state in run_dir/wt; --worktree-root
+        # overrides to e.g. ~/duet-worktrees, namespaced by run_id so parallel
+        # runs never collide.
+        wt_dest = cfg.worktree_root / run_id if cfg.worktree_root else run_dir / "wt"
+        try:
+            wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
+        except Exception as e:
+            print(f"[duet] WARNING: worktree setup failed: {e}. "
+                  f"Continuing without.", file=sys.stderr)
+            return None, wt_branch
+        cfg.agents[wt_idx].cwd_override = wt_path
+        print(f"[duet] worktree: {wt_path} (branch {wt_branch}, "
+              f"agent {cfg.agents[wt_idx].name})")
+        return wt_path, wt_branch
+
+    return None, None
+
+
+def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
+                     finished_reason: Optional[str],
+                     transcript_path: pathlib.Path,
+                     recap_path: pathlib.Path,
+                     last_verify: Optional[dict] = None,
+                     wt_path: Optional[pathlib.Path] = None,
+                     wt_branch: Optional[str] = None) -> dict:
+    """Assemble the run's state.json payload.
+
+    Single source of truth for every state write in `run_duet` — the early
+    dry-run/force-stop/seed-failure exits, the per-turn rolling write, and the
+    final write. Centralizing it keeps `duet_pid` and the worktree/continue
+    keys (which `--status` and `--continue` depend on surviving a mid-turn
+    crash) on every payload; a missing key here would regress both.
+    """
+    state = {
+        "task": cfg.task,
+        "cwd": str(cfg.cwd),
+        "turns_used": turns_used,
+        "agents": [agent_state(a) for a in cfg.agents],
+        "history": history,
+        "finished_reason": finished_reason,
+        "transcript_path": str(transcript_path),
+        "verify_cmd": cfg.verify_cmd,
+        "last_verify": last_verify,
+        "worktree": str(wt_path) if wt_path else None,
+        "worktree_branch": wt_branch,
+        "worktree_for": cfg.worktree_for,
+        "continue_from": cfg.continue_from,
+        "duet_pid": os.getpid(),
+    }
+    if cfg.recap:
+        state["recap_path"] = str(recap_path)
+    return state
+
+
+@dataclasses.dataclass
+class _TurnResult:
+    """Outcome of one agent turn, consumed by `run_duet`'s loop control."""
+    reply: str
+    convergence_hit: bool
+    failure_reason: Optional[str]
+    last_verify_state: Optional[dict]
+    recap_block: Optional[str]
+
+
+def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
+                  run_dir: pathlib.Path, transcript_path: pathlib.Path,
+                  recap_path: pathlib.Path, state_path: pathlib.Path,
+                  history: list, seen_first_turn: dict,
+                  wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
+                  last_verify_state: Optional[dict],
+                  log: Callable[..., None]) -> _TurnResult:
+    """Run a single agent turn: invoke, verify, recap, persist transcript+state.
+
+    Mutates `history` (appends this turn's entry) and `seen_first_turn` in place
+    and rewrites `state.json`; returns the outcome `run_duet` needs to decide
+    whether to stop or rotate. Stop-flag and speaker-rotation checks stay in the
+    caller — this handles only the mechanics of one turn.
+    """
+    first_turn_for_agent = not seen_first_turn[speaker.name]
+    guard_codex_shared_cwd_before_call(cfg, speaker, first_turn_for_agent)
+    t0 = time.time()
+    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
+    if cfg.recap:
+        inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
+    else:
+        # Print BEFORE the subprocess starts so the terminal user sees something
+        # happen instantly. claude -p emits nothing on stderr during its API
+        # call; without this banner the user thinks duet hung.
+        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
+              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
+        sys.stdout.flush()
+    call_succeeded = False
+    failure_reason: Optional[str] = None
+    failure_message: Optional[str] = None
+    try:
+        reply = call_agent(speaker, last_msg, cfg,
+                           first_turn_for_agent=first_turn_for_agent,
+                           run_dir=run_dir, turn_label=f"{turn:02d}")
+        call_succeeded = True
+    except Exception as e:
+        failure_reason = _agent_finished_reason(e)
+        failure_message = str(e)
+        if cfg.recap and inflight is not None:
+            _stop_recap_inflight(*inflight)
+            inflight = None
+            elapsed = time.time() - t0
+            print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
+                  f"ERROR after {int(round(elapsed))}s — "
+                  f"see turn-{turn:02d}-{speaker.name}.stderr.log")
+        reply = _agent_failure_block(failure_reason, e, f"{turn:02d}", speaker, run_dir)
+    if cfg.recap and inflight is not None:
+        _stop_recap_inflight(*inflight)
+    if call_succeeded:
+        guard_codex_shared_cwd_after_call(cfg, speaker, first_turn_for_agent)
+    seen_first_turn[speaker.name] = True
+    elapsed = time.time() - t0
+    raw_reply = reply
+    convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
+    verify_state: Optional[dict] = None
+    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
+        verify_result = run_verify_command(cfg, run_dir, f"{turn:02d}", wt_path)
+        verify_state = verify_result_state(verify_result)
+        last_verify_state = verify_state
+        if verify_result.ok:
+            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
+        else:
+            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
+            convergence_hit = False
+
+    recap_block: Optional[str] = None
+    if cfg.recap:
+        parsed = parse_recap_headers(raw_reply)
+        files = extract_files_heuristic(raw_reply)
+        fallbacks = {
+            "recap": _derive_recap_heuristic(raw_reply),
+            "files": ", ".join(files) if files else "none",
+            "status": derive_status_heuristic(speaker.role, convergence_hit),
+        }
+        recap_block = format_recap_block(
+            turn, speaker.name, speaker.role, elapsed,
+            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
+            parsed, fallbacks, convergence_hit,
+        )
+        append_text_atomic(recap_path, recap_block)
+
+    if wt_path is not None and speaker.cwd_override == wt_path:
+        reply = append_worktree_diff(reply, wt_path, wt_branch)
+
+    log(speaker.name, speaker.role, reply)
+    history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
+                     "len_chars": len(reply), "session_id": speaker.session_id}
+    if failure_reason is not None:
+        history_entry["finished_reason"] = failure_reason
+        history_entry["error"] = failure_message
+        history_entry["stderr_log_path"] = str(
+            run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
+    if verify_state is not None:
+        history_entry["verify"] = verify_state
+    history.append(history_entry)
+    turn_state = _build_run_state(
+        cfg, turns_used=turn, history=history, finished_reason=failure_reason,
+        transcript_path=transcript_path, recap_path=recap_path,
+        last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+    )
+    write_text_atomic(state_path, json.dumps(turn_state, indent=2))
+    return _TurnResult(reply, convergence_hit, failure_reason,
+                       last_verify_state, recap_block)
+
+
+def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
+    """Create the runs dir and a unique timestamped run dir under it.
+
+    Falls back to ~/.duet/runs/<cwd-slug> when the configured runs dir is
+    unwritable (mutating cfg.runs_dir), writes the auto-.gitignore once, and
+    registers the run in the home index. Returns (run_dir, run_id).
+    """
     try:
         cfg.runs_dir.mkdir(parents=True, exist_ok=True)
     except (OSError, PermissionError) as e:
@@ -1552,9 +1756,92 @@ def run_duet(cfg: DuetConfig) -> dict:
             continue
     else:
         raise SystemExit(f"could not allocate a unique run dir under {cfg.runs_dir}")
-    # Register in the home index so `duet --list` / `duet --status <bare-id>`
-    # discover this run from any cwd. Best-effort; never fails the run.
+    # Best-effort home-index symlink so `duet --list` / `--status <bare-id>`
+    # find this run from any cwd; never fails the run.
     _register_run_in_home_index(run_dir, cfg.cwd)
+    return run_dir, run_id
+
+
+def _dry_run_recap_state(cfg: DuetConfig, transcript_path: pathlib.Path,
+                         recap_path: pathlib.Path, state_path: pathlib.Path,
+                         history: list) -> dict:
+    """Write the empty-transcript dry-run state for `--dry-run --recap` and
+    return it. The non-recap dry run still flows through the normal loop (whose
+    agent calls are stubbed); only the recap variant short-circuits here."""
+    if not (cfg.task or cfg.kickoff or cfg.agents[0].session_id):
+        raise SystemExit("nothing to start the conversation with — supply --task, "
+                         "--kickoff, or --resume-claude <session_id>")
+    write_text_atomic(transcript_path, "")
+    state = _build_run_state(
+        cfg, turns_used=0, history=history, finished_reason="dry_run",
+        transcript_path=transcript_path, recap_path=recap_path,
+    )
+    write_text_atomic(state_path, json.dumps(state, indent=2))
+    print("[duet] dry-run: agents not called; no recap turn blocks written.")
+    print(f"[duet] done. reason=dry_run. transcript: {transcript_path}")
+    print(f"[duet] recap: {recap_path}")
+    return state
+
+
+def _derive_seed_or_failure(
+    cfg: DuetConfig, *, run_dir: pathlib.Path, transcript_path: pathlib.Path,
+    recap_path: pathlib.Path, state_path: pathlib.Path, history: list,
+    wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
+    log: Callable[..., None],
+) -> tuple[Optional[str], Optional[dict]]:
+    """Extract the opening seed message from the lead agent.
+
+    Returns (seed, None) on success. If the lead's extraction call fails, logs
+    the failure block, records a turn-0 history entry, writes the final state,
+    prints the done banner, and returns (None, state) so `run_duet` can return
+    immediately.
+    """
+    seed_t0 = time.time()
+    try:
+        if not cfg.kickoff and cfg.agents[0].session_id:
+            guard_codex_shared_cwd_before_call(
+                cfg, cfg.agents[0], first_turn_for_agent=False
+            )
+        return derive_seed(cfg, run_dir=run_dir), None
+    except Exception as e:
+        failure_reason = _agent_finished_reason(e)
+        seed_agent = cfg.agents[0]
+        reply = _agent_failure_block(
+            failure_reason, e, "00-extract", seed_agent, run_dir
+        )
+        log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
+        history.append({
+            "turn": 0,
+            "agent": seed_agent.name,
+            "kind": "seed_extract",
+            "elapsed_s": time.time() - seed_t0,
+            "len_chars": len(reply),
+            "session_id": seed_agent.session_id,
+            "finished_reason": failure_reason,
+            "error": str(e),
+            "stderr_log_path": str(
+                run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
+            ),
+        })
+        state = _build_run_state(
+            cfg, turns_used=0, history=history, finished_reason=failure_reason,
+            transcript_path=transcript_path, recap_path=recap_path,
+            wt_path=wt_path, wt_branch=wt_branch,
+        )
+        write_text_atomic(state_path, json.dumps(state, indent=2))
+        print(reply)
+        print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
+        if cfg.recap:
+            print(f"[duet] recap: {recap_path}")
+        return None, state
+
+
+def run_duet(cfg: DuetConfig) -> dict:
+    global RECAP_MODE
+    RECAP_MODE = cfg.recap
+    validate_config(cfg)
+
+    run_dir, run_id = _allocate_run_dir(cfg)
     transcript_path = run_dir / "transcript.md"
     recap_path = run_dir / "recap.md"
     state_path = run_dir / "state.json"
@@ -1596,151 +1883,28 @@ def run_duet(cfg: DuetConfig) -> dict:
         print(f"[duet] {cfg.agents[0].name} resumes session {cfg.agents[0].session_id}")
 
     if cfg.dry_run and cfg.recap:
-        if not (cfg.task or cfg.kickoff or cfg.agents[0].session_id):
-            raise SystemExit("nothing to start the conversation with — supply --task, "
-                             "--kickoff, or --resume-claude <session_id>")
-        write_text_atomic(transcript_path, "")
-        state = {
-            "task": cfg.task,
-            "cwd": str(cfg.cwd),
-            "turns_used": 0,
-            "agents": [agent_state(a) for a in cfg.agents],
-            "history": history,
-            "finished_reason": "dry_run",
-            "transcript_path": str(transcript_path),
-            "recap_path": str(recap_path),
-            "verify_cmd": cfg.verify_cmd,
-            "last_verify": None,
-            "worktree": None,
-            "worktree_branch": None,
-            "worktree_for": cfg.worktree_for,
-            "continue_from": cfg.continue_from,
-            "duet_pid": os.getpid(),
-        }
-        write_text_atomic(state_path, json.dumps(state, indent=2))
-        print("[duet] dry-run: agents not called; no recap turn blocks written.")
-        print(f"[duet] done. reason=dry_run. transcript: {transcript_path}")
-        print(f"[duet] recap: {recap_path}")
-        return state
+        return _dry_run_recap_state(
+            cfg, transcript_path, recap_path, state_path, history)
 
-    # ----- worktree setup (optional) -----
-    wt_path: Optional[pathlib.Path] = None
-    wt_branch: Optional[str] = None
-    wt_idx = {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
-    if cfg.worktree_path:
-        # Reuse an existing worktree (e.g. resuming a cancelled run).
-        existing = pathlib.Path(cfg.worktree_path).expanduser().resolve()
-        if not existing.is_dir():
-            print(f"[duet] WARNING: --worktree-path {existing} doesn't exist. "
-                  f"Falling back to same-repo mode.", file=sys.stderr)
-        else:
-            wt_path = existing
-            # Try to recover the branch name (might fail; just for logging)
-            try:
-                r = subprocess.run(
-                    ["git", "-C", str(wt_path), "rev-parse", "--abbrev-ref", "HEAD"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                wt_branch = r.stdout.strip() if r.returncode == 0 else None
-            except Exception:
-                wt_branch = None
-            cfg.agents[wt_idx].cwd_override = wt_path
-            print(f"[duet] reusing worktree: {wt_path} (branch {wt_branch}, agent {cfg.agents[wt_idx].name})")
-    elif cfg.worktree:
-        if not is_git_repo(cfg.cwd):
-            print(f"[duet] WARNING: --worktree requested but {cfg.cwd} is not a git repo. "
-                  f"Falling back to same-repo mode.", file=sys.stderr)
-        else:
-            wt_branch = f"duet/{run_id}"
-            # Default lives next to the transcript/state in run_dir/wt; users
-            # can override to e.g. ~/duet-worktrees, which we then namespace by
-            # run_id so parallel runs never collide.
-            if cfg.worktree_root:
-                wt_dest = cfg.worktree_root / run_id
-            else:
-                wt_dest = run_dir / "wt"
-            try:
-                wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
-                cfg.agents[wt_idx].cwd_override = wt_path
-                print(f"[duet] worktree: {wt_path} (branch {wt_branch}, agent {cfg.agents[wt_idx].name})")
-            except Exception as e:
-                print(f"[duet] WARNING: worktree setup failed: {e}. Continuing without.", file=sys.stderr)
-                wt_path = None
+    wt_path, wt_branch = _setup_run_worktree(cfg, run_id, run_dir)
 
     if stop.requested:
-        state = {
-            "task": cfg.task,
-            "cwd": str(cfg.cwd),
-            "turns_used": 0,
-            "agents": [agent_state(a) for a in cfg.agents],
-            "history": history,
-            "finished_reason": FINISHED_FORCE_STOP,
-            "transcript_path": str(transcript_path),
-            "verify_cmd": cfg.verify_cmd,
-            "last_verify": None,
-            "worktree": str(wt_path) if wt_path else None,
-            "worktree_branch": wt_branch,
-            "worktree_for": cfg.worktree_for,
-            "continue_from": cfg.continue_from,
-            "duet_pid": os.getpid(),
-        }
-        if cfg.recap:
-            state["recap_path"] = str(recap_path)
+        state = _build_run_state(
+            cfg, turns_used=0, history=history,
+            finished_reason=FINISHED_FORCE_STOP,
+            transcript_path=transcript_path, recap_path=recap_path,
+            wt_path=wt_path, wt_branch=wt_branch,
+        )
         write_text_atomic(state_path, json.dumps(state, indent=2))
         return state
 
-    seed_t0 = time.time()
-    try:
-        if not cfg.kickoff and cfg.agents[0].session_id:
-            guard_codex_shared_cwd_before_call(
-                cfg, cfg.agents[0], first_turn_for_agent=False
-            )
-        seed = derive_seed(cfg, run_dir=run_dir)
-    except Exception as e:
-        failure_reason = _agent_finished_reason(e)
-        seed_agent = cfg.agents[0]
-        reply = _agent_failure_block(
-            failure_reason, e, "00-extract", seed_agent, run_dir
-        )
-        log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
-        elapsed = time.time() - seed_t0
-        history.append({
-            "turn": 0,
-            "agent": seed_agent.name,
-            "kind": "seed_extract",
-            "elapsed_s": elapsed,
-            "len_chars": len(reply),
-            "session_id": seed_agent.session_id,
-            "finished_reason": failure_reason,
-            "error": str(e),
-            "stderr_log_path": str(
-                run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
-            ),
-        })
-        state = {
-            "task": cfg.task,
-            "cwd": str(cfg.cwd),
-            "turns_used": 0,
-            "agents": [agent_state(a) for a in cfg.agents],
-            "history": history,
-            "finished_reason": failure_reason,
-            "transcript_path": str(transcript_path),
-            "verify_cmd": cfg.verify_cmd,
-            "last_verify": None,
-            "worktree": str(wt_path) if wt_path else None,
-            "worktree_branch": wt_branch,
-            "worktree_for": cfg.worktree_for,
-            "continue_from": cfg.continue_from,
-            "duet_pid": os.getpid(),
-        }
-        if cfg.recap:
-            state["recap_path"] = str(recap_path)
-        write_text_atomic(state_path, json.dumps(state, indent=2))
-        print(reply)
-        print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
-        if cfg.recap:
-            print(f"[duet] recap: {recap_path}")
-        return state
+    seed, seed_failure_state = _derive_seed_or_failure(
+        cfg, run_dir=run_dir, transcript_path=transcript_path,
+        recap_path=recap_path, state_path=state_path, history=history,
+        wt_path=wt_path, wt_branch=wt_branch, log=log,
+    )
+    if seed_failure_state is not None:
+        return seed_failure_state
     log(cfg.agents[0].name, cfg.agents[0].role, seed, kind="seed")
     last_msg = seed
 
@@ -1757,126 +1921,32 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = FINISHED_FORCE_STOP
             break
         speaker = cfg.agents[speaker_idx]
-        first_turn_for_agent = not seen_first_turn[speaker.name]
-        guard_codex_shared_cwd_before_call(cfg, speaker, first_turn_for_agent)
-        t0 = time.time()
-        inflight: Optional[tuple[threading.Event, threading.Thread]] = None
+        result = _execute_turn(
+            cfg, turn=turn, speaker=speaker, last_msg=last_msg,
+            run_dir=run_dir, transcript_path=transcript_path,
+            recap_path=recap_path, state_path=state_path,
+            history=history, seen_first_turn=seen_first_turn,
+            wt_path=wt_path, wt_branch=wt_branch,
+            last_verify_state=last_verify_state, log=log,
+        )
+        last_verify_state = result.last_verify_state
         if cfg.recap:
-            inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
+            print(_format_live_recap_block(result.recap_block), end="")
         else:
-            # Print BEFORE the subprocess starts so the terminal user sees
-            # something happen instantly. claude -p emits nothing on stderr
-            # during its API call; without this banner the user thinks duet hung.
-            print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
-                  f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
-            sys.stdout.flush()
-        call_succeeded = False
-        failure_reason: Optional[str] = None
-        failure_message: Optional[str] = None
-        try:
-            reply = call_agent(speaker, last_msg, cfg,
-                               first_turn_for_agent=first_turn_for_agent,
-                               run_dir=run_dir, turn_label=f"{turn:02d}")
-            call_succeeded = True
-        except Exception as e:
-            failure_reason = _agent_finished_reason(e)
-            failure_message = str(e)
-            if cfg.recap and inflight is not None:
-                _stop_recap_inflight(*inflight)
-                inflight = None
-                elapsed = time.time() - t0
-                print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
-                      f"ERROR after {int(round(elapsed))}s — "
-                      f"see turn-{turn:02d}-{speaker.name}.stderr.log")
-            reply = _agent_failure_block(
-                failure_reason, e, f"{turn:02d}", speaker, run_dir
-            )
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-        if call_succeeded:
-            guard_codex_shared_cwd_after_call(cfg, speaker, first_turn_for_agent)
-        seen_first_turn[speaker.name] = True
-        elapsed = time.time() - t0
-        raw_reply = reply
-        convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
-        verify_state: Optional[dict] = None
-        if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-            verify_result = run_verify_command(
-                cfg, run_dir, f"{turn:02d}", wt_path
-            )
-            verify_state = verify_result_state(verify_result)
-            last_verify_state = verify_state
-            if verify_result.ok:
-                reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-            else:
-                reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-                convergence_hit = False
+            print(result.reply)
 
-        if cfg.recap:
-            parsed = parse_recap_headers(raw_reply)
-            files = extract_files_heuristic(raw_reply)
-            fallbacks = {
-                "recap": _derive_recap_heuristic(raw_reply),
-                "files": ", ".join(files) if files else "none",
-                "status": derive_status_heuristic(speaker.role, convergence_hit),
-            }
-            recap_block = format_recap_block(
-                turn, speaker.name, speaker.role, elapsed,
-                len(raw_reply.encode("utf-8")),
-                raw_reply.count("\n") + 1,
-                parsed, fallbacks, convergence_hit,
-            )
-            append_text_atomic(recap_path, recap_block)
-
-        # If this speaker is the worktree agent, capture the diff and append it to its reply.
-        if wt_path is not None and speaker.cwd_override == wt_path:
-            reply = append_worktree_diff(reply, wt_path, wt_branch)
-
-        log(speaker.name, speaker.role, reply)
-        history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
-                         "len_chars": len(reply), "session_id": speaker.session_id}
-        if failure_reason is not None:
-            history_entry["finished_reason"] = failure_reason
-            history_entry["error"] = failure_message
-            history_entry["stderr_log_path"] = str(
-                run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log"
-            )
-        if verify_state is not None:
-            history_entry["verify"] = verify_state
-        history.append(history_entry)
-        turn_state = {
-            "task": cfg.task, "cwd": str(cfg.cwd), "turns_used": turn,
-            "agents": [agent_state(a) for a in cfg.agents],
-            "history": history, "finished_reason": failure_reason,
-            "transcript_path": str(transcript_path),
-            "verify_cmd": cfg.verify_cmd,
-            "last_verify": last_verify_state,
-            "worktree": str(wt_path) if wt_path else None,
-            "worktree_branch": wt_branch,
-            "worktree_for": cfg.worktree_for,
-            "continue_from": cfg.continue_from,
-            "duet_pid": os.getpid(),
-        }
-        if cfg.recap:
-            turn_state["recap_path"] = str(recap_path)
-        write_text_atomic(state_path, json.dumps(turn_state, indent=2))
-        if cfg.recap:
-            print(_format_live_recap_block(recap_block), end="")
-        else:
-            print(reply)
-
-        if failure_reason is not None:
-            finished_reason = failure_reason
+        if result.failure_reason is not None:
+            finished_reason = result.failure_reason
             break
-        if convergence_hit and previous_convergence_proposal:
+        if result.convergence_hit and previous_convergence_proposal:
             finished_reason = FINISHED_CONVERGED
             break
         if stop.requested:
             finished_reason = FINISHED_FORCE_STOP
             break
 
-        last_msg = reply
-        previous_convergence_proposal = convergence_hit
+        last_msg = result.reply
+        previous_convergence_proposal = result.convergence_hit
         speaker_idx = 1 - speaker_idx
     else:
         finished_reason = FINISHED_MAX_TURNS
@@ -1891,24 +1961,12 @@ def run_duet(cfg: DuetConfig) -> dict:
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
 
-    state = {
-        "task": cfg.task,
-        "cwd": str(cfg.cwd),
-        "turns_used": len(history),
-        "agents": [agent_state(a) for a in cfg.agents],
-        "history": history,
-        "finished_reason": finished_reason,
-        "transcript_path": str(transcript_path),
-        "verify_cmd": cfg.verify_cmd,
-        "last_verify": last_verify_state,
-        "continue_from": cfg.continue_from,
-        "duet_pid": os.getpid(),
-    }
-    if cfg.recap:
-        state["recap_path"] = str(recap_path)
-    state["worktree"] = str(wt_path) if wt_path else None
-    state["worktree_branch"] = wt_branch
-    state["worktree_for"] = cfg.worktree_for
+    state = _build_run_state(
+        cfg, turns_used=len(history), history=history,
+        finished_reason=finished_reason,
+        transcript_path=transcript_path, recap_path=recap_path,
+        last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+    )
     write_text_atomic(state_path, json.dumps(state, indent=2))
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
     if cfg.recap:
@@ -1922,6 +1980,106 @@ def run_duet(cfg: DuetConfig) -> dict:
               f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
               f"git -C {cfg.cwd} branch -D {wt_branch}")
     return state
+
+
+def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
+                     forced_msg: str, first_turn_for_agent: bool,
+                     transcript_path: pathlib.Path,
+                     wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
+                     history: list, seen_first_turn: dict,
+                     last_verify_state: Optional[dict]) -> _TurnResult:
+    """Run one human-forced continuation turn (the body of `ask_force`'s loop).
+
+    Mirrors `_execute_turn` but with the `-forced` turn labels, a "forced"
+    history flag, and the recap.md path derived from the transcript dir.
+    Mutates `history`/`seen_first_turn`, prints the reply/recap, and returns the
+    outcome `ask_force` needs to decide whether to keep prompting.
+    """
+    run_dir = transcript_path.parent
+    label = f"{forced_turn:02d}-forced"
+    t0 = time.time()
+    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
+    if cfg.recap:
+        inflight = _start_recap_inflight(forced_turn, next_speaker.name,
+                                         next_speaker.role, t0)
+    call_succeeded = False
+    failure_reason: Optional[str] = None
+    failure_message: Optional[str] = None
+    try:
+        reply = call_agent(next_speaker, forced_msg, cfg,
+                           first_turn_for_agent=first_turn_for_agent,
+                           run_dir=run_dir, turn_label=label)
+        call_succeeded = True
+    except Exception as e:
+        failure_reason = _agent_finished_reason(e)
+        failure_message = str(e)
+        if cfg.recap and inflight is not None:
+            _stop_recap_inflight(*inflight)
+            inflight = None
+            elapsed = time.time() - t0
+            print(f"Turn {forced_turn:02d} | {next_speaker.name} "
+                  f"({next_speaker.role}) · ERROR after "
+                  f"{int(round(elapsed))}s — see "
+                  f"turn-{label}-{next_speaker.name}.stderr.log")
+        reply = _agent_failure_block(failure_reason, e, label, next_speaker, run_dir)
+    if cfg.recap and inflight is not None:
+        _stop_recap_inflight(*inflight)
+    if call_succeeded:
+        guard_codex_shared_cwd_after_call(cfg, next_speaker, first_turn_for_agent)
+    elapsed = time.time() - t0
+    seen_first_turn[next_speaker.name] = True
+    raw_reply = reply
+    convergence_hit = convergence_proposed(reply, cfg.sentinel)
+    verify_state: Optional[dict] = None
+    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
+        verify_result = run_verify_command(cfg, run_dir, label, wt_path)
+        verify_state = verify_result_state(verify_result)
+        last_verify_state = verify_state
+        if verify_result.ok:
+            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
+        else:
+            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
+            convergence_hit = False
+    if wt_path is not None and next_speaker.cwd_override == wt_path:
+        reply = append_worktree_diff(reply, wt_path, wt_branch)
+    recap_block = ""
+    if cfg.recap:
+        # Recap describes the agent's own reply, so parse raw_reply — before any
+        # verify block / worktree diff was appended to `reply` (matches
+        # _execute_turn; otherwise FILES and byte/line counts pick up the diff).
+        parsed = parse_recap_headers(raw_reply)
+        files = extract_files_heuristic(raw_reply)
+        fallbacks = {
+            "recap": _derive_recap_heuristic(raw_reply),
+            "files": ", ".join(files) if files else "none",
+            "status": derive_status_heuristic(next_speaker.role, convergence_hit),
+        }
+        recap_block = format_recap_block(
+            forced_turn, next_speaker.name, next_speaker.role, elapsed,
+            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
+            parsed, fallbacks, convergence_hit,
+        )
+        append_text_atomic(run_dir / "recap.md", recap_block)
+    append_text_atomic(
+        transcript_path,
+        f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
+    )
+    history_entry = {"turn": forced_turn, "agent": next_speaker.name,
+                     "forced": True, "len_chars": len(reply),
+                     "session_id": next_speaker.session_id,
+                     **({"verify": verify_state} if verify_state is not None else {})}
+    if failure_reason is not None:
+        history_entry["finished_reason"] = failure_reason
+        history_entry["error"] = failure_message
+        history_entry["stderr_log_path"] = str(
+            run_dir / f"turn-{label}-{next_speaker.name}.stderr.log")
+    history.append(history_entry)
+    if cfg.recap:
+        print(_format_live_recap_block(recap_block), end="")
+    else:
+        print(reply)
+    return _TurnResult(reply, convergence_hit, failure_reason,
+                       last_verify_state, recap_block)
 
 
 def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
@@ -1944,11 +2102,9 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             return reason, last_verify_state
         if not line:
             return reason, last_verify_state
-        # Inject human feedback as the next "message" to the next-up speaker.
         next_speaker = cfg.agents[speaker_idx]
         first_turn_for_agent = not seen_first_turn[next_speaker.name]
         guard_codex_shared_cwd_before_call(cfg, next_speaker, first_turn_for_agent)
-        # Append a human note to transcript
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
         forced_msg = (
@@ -1956,99 +2112,31 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             "#### human force-feedback\n"
             f"{line}\n"
         )
-        forced_turn = len(history) + 1
-        t0 = time.time()
-        inflight: Optional[tuple[threading.Event, threading.Thread]] = None
-        if cfg.recap:
-            inflight = _start_recap_inflight(forced_turn, next_speaker.name,
-                                             next_speaker.role, t0)
-        call_succeeded = False
-        failure_reason: Optional[str] = None
-        failure_message: Optional[str] = None
-        try:
-            reply = call_agent(next_speaker, forced_msg, cfg,
-                               first_turn_for_agent=first_turn_for_agent,
-                               run_dir=transcript_path.parent,
-                               turn_label=f"{forced_turn:02d}-forced")
-            call_succeeded = True
-        except Exception as e:
-            failure_reason = _agent_finished_reason(e)
-            failure_message = str(e)
-            if cfg.recap and inflight is not None:
-                _stop_recap_inflight(*inflight)
-                inflight = None
-                elapsed = time.time() - t0
-                print(f"Turn {forced_turn:02d} | {next_speaker.name} "
-                      f"({next_speaker.role}) · ERROR after "
-                      f"{int(round(elapsed))}s — see "
-                      f"turn-{forced_turn:02d}-forced-{next_speaker.name}.stderr.log")
-            reply = _agent_failure_block(
-                failure_reason, e, f"{forced_turn:02d}-forced",
-                next_speaker, transcript_path.parent
-            )
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-        if call_succeeded:
-            guard_codex_shared_cwd_after_call(cfg, next_speaker, first_turn_for_agent)
-        elapsed = time.time() - t0
-        seen_first_turn[next_speaker.name] = True
-        raw_reply = reply
-        convergence_hit = convergence_proposed(reply, cfg.sentinel)
-        verify_state: Optional[dict] = None
-        if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-            verify_result = run_verify_command(
-                cfg, transcript_path.parent, f"{forced_turn:02d}-forced", wt_path
-            )
-            verify_state = verify_result_state(verify_result)
-            last_verify_state = verify_state
-            if verify_result.ok:
-                reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-            else:
-                reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-                convergence_hit = False
-        if wt_path is not None and next_speaker.cwd_override == wt_path:
-            reply = append_worktree_diff(reply, wt_path, wt_branch)
-        recap_block = ""
-        if cfg.recap:
-            parsed = parse_recap_headers(reply)
-            files = extract_files_heuristic(reply)
-            fallbacks = {
-                "recap": _derive_recap_heuristic(reply),
-                "files": ", ".join(files) if files else "none",
-                "status": derive_status_heuristic(next_speaker.role, convergence_hit),
-            }
-            recap_block = format_recap_block(
-                forced_turn, next_speaker.name, next_speaker.role, elapsed,
-                len(reply.encode("utf-8")), reply.count("\n") + 1,
-                parsed, fallbacks, convergence_hit,
-            )
-            append_text_atomic(transcript_path.parent / "recap.md", recap_block)
-        append_text_atomic(
-            transcript_path,
-            f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
+        result = _run_forced_turn(
+            cfg, forced_turn=len(history) + 1, next_speaker=next_speaker,
+            forced_msg=forced_msg, first_turn_for_agent=first_turn_for_agent,
+            transcript_path=transcript_path, wt_path=wt_path, wt_branch=wt_branch,
+            history=history, seen_first_turn=seen_first_turn,
+            last_verify_state=last_verify_state,
         )
-        history_entry = {"turn": len(history) + 1, "agent": next_speaker.name,
-                         "forced": True, "len_chars": len(reply),
-                         "session_id": next_speaker.session_id,
-                         **({"verify": verify_state} if verify_state is not None else {})}
-        if failure_reason is not None:
-            history_entry["finished_reason"] = failure_reason
-            history_entry["error"] = failure_message
-            history_entry["stderr_log_path"] = str(
-                transcript_path.parent
-                / f"turn-{forced_turn:02d}-forced-{next_speaker.name}.stderr.log"
-            )
-        history.append(history_entry)
-        if cfg.recap:
-            print(_format_live_recap_block(recap_block), end="")
-        else:
-            print(reply)
-        if failure_reason is not None:
-            return failure_reason, last_verify_state
-        last_msg = reply
+        last_verify_state = result.last_verify_state
+        # Persist each forced turn so a crash at the next force> prompt doesn't
+        # lose it (the --status/--continue durability contract). finished_reason
+        # stays None mid-loop (duet is alive at the prompt); run_duet writes the
+        # final state with the real reason once ask_force returns.
+        write_text_atomic(state_path, json.dumps(_build_run_state(
+            cfg, turns_used=len(history), history=history,
+            finished_reason=result.failure_reason,
+            transcript_path=transcript_path,
+            recap_path=transcript_path.parent / "recap.md",
+            last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+        ), indent=2))
+        if result.failure_reason is not None:
+            return result.failure_reason, last_verify_state
+        last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
-        if convergence_hit:
+        if result.convergence_hit:
             return FINISHED_CONVERGED_AFTER_FORCE, last_verify_state
 
 # ---------- config / cli parsing ----------
@@ -2436,7 +2524,7 @@ def print_run_status(arg: str) -> int:
     if recap_display is not None:
         print(f"  recap:           {recap_display}")
 
-    # Find the in-flight turn via .pid file (only present while a turn runs).
+    # A turn-*.pid file exists only while that turn's subprocess is alive.
     pid_files = sorted(run_dir.glob("turn-*.pid"))
     if pid_files:
         pid_file = pid_files[-1]
@@ -2899,7 +2987,7 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
     return 0
 
 
-def main() -> int:
+def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
     ap.add_argument("--resume-claude", metavar="SESSION_ID",
@@ -2995,6 +3083,167 @@ def main() -> int:
                     help="compact per-turn debug view; suppresses live stderr mirror "
                          "and writes recap.md next to transcript.md")
     ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
+    return ap
+
+
+def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
+    """First truthy candidate as an expanded, resolved path; None if all empty.
+    Lets CLI flags take precedence over config-file values for the same path."""
+    for c in candidates:
+        if c:
+            return pathlib.Path(str(c)).expanduser().resolve()
+    return None
+
+
+def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
+                         stdin_cache: dict) -> DuetConfig:
+    """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
+    seed inputs (task/kickoff) when the file specifies none, and a handful of
+    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast)
+    override or OR with their file values; --resume-* still apply on top."""
+    raw = load_yaml_or_json(pathlib.Path(args.config))
+    cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
+    cfg_timeout = int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT))
+    raw_task = raw.get("task")
+    raw_kickoff = raw.get("kickoff")
+    raw_task_from_cmd = raw.get("task_from_cmd")
+    if raw_task is None and raw_kickoff is None and raw_task_from_cmd is None:
+        raw_task = args.task
+        raw_kickoff = args.kickoff
+        raw_task_from_cmd = args.task_from_cmd
+    task, kickoff = resolve_seed_inputs(
+        task=raw_task,
+        kickoff=raw_kickoff,
+        task_from_cmd=raw_task_from_cmd,
+        cwd=cfg_cwd,
+        timeout=cfg_timeout,
+        parser=ap,
+        stdin_cache=stdin_cache,
+    )
+    raw_runs_dir = args.runs_dir if args.runs_dir is not None else raw.get("runs_dir")
+    # Build agents before verify_cmd so a bad agent field surfaces first (parity
+    # with the pre-refactor order) when a config is invalid in several ways.
+    agents = [Agent(**a) for a in raw.get("agents", [])]
+    verify_cmd = normalize_verify_cmd(
+        args.verify_cmd if args.verify_cmd is not None else raw.get("verify_cmd"),
+        ap,
+    )
+    cfg = DuetConfig(
+        cwd=cfg_cwd,
+        agents=agents,
+        task=task,
+        kickoff=kickoff,
+        max_turns=int(raw.get("max_turns", DEFAULT_TURNS)),
+        sentinel=raw.get("sentinel", DEFAULT_SENTINEL),
+        per_turn_timeout=cfg_timeout,
+        runs_dir=choose_runs_dir(raw_runs_dir, cfg_cwd),
+        sandbox=raw.get("sandbox", "workspace-write"),
+        permission_mode=raw.get("permission_mode", "acceptEdits"),
+        dry_run=bool(raw.get("dry_run", False)),
+        recap=bool(raw.get("recap", False)) or args.recap,
+        verify_cmd=verify_cmd,
+        worktree=bool(raw.get("worktree", False)) or args.worktree,
+        worktree_for=raw.get("worktree_for") or args.worktree_for or "partner",
+        worktree_path=_resolve_opt_path(args.worktree_path, raw.get("worktree_path")),
+        worktree_root=_resolve_opt_path(args.worktree_root, raw.get("worktree_root")),
+        add_dirs=[
+            pathlib.Path(d).expanduser().resolve()
+            for d in (args.add_dirs or raw.get("add_dirs", []))
+        ],
+        reasoning=args.reasoning or raw.get("reasoning"),
+        codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
+    )
+    cfg.agents = apply_resume_overrides(
+        cfg.agents,
+        resume_claude=args.resume_claude,
+        resume_codex=args.resume_codex,
+    )
+    return cfg
+
+
+def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
+                        stdin_cache: dict) -> DuetConfig:
+    """Build a DuetConfig from --lead/--partner and the plain CLI flags.
+
+    Agents come from the specs, then --resume-* are attached to the matching
+    backend (rename_slots=True) so an explicit topology that puts a resumed
+    agent in the "wrong" slot still routes its session id correctly.
+    """
+    cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
+    task, kickoff = resolve_seed_inputs(
+        task=args.task,
+        kickoff=args.kickoff,
+        task_from_cmd=args.task_from_cmd,
+        cwd=cfg_cwd,
+        timeout=args.timeout,
+        parser=ap,
+        stdin_cache=stdin_cache,
+    )
+    agents = apply_resume_overrides(
+        [parse_partner(args.lead, default_role="planner"),
+         parse_partner(args.partner, default_role="coder")],
+        resume_claude=args.resume_claude,
+        resume_codex=args.resume_codex,
+        rename_slots=True,
+    )
+    return DuetConfig(
+        cwd=cfg_cwd,
+        agents=agents,
+        task=task,
+        kickoff=kickoff,
+        max_turns=args.turns,
+        sentinel=args.sentinel,
+        per_turn_timeout=args.timeout,
+        runs_dir=choose_runs_dir(args.runs_dir, cfg_cwd),
+        sandbox=args.sandbox,
+        permission_mode=args.permission_mode,
+        dry_run=args.dry_run,
+        recap=args.recap,
+        verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
+        worktree=args.worktree,
+        worktree_for=args.worktree_for or "partner",
+        worktree_path=_resolve_opt_path(args.worktree_path),
+        worktree_root=_resolve_opt_path(args.worktree_root),
+        add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
+        reasoning=args.reasoning,
+        codex_fast=bool(args.codex_fast),
+    )
+
+
+def _warn_codex_fast_scope(cfg: DuetConfig) -> None:
+    """Warn (and disable) when --codex-fast can't apply, or note partial scope.
+
+    Fast mode only affects codex:coder agents (see call_agent). Surfacing the
+    scope here means `--codex-fast --lead codex:planner` gets a loud signal
+    instead of silently running the planner at low effort.
+    """
+    if not cfg.codex_fast:
+        return
+    codex_agents = [a for a in cfg.agents if a.backend == "codex"]
+    codex_coders = [a for a in codex_agents if a.role == "coder"]
+    codex_non_coders = [a for a in codex_agents if a.role != "coder"]
+    if not codex_coders:
+        print(
+            "[duet] WARNING: --codex-fast had no effect — "
+            "no codex agent has role=coder in this duet. "
+            "Fast mode applies only to codex:coder; set per-agent "
+            "`reasoning_effort: low` if you really want fast on a "
+            "non-coder role.",
+            file=sys.stderr,
+        )
+        cfg.codex_fast = False
+    elif codex_non_coders:
+        roles = ", ".join(f"{a.name}({a.role})" for a in codex_non_coders)
+        print(
+            f"[duet] note: --codex-fast applies only to codex:coder; "
+            f"non-coder codex agents [{roles}] keep their normal "
+            f"reasoning effort.",
+            file=sys.stderr,
+        )
+
+
+def main() -> int:
+    ap = _build_arg_parser()
     args = ap.parse_args()
 
     # `--status` is read-only: print run health and exit. Skip everything below.
@@ -3026,117 +3275,9 @@ def main() -> int:
         print(f"[duet] continuing run {args.continue_run} "
               f"(next: {cfg.agents[cfg.start_speaker_idx].name})")
     elif args.config:
-        raw = load_yaml_or_json(pathlib.Path(args.config))
-        cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
-        cfg_timeout = int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT))
-        raw_task = raw.get("task")
-        raw_kickoff = raw.get("kickoff")
-        raw_task_from_cmd = raw.get("task_from_cmd")
-        if raw_task is None and raw_kickoff is None and raw_task_from_cmd is None:
-            raw_task = args.task
-            raw_kickoff = args.kickoff
-            raw_task_from_cmd = args.task_from_cmd
-        task, kickoff = resolve_seed_inputs(
-            task=raw_task,
-            kickoff=raw_kickoff,
-            task_from_cmd=raw_task_from_cmd,
-            cwd=cfg_cwd,
-            timeout=cfg_timeout,
-            parser=ap,
-            stdin_cache=stdin_cache,
-        )
-        raw_runs_dir = args.runs_dir if args.runs_dir is not None else raw.get("runs_dir")
-        runs_dir = choose_runs_dir(raw_runs_dir, cfg_cwd)
-        agents = [Agent(**a) for a in raw.get("agents", [])]
-        verify_cmd = normalize_verify_cmd(
-            args.verify_cmd if args.verify_cmd is not None else raw.get("verify_cmd"),
-            ap,
-        )
-        cfg = DuetConfig(
-            cwd=cfg_cwd,
-            agents=agents,
-            task=task,
-            kickoff=kickoff,
-            max_turns=int(raw.get("max_turns", DEFAULT_TURNS)),
-            sentinel=raw.get("sentinel", DEFAULT_SENTINEL),
-            per_turn_timeout=cfg_timeout,
-            runs_dir=runs_dir,
-            sandbox=raw.get("sandbox", "workspace-write"),
-            permission_mode=raw.get("permission_mode", "acceptEdits"),
-            dry_run=bool(raw.get("dry_run", False)),
-            recap=bool(raw.get("recap", False)) or args.recap,
-            verify_cmd=verify_cmd,
-            worktree=bool(raw.get("worktree", False)) or args.worktree,
-            worktree_for=raw.get("worktree_for") or args.worktree_for or "partner",
-            worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
-                           if args.worktree_path
-                           else (pathlib.Path(raw["worktree_path"]).expanduser().resolve()
-                                 if raw.get("worktree_path") else None)),
-            worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()
-                           if args.worktree_root
-                           else (pathlib.Path(raw["worktree_root"]).expanduser().resolve()
-                                 if raw.get("worktree_root") else None)),
-            add_dirs=[
-                pathlib.Path(d).expanduser().resolve()
-                for d in (args.add_dirs or raw.get("add_dirs", []))
-            ],
-            reasoning=args.reasoning or raw.get("reasoning"),
-            codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
-        )
-        cfg.agents = apply_resume_overrides(
-            cfg.agents,
-            resume_claude=args.resume_claude,
-            resume_codex=args.resume_codex,
-        )
+        cfg = _build_cfg_from_yaml(args, ap, stdin_cache)
     else:
-        cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
-        task, kickoff = resolve_seed_inputs(
-            task=args.task,
-            kickoff=args.kickoff,
-            task_from_cmd=args.task_from_cmd,
-            cwd=cfg_cwd,
-            timeout=args.timeout,
-            parser=ap,
-            stdin_cache=stdin_cache,
-        )
-        runs_dir = choose_runs_dir(args.runs_dir, cfg_cwd)
-        # Build agents from --lead / --partner, then attach any resume ids to
-        # the matching backend. This keeps explicit topologies working: if a
-        # user puts resumed Codex in the lead slot, duet extracts that session's
-        # latest message as the seed instead of silently dropping the UUID.
-        lead = parse_partner(args.lead, default_role="planner")
-        partner = parse_partner(args.partner, default_role="coder")
-        agents = apply_resume_overrides(
-            [lead, partner],
-            resume_claude=args.resume_claude,
-            resume_codex=args.resume_codex,
-            rename_slots=True,
-        )
-
-        cfg = DuetConfig(
-            cwd=cfg_cwd,
-            agents=agents,
-            task=task,
-            kickoff=kickoff,
-            max_turns=args.turns,
-            sentinel=args.sentinel,
-            per_turn_timeout=args.timeout,
-            runs_dir=runs_dir,
-            sandbox=args.sandbox,
-            permission_mode=args.permission_mode,
-            dry_run=args.dry_run,
-            recap=args.recap,
-            verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
-            worktree=args.worktree,
-            worktree_for=args.worktree_for or "partner",
-            worktree_path=(pathlib.Path(args.worktree_path).expanduser().resolve()
-                           if args.worktree_path else None),
-            worktree_root=(pathlib.Path(args.worktree_root).expanduser().resolve()
-                           if args.worktree_root else None),
-            add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
-            reasoning=args.reasoning,
-            codex_fast=bool(args.codex_fast),
-        )
+        cfg = _build_cfg_from_cli(args, ap, stdin_cache)
 
     validate_config(cfg, ap)
     validate_reasoning(cfg.reasoning, "config reasoning")
@@ -3145,32 +3286,7 @@ def main() -> int:
     if cfg.worktree and cfg.worktree_path:
         raise SystemExit("--worktree and --worktree-path/worktree_path are mutually exclusive")
 
-    # Codex fast mode is scoped to coder-role codex agents (see call_agent).
-    # Surface that scoping at config time so a user who pairs `--reasoning max`
-    # with `--codex-fast --lead codex:planner` gets a loud signal rather than
-    # silently running the planner at low effort.
-    if cfg.codex_fast:
-        codex_agents = [a for a in cfg.agents if a.backend == "codex"]
-        codex_coders = [a for a in codex_agents if a.role == "coder"]
-        codex_non_coders = [a for a in codex_agents if a.role != "coder"]
-        if not codex_coders:
-            print(
-                "[duet] WARNING: --codex-fast had no effect — "
-                "no codex agent has role=coder in this duet. "
-                "Fast mode applies only to codex:coder; set per-agent "
-                "`reasoning_effort: low` if you really want fast on a "
-                "non-coder role.",
-                file=sys.stderr,
-            )
-            cfg.codex_fast = False
-        elif codex_non_coders:
-            roles = ", ".join(f"{a.name}({a.role})" for a in codex_non_coders)
-            print(
-                f"[duet] note: --codex-fast applies only to codex:coder; "
-                f"non-coder codex agents [{roles}] keep their normal "
-                f"reasoning effort.",
-                file=sys.stderr,
-            )
+    _warn_codex_fast_scope(cfg)
 
     # Sanity: are CLIs on PATH?
     if not cfg.dry_run:
