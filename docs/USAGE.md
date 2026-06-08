@@ -258,6 +258,13 @@ heuristic) followed by `scripts/smoke.sh` dry-run cases that exercise the
 CLI surface and exit-code contract). Use `make unit-test` or
 `make smoke-test` to run just one half.
 
+`make ci` runs the full merge gate — `make test` plus `make reasoning-check`
+(the reasoning-effort translation check) and `make complexity` (a stdlib
+cyclomatic-complexity/length budget that guards this single file against
+sprawl). The same checks run on every PR via `.github/workflows/ci.yml` across
+Python 3.9/3.11/3.13; `.github/BRANCH_PROTECTION.md` shows how to make them
+required (admins keep a force-merge escape hatch).
+
 To check the actual product loop with real agents, run:
 
 ```bash
