@@ -21,7 +21,7 @@ make smoke-test         # only scripts/smoke.sh dry-run cases
 make complexity         # cyclomatic-complexity/length gate (scripts/check_complexity.py)
 make reasoning-check    # reasoning-effort translation check (scripts/check_reasoning_levels.py)
 make loop-test          # real Claude/Codex E2E loop suite; slow, writes runs/test-loop/
-make build              # sdist+wheel into dist/ (needs the 'build' package via uv/pipx)
+make build              # sdist+wheel into dist/ (needs: python3 -m pip install build)
 make uninstall
 
 ./duet.py --dry-run --task "x" --cwd /tmp        # quickest end-to-end smoke

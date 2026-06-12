@@ -219,10 +219,9 @@ plugin shipped in this repo (`.claude-plugin/plugin.json` +
 ```
 
 The `/duet` command shells out to the `duet` CLI, so the binary must be on
-PATH too: `make install` from a clone, `pipx install duet-cli`, or a one-shot
-`uvx --from duet-cli duet` (the PyPI package is `duet-cli`, the command it
-installs is `duet`; `pipx install 'duet-cli[yaml]'` adds PyYAML for
-`--config foo.yaml`).
+PATH too: `make install` from a clone, `pipx install duet-cli`, or
+`pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml` (the
+PyPI package is `duet-cli`; the command it installs is `duet`).
 
 If you can't use plugins, the manual fallback is copying the same command in
 as a user-level skill:
@@ -237,6 +236,24 @@ allowed-tools: Bash(*)
 ---
 
 # /duet
+
+## Prerequisite check
+
+First confirm the `duet` CLI is on PATH:
+
+```bash
+command -v duet
+```
+
+If it is not found, do NOT improvise an alternative. Stop and tell the user:
+
+> The `duet` CLI is not on PATH. Install it with `pipx install duet-cli`
+> (the package is `duet-cli`; the command it installs is `duet`), or clone
+> the repo (https://github.com/volkan/duet) and run `make install` (symlinks
+> `duet.py` to `~/.local/bin/duet`; make sure `~/.local/bin` is on PATH).
+> Then re-run `/duet`.
+
+## Run
 
 If `$ARGUMENTS` is empty, run exactly:
 

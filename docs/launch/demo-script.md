@@ -12,7 +12,7 @@ checkout.
 
 ```bash
 cd ~/workspace/agent2agent/duet
-git switch feat/pypi-packaging        # substitute the real packaging branch
+git switch feat/p0-distribution       # the packaging branch (PR #11)
 make ci                               # the gate must be able to pass
 uvx --from . duet --help              # pre-warm uv's build cache
 claude --version && codex --version   # both CLIs on PATH and logged in

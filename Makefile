@@ -23,7 +23,7 @@ reasoning-check: ## verify the reasoning-effort translation layer (no agents)
 	@python3 scripts/check_reasoning_levels.py
 loop-test: ## run real Claude/Codex end-to-end loop scenarios (slow, costs model turns)
 	@python3 scripts/duet_loop_e2e.py $(LOOP_TEST_ARGS)
-build: ## build sdist+wheel into dist/ (needs the 'build' package: uv tool install build, or pipx run build)
+build: ## build sdist+wheel into dist/ (needs current python3 to import build: python3 -m pip install build)
 	@python3 -m build
 help: ## show targets
 	@grep -E '^[a-z_-]+:.*##' $(MAKEFILE_LIST) | sed 's/:.*##/ -/'

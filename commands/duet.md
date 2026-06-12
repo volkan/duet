@@ -15,11 +15,10 @@ command -v duet
 If it is not found, do NOT improvise an alternative. Stop and tell the user:
 
 > The `duet` CLI is not on PATH. Install it with `pipx install duet-cli`
-> (the package is `duet-cli`; the command it installs is `duet`), or run
-> one-shot with `uvx --from duet-cli duet`, or clone the repo
-> (https://github.com/volkan/duet) and run `make install` (symlinks
-> `duet.py` to `~/.local/bin/duet`; make sure `~/.local/bin` is on PATH),
-> or invoke `python3 /path/to/duet.py` directly. Then re-run `/duet`.
+> (the package is `duet-cli`; the command it installs is `duet`), or clone
+> the repo (https://github.com/volkan/duet) and run `make install` (symlinks
+> `duet.py` to `~/.local/bin/duet`; make sure `~/.local/bin` is on PATH).
+> Then re-run `/duet`.
 
 ## Run
 

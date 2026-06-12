@@ -92,7 +92,7 @@ make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run c
 make unit-test    # only the stdlib unittest suite under tests/
 make smoke-test   # only scripts/smoke.sh dry-run regression checks
 make complexity   # cyclomatic-complexity/length gate (single-file sprawl guard)
-make build        # sdist + wheel into dist/ (needs the 'build' package via uv/pipx)
+make build        # sdist + wheel into dist/ (needs: python3 -m pip install build)
 make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 ```
 
