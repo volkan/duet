@@ -106,7 +106,7 @@ duet --recap --task-from-cmd 'claude -p /review' \
 # Let duet run the upstream tool itself from inside the target project.
 duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
-# With the user-level Claude Code skill installed, plain /duet runs /review.
+# With the /duet plugin (or user-level skill) installed, plain /duet runs /review.
 /duet
 
 # Or pass a different upstream command.
@@ -206,10 +206,26 @@ To adapt:
 
 Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invocation.
 
-### `/duet` Claude Code skill (optional)
+### `/duet` Claude Code command (plugin or manual skill)
 
-Install the `/duet` skill so plain `/duet` runs Claude Code's real `/review`
-through duet, while still letting you pass any other upstream command:
+Plain `/duet` runs Claude Code's real `/review` through duet, while still
+letting you pass any other upstream command. The primary install path is the
+plugin shipped in this repo (`.claude-plugin/plugin.json` +
+`.claude-plugin/marketplace.json` plus `commands/duet.md`):
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
+```
+
+The `/duet` command shells out to the `duet` CLI, so the binary must be on
+PATH too: `make install` from a clone, `pipx install duet-cli`, or a one-shot
+`uvx --from duet-cli duet` (the PyPI package is `duet-cli`, the command it
+installs is `duet`; `pipx install 'duet-cli[yaml]'` adds PyYAML for
+`--config foo.yaml`).
+
+If you can't use plugins, the manual fallback is copying the same command in
+as a user-level skill:
 
 ````bash
 mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'

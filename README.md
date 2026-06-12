@@ -92,7 +92,29 @@ make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run c
 make unit-test    # only the stdlib unittest suite under tests/
 make smoke-test   # only scripts/smoke.sh dry-run regression checks
 make complexity   # cyclomatic-complexity/length gate (single-file sprawl guard)
+make build        # sdist + wheel into dist/ (needs the 'build' package via uv/pipx)
 make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
+```
+
+Or skip the clone — the PyPI package is `duet-cli` (bare `duet` is taken) and
+the command it installs is `duet`:
+
+```bash
+uvx --from duet-cli duet --task "..."   # one-shot run, isolated, no install
+pipx install duet-cli                   # puts the duet command on PATH
+pipx install 'duet-cli[yaml]'           # include PyYAML for --config foo.yaml
+```
+
+Plain `pip install duet-cli` works too, but the installed top-level module is
+named `duet`, which collides with Google's PyPI `duet` package in a shared
+environment — pipx/uvx isolation avoids that.
+
+Claude Code plugin — adds the `/duet` command (it shells out to the `duet`
+CLI, so install the binary with one of the methods above as well):
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
 ```
 
 CI (`.github/workflows/ci.yml`) runs `make ci`'s checks on every PR across
@@ -146,7 +168,8 @@ The `/review` skill supplies the initial findings; duet handles the subsequent
 Codex fix turn, Claude verification turn, worktree diff handoff, and any extra
 rounds.
 
-With the optional Claude Code skill from [docs/USAGE.md](docs/USAGE.md),
+With the `/duet` Claude Code command installed (the plugin from the install
+section above, or the manual skill copy in [docs/USAGE.md](docs/USAGE.md)),
 plain `/duet` runs that same `/review` kickoff recipe.
 
 Let duet run the upstream command inside the target project:
@@ -294,7 +317,8 @@ set, artifacts go under the target project at `.duet/runs/<run_id>/`.
 Read [docs/USAGE.md](docs/USAGE.md) for the full reference: flags, sandbox and
 network rules, worktree mode, output layout, `--status` / `--continue`, force
 prompt behavior, session memory, the post-run "apply / iterate / discard"
-checklist, and the optional `/duet` Claude Code skill.
+checklist, and the optional `/duet` Claude Code command (plugin or manual
+skill).
 
 For contributor guidance, read [CLAUDE.md](CLAUDE.md). Codex-specific entry
 notes live in [AGENTS.md](AGENTS.md).
