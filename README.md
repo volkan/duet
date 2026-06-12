@@ -48,7 +48,7 @@ partner/coder so it speaks first with its existing plan in context.
 
 The symmetric `--resume-claude <session-id>` does the inverse — plan in
 claude, hand off to codex — and is duet's founding workflow, documented in
-[docs/USAGE.md](docs/USAGE.md).
+[docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md).
 
 Have a task in words but no prior planning session? Let codex plan inside
 the loop while claude implements:
@@ -119,7 +119,7 @@ CLI, so install the binary with one of the methods above as well):
 
 CI (`.github/workflows/ci.yml`) runs `make ci`'s checks on every PR across
 Python 3.9/3.11/3.13. To make them block merges, mark them required in branch
-protection — see [`.github/BRANCH_PROTECTION.md`](.github/BRANCH_PROTECTION.md)
+protection — see [`.github/BRANCH_PROTECTION.md`](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md)
 (admins can still force-merge).
 
 ## How It Works
@@ -169,7 +169,7 @@ Codex fix turn, Claude verification turn, worktree diff handoff, and any extra
 rounds.
 
 With the `/duet` Claude Code command installed (the plugin from the install
-section above, or the manual skill copy in [docs/USAGE.md](docs/USAGE.md)),
+section above, or the manual skill copy in [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md)),
 plain `/duet` runs that same `/review` kickoff recipe.
 
 Let duet run the upstream command inside the target project:
@@ -314,14 +314,14 @@ set, artifacts go under the target project at `.duet/runs/<run_id>/`.
 
 ## Documentation
 
-Read [docs/USAGE.md](docs/USAGE.md) for the full reference: flags, sandbox and
+Read [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) for the full reference: flags, sandbox and
 network rules, worktree mode, output layout, `--status` / `--continue`, force
 prompt behavior, session memory, the post-run "apply / iterate / discard"
 checklist, and the optional `/duet` Claude Code command (plugin or manual
 skill).
 
-For contributor guidance, read [CLAUDE.md](CLAUDE.md). Codex-specific entry
-notes live in [AGENTS.md](AGENTS.md).
+For contributor guidance, read [CLAUDE.md](https://github.com/volkan/duet/blob/main/CLAUDE.md). Codex-specific entry
+notes live in [AGENTS.md](https://github.com/volkan/duet/blob/main/AGENTS.md).
 
 ## Limits
 
