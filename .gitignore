@@ -10,6 +10,11 @@ duet/
 __pycache__/
 *.pyc
 
+# Packaging artifacts (make build, pip install .)
+build/
+dist/
+*.egg-info/
+
 # Future per-run outputs at the root level (none today)
 runs/
 .claude/

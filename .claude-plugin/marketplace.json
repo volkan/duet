@@ -1,0 +1,15 @@
+{
+  "name": "volkan-duet",
+  "description": "Marketplace for the duet two-agent CLI harness plugin.",
+  "owner": {
+    "name": "Volkan Altan",
+    "email": "volkan.altan@vestiairecollective.com"
+  },
+  "plugins": [
+    {
+      "name": "duet",
+      "source": "./",
+      "description": "Pair two CLI coding agents (claude + codex, or same-backend) in a reviewed loop; /duet kicks off Claude Code's /review through the duet harness."
+    }
+  ]
+}

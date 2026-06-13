@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The single-file shape is a hard constraint. PyYAML is the one optional import, gated behind `--config foo.yaml`; the smoke test uses JSON configs to stay stdlib-only. `README.md` has the user-facing pitch; `docs/USAGE.md` is the full flag reference; this file is for someone modifying `duet.py`.
 
+Two packaging shims sit beside the file without changing its shape: `pyproject.toml` publishes it to PyPI as `duet-cli` (console script `duet = "duet:main"`, flat module `duet` via `py-modules`, `[yaml]` extra for PyYAML, zero runtime deps — bare `duet` on PyPI is Google's async library), and `.claude-plugin/plugin.json` + `.claude-plugin/marketplace.json` (marketplace name `volkan-duet`, required by `/plugin marketplace add volkan/duet`) + `commands/duet.md` make the repo installable as a Claude Code plugin providing `/duet` (the command shells out to the installed `duet` CLI; it does not embed duet.py). Keep `plugin.json`'s `version` in lockstep with `pyproject.toml`'s.
+
 ## Common commands
 
 ```bash
@@ -19,6 +21,7 @@ make smoke-test         # only scripts/smoke.sh dry-run cases
 make complexity         # cyclomatic-complexity/length gate (scripts/check_complexity.py)
 make reasoning-check    # reasoning-effort translation check (scripts/check_reasoning_levels.py)
 make loop-test          # real Claude/Codex E2E loop suite; slow, writes runs/test-loop/
+make build              # sdist+wheel into dist/ (needs: python3 -m pip install build)
 make uninstall
 
 ./duet.py --dry-run --task "x" --cwd /tmp        # quickest end-to-end smoke
@@ -125,7 +128,8 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `duet.example.yaml`'s `extra_args` example if users copy that pattern |
 | new role or new ROLE_PROMPT entry | `ROLE_PROMPTS` in `duet.py`; the "Roles ship with" line in `docs/USAGE.md` |
 | stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` "What duet does" numbered list if user-visible |
-| change to the `/duet` slash-command recipe | the embedded skill body in `docs/USAGE.md` (the section starting "`/duet` Claude Code skill (optional)") |
+| change to the `/duet` slash-command recipe | both copies: `commands/duet.md` (the plugin command) and the embedded skill body in `docs/USAGE.md` (the section starting "`/duet` Claude Code command"); `.claude-plugin/plugin.json` description if the behavior summary shifts (`marketplace.json` deliberately carries only a short listing blurb, so it rarely needs the same edit) |
+| packaging / plugin metadata change (`pyproject.toml` name, version, console script, extras; `.claude-plugin/plugin.json` / `marketplace.json`) | `README.md` install section (uvx/pipx/plugin snippets); `docs/USAGE.md` `/duet` section if install steps change; the Makefile `build` target if the build tooling changes; keep `plugin.json` version matching `pyproject.toml` |
 | function grows past the complexity/length budget | extract a named helper (single-file: never a new module); re-run `make complexity`; if the budget itself moves, update `scripts/check_complexity.py` defaults and the "Four regression nets" net-4 line |
 | new CI job / changed check name | `.github/workflows/ci.yml`; the required-check names in `.github/BRANCH_PROTECTION.md`; the "Four regression nets" paragraph |
 | breaking semantics or limit change | `README.md` "Limits / future" |

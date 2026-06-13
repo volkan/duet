@@ -106,7 +106,7 @@ duet --recap --task-from-cmd 'claude -p /review' \
 # Let duet run the upstream tool itself from inside the target project.
 duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
-# With the user-level Claude Code skill installed, plain /duet runs /review.
+# With the /duet plugin (or user-level skill) installed, plain /duet runs /review.
 /duet
 
 # Or pass a different upstream command.
@@ -206,10 +206,25 @@ To adapt:
 
 Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invocation.
 
-### `/duet` Claude Code skill (optional)
+### `/duet` Claude Code command (plugin or manual skill)
 
-Install the `/duet` skill so plain `/duet` runs Claude Code's real `/review`
-through duet, while still letting you pass any other upstream command:
+Plain `/duet` runs Claude Code's real `/review` through duet, while still
+letting you pass any other upstream command. The primary install path is the
+plugin shipped in this repo (`.claude-plugin/plugin.json` +
+`.claude-plugin/marketplace.json` plus `commands/duet.md`):
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
+```
+
+The `/duet` command shells out to the `duet` CLI, so the binary must be on
+PATH too: `make install` from a clone, `pipx install duet-cli`, or
+`pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml` (the
+PyPI package is `duet-cli`; the command it installs is `duet`).
+
+If you can't use plugins, the manual fallback is copying the same command in
+as a user-level skill:
 
 ````bash
 mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'
@@ -221,6 +236,24 @@ allowed-tools: Bash(*)
 ---
 
 # /duet
+
+## Prerequisite check
+
+First confirm the `duet` CLI is on PATH:
+
+```bash
+command -v duet
+```
+
+If it is not found, do NOT improvise an alternative. Stop and tell the user:
+
+> The `duet` CLI is not on PATH. Install it with `pipx install duet-cli`
+> (the package is `duet-cli`; the command it installs is `duet`), or clone
+> the repo (https://github.com/volkan/duet) and run `make install` (symlinks
+> `duet.py` to `~/.local/bin/duet`; make sure `~/.local/bin` is on PATH).
+> Then re-run `/duet`.
+
+## Run
 
 If `$ARGUMENTS` is empty, run exactly:
 
