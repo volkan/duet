@@ -3,11 +3,12 @@
 Two CLI agents in conversation. One Python file. Stdlib only.
 
 `duet.py` runs two command-line coding agents, usually Claude and Codex, in
-alternating turns. Gemini CLI is also supported as a third backend. You can
-mix backends or pair two agents from the same backend, such as Codex planner +
-Codex coder, Claude coder + Claude reviewer, or Gemini reviewer + Codex coder.
-One agent can plan or review while the other implements. The loop stops when
-they agree, the turn limit is reached, a timeout happens, or you stop them.
+alternating turns. Gemini CLI and GitHub Copilot CLI are also supported. You
+can mix backends or pair two agents from the same backend, such as Codex
+planner + Codex coder, Claude coder + Claude reviewer, Gemini reviewer +
+Codex coder, or Copilot planner + Copilot coder. One agent can plan or review
+while the other implements. The loop stops when they agree, the turn limit is
+reached, a timeout happens, or you stop them.
 
 Use duet when you want:
 
@@ -143,6 +144,9 @@ Each agent keeps its own conversation memory:
 - Gemini resumes with `gemini --resume <session_id> -p ... --output-format json`.
   Duet requires a Gemini CLI build whose JSON output includes `session_id`;
   older builds fail clearly instead of losing multi-turn memory.
+- Copilot resumes with `copilot --resume=<session_id> -p ... --output-format json`.
+  Duet requires Copilot CLI JSONL output with a final `sessionId`; missing or
+  malformed JSONL fails clearly instead of losing multi-turn memory.
 
 On each turn, duet sends the latest reply from one agent to the other. It
 continues until both agents accept convergence in back-to-back turns, `--turns`
@@ -222,6 +226,11 @@ Same-backend peering:
 ./duet.py --task "Review and fix the current change" \
     --lead codex:coder --partner gemini:reviewer \
     --turns 6
+
+# Copilot planner + Copilot coder.
+./duet.py --task "Fix the issue" \
+    --lead copilot:planner --partner copilot:coder \
+    --worktree --turns 6
 ```
 
 For `codex`/`codex` runs in one cwd, duet requires both peers to produce Codex
@@ -347,7 +356,8 @@ notes live in [AGENTS.md](https://github.com/volkan/duet/blob/main/AGENTS.md).
   saved session ids, and reuses the previous worktree when available. It does
   not append to the old transcript.
 - Gemini support depends on JSON `session_id` output from the installed Gemini
-  CLI. If your binary omits it, duet stops with `agent_error` because
+  CLI. Copilot support depends on JSONL output with a final `sessionId`. If
+  your binary omits the required field, duet stops with `agent_error` because
   multi-turn memory would otherwise be unreliable.
 - Parallel Codex sessions in the same cwd are safe when duet captured a
   session id from Codex's stderr — that turn pins to the UUID, not to recency.

@@ -13,6 +13,7 @@ level, and asserts:
   - claude is invoked with `--effort <mapped>` for that level
   - codex is invoked with `-c model_reasoning_effort=<mapped>` (or no `-c`
     flag at all for `medium`, which is Codex's default)
+  - copilot is invoked with `--effort <mapped>`
   - gemini is invoked without any effort flag, because Gemini CLI has no
     documented reasoning-effort option
   - the system-prompt prefix contains the right reasoning-nudge marker for
@@ -39,12 +40,12 @@ import sys
 # near the start of the claude/gemini system-prompt prefix; for levels without
 # a reasoning nudge it's the literal sentinel "sys" we pass in below.
 EXPECTED = {
-    "minimal": {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=minimal", "gemini_arg": "(none)"},
-    "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low",     "gemini_arg": "(none)"},
-    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)",                         "gemini_arg": "(none)"},
-    "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high",    "gemini_arg": "(none)"},
-    "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh",   "gemini_arg": "(none)"},
-    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh",   "gemini_arg": "(none)"},
+    "minimal": {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=minimal", "copilot_effort": "none",   "gemini_arg": "(none)"},
+    "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low",     "copilot_effort": "low",    "gemini_arg": "(none)"},
+    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)",                         "copilot_effort": "medium", "gemini_arg": "(none)"},
+    "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high",    "copilot_effort": "high",   "gemini_arg": "(none)"},
+    "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "xhigh",  "gemini_arg": "(none)"},
+    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "max",    "gemini_arg": "(none)"},
 }
 
 
@@ -71,6 +72,15 @@ def main() -> int:
             return (0, json.dumps({"result": "ok", "session_id": "s"}), "")
         if cmd[0] == "gemini":
             return (0, json.dumps({"response": "ok", "session_id": "g"}), "")
+        if cmd[0] == "copilot":
+            return (
+                0,
+                "\n".join([
+                    json.dumps({"type": "assistant.message", "data": {"content": "ok"}}),
+                    json.dumps({"type": "result", "sessionId": "cp"}),
+                ]),
+                "",
+            )
         return (0, "ok", "")
 
     m._run = fake_run  # type: ignore[attr-defined]
@@ -78,8 +88,9 @@ def main() -> int:
     a_cl = m.Agent(name="c", backend="claude", role="planner")
     a_cx = m.Agent(name="x", backend="codex", role="coder")
     a_gm = m.Agent(name="g", backend="gemini", role="coder")
+    a_cp = m.Agent(name="p", backend="copilot", role="coder")
 
-    rows: list[tuple[str, str, str, str, str, bool, list[str]]] = []
+    rows: list[tuple[str, str, str, str, str, str, bool, list[str]]] = []
     bad = 0
 
     for lvl in m.REASONING_LEVELS:
@@ -118,6 +129,18 @@ def main() -> int:
             if "-c" in gemini_cmd else "(none)"
         )
 
+        captured.clear()
+        m.call_copilot(
+            a_cp, "sys", "msg", pathlib.Path("."),
+            60, dry=False, first_turn=True, reasoning=lvl,
+        )
+        copilot_cmd = captured[-1]
+        copilot_prompt = copilot_cmd[copilot_cmd.index("-p") + 1]
+        copilot_effort = (
+            copilot_cmd[copilot_cmd.index("--effort") + 1]
+            if "--effort" in copilot_cmd else "(none)"
+        )
+
         want = EXPECTED[lvl]
         problems: list[str] = []
         if want["prefix_marker"] not in prefix[:30]:
@@ -130,23 +153,31 @@ def main() -> int:
             problems.append(f"gemini prefix missing {want['prefix_marker']!r}")
         if gemini_arg != want["gemini_arg"]:
             problems.append(f"gemini -c {gemini_arg} (want {want['gemini_arg']})")
+        if want["prefix_marker"] not in copilot_prompt[:60]:
+            problems.append(f"copilot prefix missing {want['prefix_marker']!r}")
+        if copilot_effort != want["copilot_effort"]:
+            problems.append(
+                f"copilot --effort {copilot_effort} "
+                f"(want {want['copilot_effort']})"
+            )
 
         rows.append((lvl, repr(prefix[:30]), effort, codex_arg,
-                     gemini_arg, not problems, problems))
+                     copilot_effort, gemini_arg, not problems, problems))
         if problems:
             bad += 1
 
     # Pretty-print the table even on success — same shape as the original
     # one-liner so the smoke check is easy to eyeball.
-    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     gemini_arg")
-    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 20}")
-    for lvl, prefix_repr, effort, codex_arg, gemini_arg, ok, _ in rows:
+    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     copilot  gemini_arg")
+    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 7}  {'-' * 20}")
+    for lvl, prefix_repr, effort, codex_arg, copilot_effort, gemini_arg, ok, _ in rows:
         mark = "" if ok else "  ← mismatch"
-        print(f"{lvl:>8}  {prefix_repr:35}  {effort:6}  {codex_arg:30}  {gemini_arg}{mark}")
+        print(f"{lvl:>8}  {prefix_repr:35}  {effort:6}  "
+              f"{codex_arg:30}  {copilot_effort:7}  {gemini_arg}{mark}")
 
     if bad:
         print(f"\nFAIL: {bad} row(s) mismatch.", file=sys.stderr)
-        for lvl, _, _, _, _, ok, problems in rows:
+        for lvl, _, _, _, _, _, ok, problems in rows:
             if not ok:
                 print(f"  {lvl}: {'; '.join(problems)}", file=sys.stderr)
         return 1
