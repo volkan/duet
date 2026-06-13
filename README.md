@@ -181,10 +181,24 @@ needed. The Quick Start above shows the shortest Claude Code flow. For the full
 install checklist, default `/review` recipe, and troubleshooting notes, see
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 
+Codex plugin - adds the `duet` skill so Codex can run the same recipes from a
+thread. The skill also shells out to the installed `duet` CLI:
+
+```bash
+codex plugin marketplace add volkan/duet
+codex plugin add duet@volkan-duet
+```
+
+Then start a new Codex thread and invoke `$duet`, or ask Codex to use Duet in
+natural language. For local checkout install, runtime expectations, and
+troubleshooting notes, see
+[docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md).
+
 CI (`.github/workflows/ci.yml`) runs the runtime checks on every PR across
 Python 3.9/3.11/3.13, plus required distribution metadata, package build,
-installed-wheel smoke, plugin validation, and complexity jobs. To make them
-block merges, mark them required in branch protection — see
+installed-wheel smoke, Claude plugin validation, and complexity jobs. The
+distribution metadata job validates both Claude and Codex plugin manifests. To
+make them block merges, mark them required in branch protection — see
 [`.github/BRANCH_PROTECTION.md`](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md)
 (admins can still force-merge).
 
@@ -248,6 +262,10 @@ With the `/duet` Claude Code command installed (see
 plain `/duet` or `/duet:duet` runs that same `/review` kickoff recipe.
 Inside Claude Code, that is the shortest way to hand `/review` findings to the
 duet loop.
+
+With the Codex plugin installed (see
+[docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md)),
+invoke `$duet` or ask Codex to use Duet for that same `/review` kickoff recipe.
 
 Let duet run the upstream command inside the target project:
 
@@ -404,8 +422,7 @@ set, artifacts go under the target project at `.duet/runs/<run_id>/`.
 Read [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) for the full reference: flags, sandbox and
 network rules, worktree mode, output layout, `--status` / `--continue`, force
 prompt behavior, session memory, the post-run "apply / iterate / discard"
-checklist, and the optional `/duet` Claude Code command (plugin or manual
-skill).
+checklist, and the optional Claude Code and Codex plugin entry points.
 
 For contributor guidance, read [CLAUDE.md](https://github.com/volkan/duet/blob/main/CLAUDE.md). Codex-specific entry
 notes live in [AGENTS.md](https://github.com/volkan/duet/blob/main/AGENTS.md).

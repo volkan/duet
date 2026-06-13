@@ -1,0 +1,41 @@
+{
+  "name": "duet",
+  "version": "0.1.1",
+  "description": "Run the duet two-agent CLI harness from Codex as a reusable skill.",
+  "author": {
+    "name": "Volkan Altan",
+    "email": "volkanaltan@gmail.com",
+    "url": "https://github.com/volkan"
+  },
+  "homepage": "https://github.com/volkan/duet",
+  "repository": "https://github.com/volkan/duet",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "cli",
+    "multi-agent",
+    "pairwise",
+    "convergence",
+    "review",
+    "codex"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Duet",
+    "shortDescription": "Run two-agent duet loops from Codex",
+    "longDescription": "Use the installed duet CLI to run Claude, Codex, or Gemini in an alternating two-agent loop with session persistence, optional worktree isolation, transcripts, status checks, and LGTM convergence.",
+    "developerName": "Volkan Altan",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/volkan/duet",
+    "defaultPrompt": [
+      "Use Duet to run Claude review through a two-agent loop.",
+      "Use Duet to hand failing test output to a reviewer/coder pair."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

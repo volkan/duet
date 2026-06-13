@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate duet packaging and Claude Code plugin metadata.
+"""Validate duet packaging and plugin metadata.
 
 This is intentionally stdlib-only so CI can run the source metadata checks
 before installing any build tools. Pass ``--artifacts dist`` after building to
@@ -25,13 +25,20 @@ except ModuleNotFoundError:  # pragma: no cover - CI runs this on Python 3.11+.
 
 
 ROOT = Path(__file__).resolve().parent.parent
-PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
-MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
+CLAUDE_PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
+CLAUDE_MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
+CLAUDE_COMMAND = ROOT / "commands" / "duet.md"
+CODEX_PLUGIN_ROOT = ROOT / "plugins" / "duet"
+CODEX_PLUGIN_JSON = CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
+CODEX_MARKETPLACE_JSON = ROOT / ".agents" / "plugins" / "marketplace.json"
+CODEX_SKILL = CODEX_PLUGIN_ROOT / "skills" / "duet" / "SKILL.md"
+CODEX_PLUGIN_DOC = ROOT / "docs" / "CODEX_PLUGIN.md"
 PYPROJECT = ROOT / "pyproject.toml"
 FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
 README_ABSOLUTE_LINKS = [
     "https://github.com/volkan/duet/blob/main/docs/USAGE.md",
+    "https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md",
     "https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md",
     "https://github.com/volkan/duet/blob/main/CLAUDE.md",
     "https://github.com/volkan/duet/blob/main/AGENTS.md",
@@ -97,13 +104,7 @@ def _assert_no_forbidden_text() -> None:
         _fail(f"forbidden employer email remains in tracked files: {', '.join(matches)}")
 
 
-def _assert_source_metadata() -> str:
-    pyproject = _load_pyproject()
-    plugin = _load_json(PLUGIN_JSON)
-    marketplace = _load_json(MARKETPLACE_JSON)
-    version = _project_version(pyproject)
-
-    project = pyproject["project"]
+def _assert_project_metadata(project: dict[str, Any]) -> None:
     if project.get("name") != "duet-cli":
         _fail("pyproject.toml project.name must remain 'duet-cli'")
     if project.get("dependencies") != []:
@@ -112,31 +113,132 @@ def _assert_source_metadata() -> str:
     if not isinstance(scripts, dict) or scripts.get("duet") != "duet:main":
         _fail("pyproject.toml must expose the console script duet = 'duet:main'")
 
+
+def _assert_claude_plugin_metadata(
+    plugin: dict[str, Any],
+    marketplace: dict[str, Any],
+    version: str,
+) -> None:
     if plugin.get("name") != "duet":
         _fail(".claude-plugin/plugin.json name must be 'duet'")
     if plugin.get("version") != version:
-        _fail("plugin.json version must match pyproject.toml project.version")
+        _fail(".claude-plugin/plugin.json version must match pyproject.toml project.version")
     author = plugin.get("author")
     if not isinstance(author, dict) or author.get("name") != "Volkan Altan":
-        _fail("plugin.json author.name must be 'Volkan Altan'")
+        _fail(".claude-plugin/plugin.json author.name must be 'Volkan Altan'")
     if author.get("email") != EXPECTED_EMAIL:
-        _fail(f"plugin.json author.email must be {EXPECTED_EMAIL!r}")
+        _fail(f".claude-plugin/plugin.json author.email must be {EXPECTED_EMAIL!r}")
 
     owner = marketplace.get("owner")
     if not isinstance(owner, dict) or owner.get("name") != "Volkan Altan":
-        _fail("marketplace.json owner.name must be 'Volkan Altan'")
+        _fail(".claude-plugin/marketplace.json owner.name must be 'Volkan Altan'")
     if owner.get("email") != EXPECTED_EMAIL:
-        _fail(f"marketplace.json owner.email must be {EXPECTED_EMAIL!r}")
+        _fail(f".claude-plugin/marketplace.json owner.email must be {EXPECTED_EMAIL!r}")
     plugins = marketplace.get("plugins")
     if not isinstance(plugins, list) or not plugins:
-        _fail("marketplace.json plugins must be a non-empty list")
+        _fail(".claude-plugin/marketplace.json plugins must be a non-empty list")
     if not any(p.get("name") == "duet" and p.get("source") == "./"
                for p in plugins if isinstance(p, dict)):
-        _fail("marketplace.json must list the local duet plugin source './'")
+        _fail(".claude-plugin/marketplace.json must list the local duet plugin source './'")
 
-    if not (ROOT / "commands" / "duet.md").exists():
+    if not CLAUDE_COMMAND.exists():
         _fail("commands/duet.md must exist for the Claude Code plugin")
 
+
+def _assert_codex_plugin_metadata(
+    plugin: dict[str, Any],
+    marketplace: dict[str, Any],
+    version: str,
+) -> None:
+    if plugin.get("name") != "duet":
+        _fail(".codex-plugin/plugin.json name must be 'duet'")
+    if plugin.get("version") != version:
+        _fail(".codex-plugin/plugin.json version must match pyproject.toml project.version")
+    if plugin.get("skills") != "./skills/":
+        _fail(".codex-plugin/plugin.json must expose skills via './skills/'")
+
+    author = plugin.get("author")
+    if not isinstance(author, dict) or author.get("name") != "Volkan Altan":
+        _fail(".codex-plugin/plugin.json author.name must be 'Volkan Altan'")
+    if author.get("email") != EXPECTED_EMAIL:
+        _fail(f".codex-plugin/plugin.json author.email must be {EXPECTED_EMAIL!r}")
+
+    interface = plugin.get("interface")
+    if not isinstance(interface, dict):
+        _fail(".codex-plugin/plugin.json interface must be an object")
+    for key in (
+        "displayName",
+        "shortDescription",
+        "longDescription",
+        "developerName",
+        "category",
+    ):
+        if not isinstance(interface.get(key), str) or not interface[key].strip():
+            _fail(f".codex-plugin/plugin.json interface.{key} must be a non-empty string")
+    default_prompt = interface.get("defaultPrompt")
+    if not isinstance(default_prompt, list) or not default_prompt:
+        _fail(".codex-plugin/plugin.json interface.defaultPrompt must be a non-empty list")
+    capabilities = interface.get("capabilities")
+    if not isinstance(capabilities, list) or not capabilities:
+        _fail(".codex-plugin/plugin.json interface.capabilities must be a non-empty list")
+
+    if marketplace.get("name") != "volkan-duet":
+        _fail(".agents/plugins/marketplace.json name must be 'volkan-duet'")
+    market_interface = marketplace.get("interface")
+    if not isinstance(market_interface, dict) or not market_interface.get("displayName"):
+        _fail(".agents/plugins/marketplace.json interface.displayName is required")
+    plugins = marketplace.get("plugins")
+    if not isinstance(plugins, list) or not plugins:
+        _fail(".agents/plugins/marketplace.json plugins must be a non-empty list")
+    duet_entries = [p for p in plugins if isinstance(p, dict) and p.get("name") == "duet"]
+    if not duet_entries:
+        _fail(".agents/plugins/marketplace.json must list the duet plugin")
+    source = duet_entries[0].get("source")
+    if (
+        not isinstance(source, dict)
+        or source.get("source") != "local"
+        or source.get("path") != "./plugins/duet"
+    ):
+        _fail(".agents/plugins/marketplace.json duet source must be local './plugins/duet'")
+    policy = duet_entries[0].get("policy")
+    if not isinstance(policy, dict):
+        _fail(".agents/plugins/marketplace.json duet policy must be an object")
+    if policy.get("installation") != "AVAILABLE":
+        _fail(".agents/plugins/marketplace.json duet policy.installation must be AVAILABLE")
+    if policy.get("authentication") != "ON_INSTALL":
+        _fail(".agents/plugins/marketplace.json duet policy.authentication must be ON_INSTALL")
+    if duet_entries[0].get("category") != "Productivity":
+        _fail(".agents/plugins/marketplace.json duet category must be Productivity")
+
+    if not CODEX_PLUGIN_DOC.exists():
+        _fail("docs/CODEX_PLUGIN.md must exist for the Codex plugin")
+    if not CODEX_SKILL.exists():
+        _fail("plugins/duet/skills/duet/SKILL.md must exist for the Codex plugin")
+    skill_text = CODEX_SKILL.read_text(encoding="utf-8")
+    for required in (
+        "command -v duet",
+        "command -v claude",
+        "command -v codex",
+        "duet --recap --cwd",
+        "claude -p /review",
+        "--partner codex:coder",
+    ):
+        if required not in skill_text:
+            _fail(f"plugins/duet/skills/duet/SKILL.md is missing required text: {required!r}")
+
+
+def _assert_source_metadata() -> str:
+    pyproject = _load_pyproject()
+    claude_plugin = _load_json(CLAUDE_PLUGIN_JSON)
+    claude_marketplace = _load_json(CLAUDE_MARKETPLACE_JSON)
+    codex_plugin = _load_json(CODEX_PLUGIN_JSON)
+    codex_marketplace = _load_json(CODEX_MARKETPLACE_JSON)
+    version = _project_version(pyproject)
+
+    project = pyproject["project"]
+    _assert_project_metadata(project)
+    _assert_claude_plugin_metadata(claude_plugin, claude_marketplace, version)
+    _assert_codex_plugin_metadata(codex_plugin, codex_marketplace, version)
     _assert_no_forbidden_text()
     return version
 

@@ -28,7 +28,7 @@ Use Conventional Commits. Before pushing, run the relevant local gates:
 make ci
 # For package/plugin metadata changes:
 make package-check
-make plugin-check
+make plugin-check  # required when the Claude Code plugin surface changed
 ```
 
 Then push the branch and open a PR against `main`:
@@ -54,9 +54,10 @@ Before merging:
 3. Confirm all six required checks are passing:
    `test (py3.9)`, `test (py3.11)`, `test (py3.13)`,
    `distribution metadata`, `plugin validate`, and `complexity gate`.
-4. For packaging/plugin changes, confirm `make package-check` and
-   `make plugin-check` were run locally or passed in CI. For PyPI releases,
-   stop before upload unless the owner explicitly approves publishing.
+4. For packaging/plugin changes, confirm `make package-check` was run locally
+   or passed in CI, and confirm `make plugin-check` too when the Claude Code
+   plugin surface changed. For PyPI releases, stop before upload unless the
+   owner explicitly approves publishing.
 
 Useful commands:
 
