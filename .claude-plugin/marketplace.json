@@ -3,7 +3,7 @@
   "description": "Marketplace for the duet two-agent CLI harness plugin.",
   "owner": {
     "name": "Volkan Altan",
-    "email": "volkan.altan@vestiairecollective.com"
+    "email": "volkanaltan@gmail.com"
   },
   "plugins": [
     {
