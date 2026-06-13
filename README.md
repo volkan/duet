@@ -35,7 +35,9 @@ codex plugin add duet@volkan-duet
 ```
 
 Start a new Codex thread and invoke `$duet`, or just ask Codex to use duet in
-plain language. Full guide:
+plain language. Like the Claude Code plugin, the skill shells out to the `duet`
+CLI, so install that first (see below) and make sure `command -v duet` passes in
+Codex's shell. Full guide:
 [docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md).
 
 ### 3. From the terminal — `duet`
@@ -48,7 +50,9 @@ duet --task "Fix the failing test" --cwd ~/code/myrepo
 The PyPI package is `duet-cli` (bare `duet` on PyPI is Google's async library),
 so `pipx`/`uvx` isolation is recommended. Add `'duet-cli[yaml]'` if you want
 `--config foo.yaml`. One-shot, no install:
-`uvx --from duet-cli duet --task "..."`.
+`uvx --from duet-cli duet --task "..."` — note this is ephemeral and does not put
+`duet` on PATH, so the `/duet` and `$duet` plugins need a persistent install
+(`pipx install duet-cli` or `make install`) instead.
 
 ## Examples
 
