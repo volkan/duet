@@ -1479,6 +1479,11 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
             FINISHED_AGENT_ERROR,
             f"copilot returned malformed JSONL output: {e}",
         )
+    # The `result` event's exitCode is the Copilot agent's own exit status, not
+    # the exit code of any shell/tool the agent ran during the turn — a verified
+    # turn that runs a failing inner command still reports exitCode 0. So a
+    # nonzero value here means the agent itself errored out; treat it as
+    # agent_error rather than forwarding a broken reply.
     if result_exit_code not in (None, 0):
         raise AgentRunError(
             FINISHED_AGENT_ERROR,

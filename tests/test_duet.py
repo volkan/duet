@@ -424,6 +424,36 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("exitCode=2", str(ctx.exception))
 
+    def test_copilot_rc_124_maps_to_timeout(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 124, "", "[duet] TIMEOUT after 1s"
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 1,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_TIMEOUT)
+        self.assertIn("copilot exited 124", str(ctx.exception))
+
+    def test_copilot_nonzero_rc_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 2, "", "backend failed"
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("copilot exited 2", str(ctx.exception))
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -514,6 +544,23 @@ class TestParseCopilotJsonl(unittest.TestCase):
         text, session_id, exit_code = duet._parse_copilot_jsonl(out)
 
         self.assertEqual(text, "hello world")
+        self.assertEqual(session_id, "sid")
+        self.assertEqual(exit_code, 0)
+
+    def test_empty_trailing_content_does_not_overwrite_reply(self) -> None:
+        # Real Copilot streams can emit an empty assistant.message before and/or
+        # after the substantive one; the `if text:` guard must keep the last
+        # NON-EMPTY reply rather than letting a blank event clobber it.
+        out = "\n".join([
+            '{"type":"assistant.message","data":{"content":""}}',
+            '{"type":"assistant.message","data":{"content":"the real answer"}}',
+            '{"type":"assistant.message","data":{"content":[]}}',
+            '{"type":"result","sessionId":"sid","exitCode":0}',
+        ])
+
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
+
+        self.assertEqual(text, "the real answer")
         self.assertEqual(session_id, "sid")
         self.assertEqual(exit_code, 0)
 
