@@ -26,7 +26,7 @@ Settings → Branches → Branch protection rules → Add rule for `main`:
 ```sh
 gh api -X PUT repos/:owner/:repo/branches/main/protection \
   -H "Accept: application/vnd.github+json" \
-  -f 'required_status_checks[strict]=true' \
+  -F 'required_status_checks[strict]=true' \
   -f 'required_status_checks[checks][][context]=test (py3.9)' \
   -f 'required_status_checks[checks][][context]=test (py3.11)' \
   -f 'required_status_checks[checks][][context]=test (py3.13)' \
