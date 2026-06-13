@@ -44,84 +44,11 @@ Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the ru
 
 ## Required GitHub workflow for agents
 
-The default branch is `main`. Do not use `master` in commands, PR bases, docs,
-or automation for this repo.
-
-Agents and automation must not commit or push feature work directly to `main`.
-Start from an up-to-date `main`, create a topic branch, then commit there:
-
-```bash
-git fetch origin
-git switch main
-git pull --ff-only
-git switch -c <type>/<short-topic>
-```
-
-If edits were already made on `main`, preserve them by creating a branch before
-committing:
-
-```bash
-git switch -c <type>/<short-topic>
-```
-
-Before pushing, run the relevant local gates:
-
-```bash
-make ci
-# For package/plugin metadata changes:
-make package-check
-make plugin-check
-```
-
-Then push the current branch and open a PR against `main`:
-
-```bash
-git push -u origin HEAD
-gh pr create --base main --fill
-```
-
-Do not use `git push origin main` or `git push --force origin main`. `main` is
-protected by required status checks plus force-push/deletion blocking. If a push
-is rejected or GitHub reports required checks are expected, keep the protection
-in place and move the work to a topic branch + PR.
-
-### Merge/release-to-main checklist
-
-Treat every merge to `main` as a release of the repository state. Merge through
-GitHub; do not land work by pushing directly to `main`.
-
-Before merging:
-
-1. Confirm the PR diff matches the requested scope and does not include local
-   scratch files or unrelated generated artifacts.
-2. Confirm the PR title or squash commit title is a Conventional Commit.
-3. Confirm all six required checks are passing:
-   `test (py3.9)`, `test (py3.11)`, `test (py3.13)`,
-   `distribution metadata`, `plugin validate`, and `complexity gate`.
-4. For packaging/plugin changes, confirm `make package-check` and
-   `make plugin-check` were run locally or passed in CI. For PyPI releases,
-   stop before upload unless the owner explicitly approves publishing.
-
-Useful commands:
-
-```bash
-gh pr view <number> --json title,headRefName,baseRefName,mergeStateStatus
-gh pr checks <number>
-gh pr diff <number> --stat
-gh pr merge <number> --squash --delete-branch
-```
-
-After merging:
-
-```bash
-git fetch origin
-git switch main
-git pull --ff-only
-gh run list --branch main --limit 3
-```
-
-Verify the latest `main` run is green. If it is not, treat the failed run as the
-next task and fix it through another topic branch + PR.
+The default branch is `main`; do not use `master` in commands, docs, PR bases,
+or automation. Do not commit or push feature work directly to `main`. Create a
+topic branch, run the relevant local gates, open a PR, wait for all six required
+checks, and merge through GitHub. The detailed branch and merge checklist lives
+in `docs/AGENT_WORKFLOW.md`.
 
 ## Architecture you'll need to read multiple files to grasp
 
@@ -216,8 +143,8 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` "What duet does" numbered list if user-visible |
 | change to the `/duet` slash-command recipe | both copies: `commands/duet.md` (the plugin command) and the embedded skill body in `docs/USAGE.md` (the section starting "`/duet` Claude Code command"); `.claude-plugin/plugin.json` description if the behavior summary shifts (`marketplace.json` deliberately carries only a short listing blurb, so it rarely needs the same edit) |
 | packaging / plugin metadata change (`pyproject.toml` name, version, console script, extras; `.claude-plugin/plugin.json` / `marketplace.json`) | `README.md` install section (uvx/pipx/plugin snippets); `docs/USAGE.md` `/duet` section if install steps change; the Makefile `build` target if the build tooling changes; keep `plugin.json` version matching `pyproject.toml` |
-| function grows past the complexity/length budget | extract a named helper (single-file: never a new module); re-run `make complexity`; if the budget itself moves, update `scripts/check_complexity.py` defaults and the "Four regression nets" net-4 line |
-| new CI job / changed check name | `.github/workflows/ci.yml`; the required-check names in `.github/BRANCH_PROTECTION.md`; the "Four regression nets" paragraph |
+| function grows past the complexity/length budget | extract a named helper (single-file: never a new module); re-run `make complexity`; if the budget itself moves, update `scripts/check_complexity.py` defaults and the merge gates paragraph |
+| new CI job / changed check name | `.github/workflows/ci.yml`; the required-check names in `.github/BRANCH_PROTECTION.md`; the merge gates paragraph |
 | breaking semantics or limit change | `README.md` "Limits / future" |
 
 If a change is worth doing, it's worth a smoke case. `scripts/smoke.sh` is the executable part of the docs — drift between it and `duet.py` is the failure mode hardest to spot. Add the `expect` line in the same commit as the code, not later. For the pure helpers listed in the table row above, add the corresponding `tests/test_duet.py` case in the same commit too — unit tests catch contract drift that a `--dry-run` exit code can't see.
