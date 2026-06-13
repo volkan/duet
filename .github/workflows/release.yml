@@ -29,10 +29,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Tag matches package version
+        # `release: published` cannot filter the tag the way `push.tags: ["v*"]`
+        # did, so enforce the `vX.Y.Z` contract here: the tag must equal `v` +
+        # the pyproject version exactly (no bare `0.2.1`, no `-rc1` prerelease).
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           PKG="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          [ "$TAG" = "$PKG" ] || { echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $PKG"; exit 1; }
+          [ "$GITHUB_REF_NAME" = "v$PKG" ] || { echo "::error::release tag $GITHUB_REF_NAME must be v$PKG (pyproject version)"; exit 1; }
       - name: Tag commit is on main
         run: |
           git fetch --no-tags --quiet origin main
@@ -92,4 +94,7 @@ jobs:
       - name: Attach built distributions to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout in this job, so `gh` has no git remote to infer the repo
+          # from; GitHub exposes GITHUB_REPOSITORY but `gh` only reads GH_REPO.
+          GH_REPO: ${{ github.repository }}
         run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
