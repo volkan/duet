@@ -1,447 +1,139 @@
 # duet
 
-Two CLI agents in conversation. One Python file. Stdlib only.
+**Two CLI agents in conversation. One Python file. Stdlib only.**
 
-Run them from your terminal, or drive the same loop inside Claude Code with
-the `/duet` slash command.
+`duet` runs two command-line coding agents in alternating turns until they
+agree. By default that is Claude and Codex; Gemini and Copilot are also
+supported, and you can pair two agents from the same backend. One agent plans
+or reviews while the other implements; each keeps its own session memory across
+turns, and every run leaves a transcript you can inspect.
 
-`duet.py` runs two command-line coding agents, usually Claude and Codex, in
-alternating turns. Gemini CLI and GitHub Copilot CLI are also supported. You
-can mix backends or pair two agents from the same backend, such as Codex
-planner + Codex coder, Claude coder + Claude reviewer, Gemini reviewer +
-Codex coder, or Copilot planner + Copilot coder. One agent can plan or review
-while the other implements. The loop stops when they agree, the turn limit is
-reached, a timeout happens, or you stop them.
+## Use it three ways
 
-Use duet when you want:
+### 1. Inside Claude Code — `/duet`
 
-- A planner/reviewer agent to keep pressure on an implementation agent.
-- A second agent to inspect test failures, issue text, or review output.
-- A transcript and run directory you can inspect after the agents finish.
-- Isolation through an optional git worktree while the partner agent edits.
-
-## Quick Start
-
-### Inside Claude Code (`/duet`)
-
-The `/duet` plugin is the fastest path if you already work inside Claude Code.
-It shells out to the `duet` CLI, so install the binary once and confirm Claude
-Code's shell can find it:
-
-```bash
-pipx install duet-cli
-command -v duet
-```
-
-From a clone, `make install` works too:
-
-```bash
-make install
-command -v duet
-```
-
-Then enable the plugin from inside Claude Code:
+The fastest path if you already live in Claude Code.
 
 ```text
 /plugin marketplace add volkan/duet
 /plugin install duet@volkan-duet
-/reload-plugins
 /duet
 ```
 
-Some Claude Code installs expose the command as `/duet:duet` when namespacing
-is needed. Plain `/duet` runs Claude Code's real `/review` first, then uses
-duet to loop Codex and Claude in a worktree until convergence or the turn
-limit.
-
-Pass any upstream command as the kickoff text:
-
-```text
-/duet 'npm test 2>&1' --turns 4
-```
-
-For the full install checklist, default `/review` recipe, and troubleshooting
-notes, see
+Plain `/duet` runs Claude Code's real `/review`, then loops Codex and Claude in
+a worktree until they converge. Pass any upstream command as the kickoff:
+`/duet 'npm test 2>&1' --turns 4`. The plugin shells out to the `duet` CLI, so
+install that first (see below) and make sure `command -v duet` passes in Claude
+Code's shell. Full guide:
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 
-<!-- After recording, replace <ID> and uncomment:
-[![asciicast](https://asciinema.org/a/<ID>.svg)](https://asciinema.org/a/<ID>)
--->
-
-### From the terminal
-
-Pair-programming pattern: plan with codex in its own session first, then hand
-the session id to duet — codex implements with the plan in context while
-claude reviews each turn.
-
-```bash
-cd ~/code/myrepo
-
-# Find the codex session you just planned in:
-#   ls -lt ~/.codex/sessions/ | head
-# or look for `session id: <uuid>` on `codex exec`'s stderr.
-
-./duet.py \
-    --resume-codex <codex-session-id> \
-    --worktree \
-    --reasoning max \
-    --task "Implement the plan from your codex planning session."
-```
-
-Four flags carry their weight; everything else is a default. Codex (resumed,
-with the plan in context) speaks first as the coder. Claude reviews each
-turn as the planner. The worktree keeps the host checkout clean until you
-merge. Sentinel + rationale convergence rules are baked into both role
-prompts — you do not need to restate them in `--task`.
-
-Resume flags attach to the matching backend even when you override
-`--lead`/`--partner`. A resumed Claude agent is normalized to lead so duet can
-extract its latest message as the seed; a resumed Codex agent is normalized to
-partner/coder so it speaks first with its existing plan in context.
-
-The symmetric `--resume-claude <session-id>` does the inverse — plan in
-claude, hand off to codex — and is duet's founding workflow, documented in
-[docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md).
-
-Have a task in words but no prior planning session? Let codex plan inside
-the loop while claude implements:
-
-```bash
-./duet.py \
-    --recap \
-    --task "Add Codex fast mode for duet-managed Codex runs, don't miss any doc files" \
-    --lead claude:coder \
-    --partner codex:planner \
-    --worktree --worktree-for lead \
-    --turns 4
-```
-
-`--recap` keeps the live output compact and the worktree keeps the host
-checkout clean until you merge.
-
-```bash
-# Run a fresh task in a target project.
-./duet.py --task "Implement fizzbuzz in Go with tests" \
-    --lead claude:coder --partner codex:planner \
-    --cwd ~/code/scratch
-
-# Seed duet from Claude Code's real /review output.
-./duet.py --recap --task-from-cmd 'claude -p /review' \
-    --lead claude:reviewer --partner codex:coder \
-    --worktree \
-    --cwd .
-```
-
-In the review recipe, Claude's `/review` runs once to produce the kickoff
-critique. Duet then hands that critique to Codex, preserves both agent
-sessions, and manages the back-and-forth until convergence or the turn limit.
-
-## Installation
-
-Install the `duet` command:
-
-```bash
-make install      # symlinks duet.py to ~/.local/bin/duet
-make ci           # fast local gate: unit + reasoning + smoke + complexity + source metadata
-make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run checks
-make unit-test    # only the stdlib unittest suite under tests/
-make smoke-test   # only scripts/smoke.sh dry-run regression checks
-make complexity   # cyclomatic-complexity/length gate (single-file sprawl guard)
-make package-check # build sdist/wheel and validate packaged metadata
-make plugin-check # validate the Claude Code plugin manifest with claude
-make build        # sdist + wheel into dist/ (needs: python3 -m pip install build)
-make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
-```
-
-Or skip the clone — the PyPI package is `duet-cli` (bare `duet` is taken) and
-the command it installs is `duet`:
-
-```bash
-uvx --from duet-cli duet --task "..."   # one-shot run, isolated, no install
-pipx install duet-cli                   # puts the duet command on PATH
-pipx install 'duet-cli[yaml]'           # include PyYAML for --config foo.yaml
-```
-
-Plain `pip install duet-cli` works too, but the installed top-level module is
-named `duet`, which collides with Google's PyPI `duet` package in a shared
-environment — pipx/uvx isolation avoids that.
-
-Claude Code plugin — adds the `/duet` slash command. The plugin still shells
-out to the `duet` CLI, so `command -v duet` must pass in Claude Code's shell
-before `/duet` can run:
+### 2. Inside Codex — `$duet`
 
 ```text
-/plugin marketplace add volkan/duet
-/plugin install duet@volkan-duet
-/reload-plugins
-```
-
-Some Claude Code installs show the command as `/duet:duet` when namespacing is
-needed. The Quick Start above shows the shortest Claude Code flow. For the full
-install checklist, default `/review` recipe, and troubleshooting notes, see
-[docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
-
-Codex plugin - adds the `duet` skill so Codex can run the same recipes from a
-thread. The skill also shells out to the installed `duet` CLI:
-
-```bash
 codex plugin marketplace add volkan/duet
 codex plugin add duet@volkan-duet
 ```
 
-Then start a new Codex thread and invoke `$duet`, or ask Codex to use Duet in
-natural language. For local checkout install, runtime expectations, and
-troubleshooting notes, see
+Start a new Codex thread and invoke `$duet`, or just ask Codex to use duet in
+plain language. Full guide:
 [docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md).
 
-CI (`.github/workflows/ci.yml`) runs the runtime checks on every PR across
-Python 3.9/3.11/3.13, plus required distribution metadata, package build,
-installed-wheel smoke, Claude plugin validation, and complexity jobs. The
-distribution metadata job validates both Claude and Codex plugin manifests. To
-make them block merges, mark them required in branch protection — see
-[`.github/BRANCH_PROTECTION.md`](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md)
-(admins can still force-merge).
-
-## How It Works
-
-Each agent keeps its own conversation memory:
-
-- Claude resumes with `claude -p --resume <session_id>`.
-- Codex resumes with `codex exec resume <session_id>` when duet captured one
-  from Codex's stderr, or `codex exec resume --last` in the working directory
-  as a fallback for older builds that don't print a session id.
-- Gemini resumes with `gemini --resume <session_id> -p ... --output-format json`.
-  Duet requires a Gemini CLI build whose JSON output includes `session_id`;
-  older builds fail clearly instead of losing multi-turn memory.
-- Copilot resumes with `copilot --resume=<session_id> -p ... --output-format json`.
-  Duet requires Copilot CLI JSONL output with a final `sessionId`; missing or
-  malformed JSONL fails clearly instead of losing multi-turn memory. Copilot
-  turns run non-interactively with `--allow-all-tools`; use per-agent
-  `extra_args` such as `--deny-tool` or URL/path policy flags to narrow that
-  default.
-
-On each turn, duet sends the latest reply from one agent to the other. It
-continues until both agents accept convergence in back-to-back turns, `--turns`
-is reached, a timeout happens, or you press Ctrl-C. A convergence proposal must
-include an `LGTM rationale:` explaining why the work is done, followed by the
-sentinel `<<<LGTM>>>` on its own line; a bare sentinel is ignored.
-
-Finished runs record the reason in `state.json`: user interruption stays
-`force_stop`, per-turn agent timeouts are `timeout`, and non-timeout agent
-command failures or malformed required output are `agent_error`.
-
-If you pass `--verify-cmd`, duet runs that shell command before counting a
-valid convergence proposal. Exit code 0 allows the proposal to count; any
-non-zero exit, timeout, or execution error feeds a capped failure block to the
-next agent turn. `--dry-run` records and prints the configured command but
-does not execute it.
-
-After normal loop endings, duet opens a `force> ` prompt. Press Enter to
-finish, or type feedback to force another round; duet sends the next agent the
-previous reply plus your feedback, including any appended worktree handoff
-block and diff.
-
-## Common Recipes
-
-Call Claude Code's real `/review` skill through duet:
+### 3. From the terminal — `duet`
 
 ```bash
-./duet.py --recap --task-from-cmd 'claude -p /review' \
+pipx install duet-cli        # the command it installs is `duet`
+duet --task "Fix the failing test" --cwd ~/code/myrepo
+```
+
+The PyPI package is `duet-cli` (bare `duet` on PyPI is Google's async library),
+so `pipx`/`uvx` isolation is recommended. Add `'duet-cli[yaml]'` if you want
+`--config foo.yaml`. One-shot, no install:
+`uvx --from duet-cli duet --task "..."`.
+
+## Examples
+
+Each command teaches one capability. The partner agent speaks first.
+
+**Review loop** — Codex reviews at max effort, Claude applies only the fixes
+Codex asks for, in an isolated worktree:
+
+```bash
+duet --task "Review the latest commit; fix only what the reviewer requests." \
+    --lead claude:coder --partner codex:reviewer \
+    --reasoning max --worktree --worktree-for lead --turns 6
+```
+
+**Seed from another tool's output** — drive the loop from Claude Code's real
+`/review`, a test run, or any command:
+
+```bash
+duet --task-from-cmd 'claude -p /review' \
     --lead claude:reviewer --partner codex:coder \
-    --worktree \
-    --cwd ~/workspace/project \
-    --turns 6
+    --worktree --recap --cwd ~/workspace/project --turns 6
 ```
 
-The `/review` skill supplies the initial findings; duet handles the subsequent
-Codex fix turn, Claude verification turn, worktree diff handoff, and any extra
-rounds.
-
-With the `/duet` Claude Code command installed (see
-[docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md)),
-plain `/duet` or `/duet:duet` runs that same `/review` kickoff recipe.
-Inside Claude Code, that is the shortest way to hand `/review` findings to the
-duet loop.
-
-With the Codex plugin installed (see
-[docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md)),
-invoke `$duet` or ask Codex to use Duet for that same `/review` kickoff recipe.
-
-Let duet run the upstream command inside the target project:
+**Deep planner, fast coder** — Claude plans at high effort while Codex coder
+turns drop to low for latency:
 
 ```bash
-./duet.py --task-from-cmd 'npm test 2>&1' \
-    --lead claude:coder --partner codex:planner \
-    --cwd ~/workspace/project \
-    --worktree --worktree-for lead
+duet --reasoning high --codex-fast \
+    --task "Fix the issue" --cwd ~/workspace/project
 ```
 
-Use a repeatable config:
+**Verify gate** — a convergence proposal only counts if `make test` exits 0;
+any failure feeds back into the next turn:
 
 ```bash
-./duet.py --config duet.example.yaml
+duet --task "Fix the issue" \
+    --lead claude:coder --partner codex:reviewer \
+    --verify-cmd 'make test' --worktree --worktree-for lead
 ```
 
-Useful packaged configs:
-
-- `examples/pr-review.yaml` - deep review of the latest commit.
-- `examples/codex-test-fix.yaml` - Codex planner diagnoses failing checks; Codex coder fixes them in a worktree.
-
-Same-backend peering:
+**Resume a plan** — plan with Codex in its own session, then hand the session
+id to duet; Codex implements with the plan in context while Claude reviews
+(`--resume-claude <id>` does the inverse):
 
 ```bash
-# Codex planner + Codex coder. The worktree gives one Codex peer a separate cwd.
-./duet.py --task "Fix the issue" \
-    --lead codex:planner --partner codex:coder \
-    --worktree --turns 6
-
-# Claude coder + Claude reviewer.
-./duet.py --task "Review and fix the current change" \
-    --lead claude:coder --partner claude:reviewer \
-    --turns 6
-
-# Gemini reviewer + Codex coder.
-./duet.py --task "Review and fix the current change" \
-    --lead codex:coder --partner gemini:reviewer \
-    --turns 6
-
-# Copilot planner + Copilot coder.
-./duet.py --task "Fix the issue" \
-    --lead copilot:planner --partner copilot:coder \
-    --worktree --turns 6
+duet --resume-codex <codex-session-id> --worktree --reasoning max \
+    --task "Implement the plan from your Codex planning session."
 ```
 
-For `codex`/`codex` runs in one cwd, duet requires both peers to produce Codex
-session UUIDs on their first turns. If either peer would fall back to
-`codex exec resume --last`, duet aborts rather than risk resuming the other
-peer's session. Use `--worktree` when in doubt.
+Reusable configs ship under `examples/` — `pr-review.yaml` (deep review of
+`HEAD`) and `codex-test-fix.yaml` (Codex planner diagnoses failing checks, Codex
+coder fixes them). Run one with `duet --config examples/pr-review.yaml`.
 
-Require a mechanical check before convergence:
+## How it works
 
-```bash
-./duet.py \
-  --task "Fix the issue" \
-  --lead claude:coder \
-  --partner codex:reviewer \
-  --worktree --worktree-for lead \
-  --verify-cmd 'make test'
-```
+Each agent keeps its own conversation memory across turns (Claude via
+`--resume`, Codex via `codex exec resume`, Gemini and Copilot via their JSON
+session ids). On each turn duet sends one agent's latest reply to the other.
 
-Check an in-progress run from another terminal:
+To converge, an agent must include an `LGTM rationale:` explaining why the work
+is done, followed by the sentinel `<<<LGTM>>>` on its own line — a bare
+sentinel is ignored, and **both** agents must agree in back-to-back turns. The
+loop also stops on `--turns`, a per-turn timeout, or Ctrl-C. After a normal
+stop, duet opens a `force>` prompt so you can push another round.
 
-```bash
-./duet.py --status .duet/runs/<id>/
-```
+Every run writes a directory with `transcript.md`, `state.json`, per-turn
+stderr logs, and the `wt/` worktree when `--worktree` is on. Inspect a run with
+`duet --status <run-id>`, list runs with `duet --list`, and start a fresh run
+from saved state with `duet --continue <run> --task "next thing"`.
 
-Gate convergence on P0/P1 review findings:
-
-```bash
-./duet.py --task "Fix the issue" \
-    --lead claude:coder --partner codex:triage-reviewer \
-    --cwd ~/workspace/project
-```
-
-Review a recent implementation - Codex reviews at max effort, Claude applies
-only requested fixes:
-
-```bash
-./duet.py --recap \
-    --task "Review the current main branch changes. Codex should act as reviewer: identify any blocking issues in the latest commit. Claude should act as coder: implement only the fixes Codex explicitly requests. Preserve project constraints and run make test before convergence." \
-    --lead claude:coder \
-    --partner codex:reviewer \
-    --reasoning max \
-    --worktree --worktree-for lead \
-    --turns 6
-```
-
-The partner speaks first, so Codex (reviewer) opens turn 1 with its critique
-and Claude (coder) responds in turn 2 with the fixes. `--worktree-for lead`
-keeps the editable checkout under the coder. Keep `--codex-fast` off in this
-recipe: Codex is the reviewer, so max effort is the point.
-
-That same recipe is also packaged as a YAML config you can drop into any
-repo — `examples/pr-review.yaml` reviews `HEAD`'s diff with the same
-agent/effort/worktree pairing, with comments calling out which keys to swap
-for variants (review uncommitted changes, review a specific PR by number,
-faster iteration once review is mostly done).
-
-Review the latest commit plus an untracked notes file by seeding both into the
-task:
-
-```bash
-./duet.py --recap \
-    --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD && printf "\n\n--- TODO.md ---\n" && cat TODO.md' \
-    --lead claude:coder \
-    --partner codex:reviewer \
-    --reasoning max \
-    --worktree --worktree-for lead \
-    --turns 6
-```
-
-Fresh worktrees start from committed `HEAD`; commit the notes first if the coder
-must edit them as a normal tracked file.
-
-Deep planner, fast coder — Claude plans at high effort, Codex coder turns drop to low for latency (uses the default `claude:planner + codex:coder` pairing):
-
-```bash
-./duet.py --reasoning high --codex-fast \
-    --task "Fix the issue" \
-    --cwd ~/workspace/project
-```
-
-Compact live debug view — see only what each turn produced, in real time:
-
-```bash
-./duet.py --recap --task "Fix the issue" \
-    --lead claude:coder --partner codex:planner \
-    --cwd ~/workspace/project
-```
-
-## Output
-
-Every run writes a directory containing:
-
-- `transcript.md` - the full conversation.
-- `recap.md` - compact per-turn debug view when `--recap` is enabled; `--status` shows this path when present.
-- `state.json` - run state, agent roles, session ids, finish reason, worktree metadata, and `recap_path` for recap runs.
-- `turn-*.stderr.log` - live stderr from each agent invocation.
-- `turn-*-verify.log` - verify command metadata, stdout, and stderr when `--verify-cmd` runs.
-- `turn-*.pid` - present only while an agent or verify command is running.
-- `wt/` - the git worktree, when `--worktree` is enabled.
-
-When a worktree agent replies, duet appends a handoff block to that reply before
-the diff. The block names the exact worktree path and branch, warns that the
-receiving agent's cwd may be a clean checkout, and includes `git -C <wt>` review
-commands so verification happens against the edited tree.
-
-When `--cwd` points outside the invocation directory and `--runs-dir` is not
-set, artifacts go under the target project at `.duet/runs/<run_id>/`.
+- **Backends:** `claude`, `codex`, `gemini`, `copilot`
+- **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
+- **Reasoning:** `--reasoning minimal|low|medium|high|xhigh|max`
 
 ## Documentation
 
-Read [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) for the full reference: flags, sandbox and
-network rules, worktree mode, output layout, `--status` / `--continue`, force
-prompt behavior, session memory, the post-run "apply / iterate / discard"
-checklist, and the optional Claude Code and Codex plugin entry points.
+[docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) is the
+full reference: every flag, reasoning levels, session memory, output layout,
+`--status` / `--continue`, the force prompt, Codex sandbox and network rules,
+and worktree mode.
 
-For contributor guidance, read [CLAUDE.md](https://github.com/volkan/duet/blob/main/CLAUDE.md). Codex-specific entry
-notes live in [AGENTS.md](https://github.com/volkan/duet/blob/main/AGENTS.md).
+## Contributing
 
-## Limits
-
-- `duet --continue <run>` starts a fresh run from a prior `state.json`, restores
-  saved session ids, and reuses the previous worktree when available. It does
-  not append to the old transcript.
-- Gemini support depends on JSON `session_id` output from the installed Gemini
-  CLI. Copilot support depends on JSONL output with a final `sessionId`. If
-  your binary omits the required field, duet stops with `agent_error` because
-  multi-turn memory would otherwise be unreliable.
-- Parallel Codex sessions in the same cwd are safe when duet captured a
-  session id from Codex's stderr — that turn pins to the UUID, not to recency.
-  When the UUID was not captured (old Codex builds, or continuing a pre-UUID
-  run), duet falls back to `codex exec resume --last`, which is cwd-based and
-  unsafe to share. `--worktree` isolates duet's Codex cwd from the host repo;
-  in `--last` fallback mode, do not start another Codex session inside that
-  same worktree while the run is active.
-- Transcripts capture full agent text. Convergence detection only counts
-  rationale-backed sentinels outside fenced markdown code blocks.
+Contributor guidance is in
+[CLAUDE.md](https://github.com/volkan/duet/blob/main/CLAUDE.md); Codex entry
+notes are in [AGENTS.md](https://github.com/volkan/duet/blob/main/AGENTS.md).
+CI runs on every PR and is advisory until marked required — see
+[.github/BRANCH_PROTECTION.md](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md).
