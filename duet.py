@@ -202,6 +202,21 @@ CODEX_REASONING_MAP = {
     "max":     "xhigh",
 }
 
+# Gemini CLI does not expose a documented reasoning-effort flag. Keep the duet
+# abstraction accepted for topology symmetry, but emit no backend effort args.
+GEMINI_REASONING_MAP = {level: "" for level in REASONING_LEVELS}
+GEMINI_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
+
+# Map duet's existing Claude-flavored permission mode knob to Gemini CLI's
+# approval vocabulary. Unknown values pass through so advanced users can try
+# newer Gemini modes without waiting for a duet release.
+GEMINI_APPROVAL_MODE_MAP = {
+    "default": "default",
+    "acceptEdits": "auto_edit",
+    "plan": "plan",
+    "bypassPermissions": "yolo",
+}
+
 
 def validate_reasoning(value: Optional[str], context: str) -> None:
     if value is not None and value not in REASONING_LEVELS:
@@ -1264,6 +1279,91 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     return out.rstrip(), parsed_sid or agent.session_id or "codex-current"
 
 
+def _parse_gemini_session_id(stdout: str) -> Optional[str]:
+    """Return Gemini CLI's JSON `session_id`, or None when absent/malformed."""
+    if not stdout:
+        return None
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    sid = payload.get("session_id")
+    return str(sid) if sid else None
+
+
+def _gemini_approval_mode(permission_mode: str) -> str:
+    return GEMINI_APPROVAL_MODE_MAP.get(permission_mode, permission_mode)
+
+
+def call_gemini(agent: Agent, system_prompt: str, message: str,
+                cwd: pathlib.Path, permission_mode: str, timeout: int,
+                dry: bool, first_turn: bool,
+                reasoning: Optional[str] = None,
+                stderr_log_path: Optional[pathlib.Path] = None,
+                pid_file_path: Optional[pathlib.Path] = None,
+                add_dirs: Optional[list[pathlib.Path]] = None) -> tuple[str, Optional[str]]:
+    """Returns (assistant_text, new_session_id) from Gemini CLI JSON output."""
+    eff_cwd = agent.cwd_override or cwd
+    if reasoning:
+        prefix = backend_adapter("gemini").reasoning_prompt_prefix.get(reasoning, "")
+        system_prompt = prefix + system_prompt
+    if dry:
+        new_sid = agent.session_id or f"dry-gemini-{agent.name}-{int(time.time())}"
+        wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
+        rn = f" reasoning={reasoning}" if reasoning else ""
+        return (
+            f"[dry-run gemini/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            "LGTM rationale: dry-run accepted the harness path and has no real "
+            "agent output to review.\n"
+            f"{DEFAULT_SENTINEL}"
+        ), new_sid
+
+    full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    cmd = ["gemini"]
+    if agent.session_id:
+        cmd += ["--resume", agent.session_id]
+    cmd += [
+        "-p", full_prompt,
+        "--output-format", "json",
+        "--approval-mode", _gemini_approval_mode(permission_mode),
+    ]
+    if agent.model:
+        cmd += ["--model", agent.model]
+    for d in (add_dirs or []):
+        cmd += ["--include-directories", str(d)]
+    cmd += agent.extra_args
+    rc, out, err = _agent_run(
+        cmd,
+        backend="gemini",
+        cwd=eff_cwd,
+        stdin=None,
+        timeout=timeout,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
+    if rc != 0:
+        reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+        raise AgentRunError(reason, f"gemini exited {rc}\nstderr:\n{err}")
+    try:
+        payload = json.loads(out)
+    except json.JSONDecodeError:
+        snippet = out[:500].strip()
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"gemini returned malformed JSON output: {snippet!r}",
+        )
+    new_sid = payload.get("session_id")
+    if not new_sid:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            "gemini JSON output did not include session_id; duet requires a "
+            "Gemini CLI build with JSON session_id support for multi-turn memory.",
+        )
+    if payload.get("error"):
+        raise AgentRunError(FINISHED_AGENT_ERROR, f"gemini returned error: {payload['error']}")
+    return (payload.get("response") or "").rstrip(), str(new_sid)
+
+
 def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
                          cfg: DuetConfig, first_turn: bool,
                          stderr_log_path: Optional[pathlib.Path],
@@ -1300,6 +1400,22 @@ def _call_codex_backend(agent: Agent, system_prompt: str, message: str,
     )
 
 
+def _call_gemini_backend(agent: Agent, system_prompt: str, message: str,
+                         cfg: DuetConfig, first_turn: bool,
+                         stderr_log_path: Optional[pathlib.Path],
+                         pid_file_path: Optional[pathlib.Path],
+                         reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    return call_gemini(
+        agent, system_prompt, message, cfg.cwd,
+        cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
+        first_turn=first_turn,
+        reasoning=reasoning,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+        add_dirs=cfg.add_dirs,
+    )
+
+
 BACKENDS = {
     "claude": BackendAdapter(
         name="claude",
@@ -1317,6 +1433,13 @@ BACKENDS = {
         reasoning_prompt_prefix={},
         supports_fast=True,
         resume_is_cwd_keyed=codex_resume_is_cwd_keyed,
+    ),
+    "gemini": BackendAdapter(
+        name="gemini",
+        binary="gemini",
+        call=_call_gemini_backend,
+        reasoning_map=GEMINI_REASONING_MAP,
+        reasoning_prompt_prefix=GEMINI_REASONING_PROMPT_PREFIX,
     ),
 }
 SUPPORTED_BACKENDS = set(BACKENDS)
@@ -3090,9 +3213,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default="codex:coder",
-                    help="partner agent spec, e.g. codex:coder, claude:reviewer (default codex:coder)")
+                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder (default codex:coder)")
     ap.add_argument("--lead", default="claude:planner",
-                    help="lead agent spec, e.g. claude:planner (default; ignored if --resume-claude given)")
+                    help="lead agent spec, e.g. claude:planner, gemini:reviewer (default; ignored if --resume-claude given)")
     ap.add_argument("--cwd", default=".", help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=DEFAULT_SENTINEL,
@@ -3105,9 +3228,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",
-                    help="codex --sandbox: read-only|workspace-write|danger-full-access")
+                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini.")
     ap.add_argument("--permission-mode", default="acceptEdits",
-                    help="claude --permission-mode: default|acceptEdits|plan|bypassPermissions")
+                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     ap.add_argument("--worktree", action="store_true",
                     help="run the partner agent in a throwaway git worktree on a fresh branch; "
@@ -3126,15 +3249,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
     ap.add_argument("--add-dir", action="append", metavar="PATH", default=[],
                     dest="add_dirs",
-                    help="extra path claude is allowed to read/write outside cwd. "
-                         "Repeatable. Without this, tasks that touch ../foo or "
-                         "absolute paths outside --cwd silently fail with a "
-                         "permission error. YAML key: `add_dirs:` (list).")
+                    help="extra path claude/gemini may access outside cwd. "
+                         "Repeatable. Claude receives --add-dir; Gemini receives "
+                         "--include-directories. YAML key: `add_dirs:` (list).")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
-                         "(minimal → low) and adds high/xhigh/max prompt nudges.")
+                         "(minimal → low) and adds high/xhigh/max prompt nudges. "
+                         "Gemini: no effort flag; high/xhigh/max are prompt nudges only.")
     ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
                     help="Codex-only fast mode: pin codex coder turns to "
                          "`model_reasoning_effort=low` and "

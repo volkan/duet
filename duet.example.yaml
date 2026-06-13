@@ -14,7 +14,15 @@ dry_run: false
 # Optional reasoning effort for both agents:
 # minimal | low | medium | high | xhigh | max
 # Codex: max maps to xhigh. Claude: minimal maps to low.
+# Gemini: no effort flag; high/xhigh/max are prompt nudges only.
 # reasoning: high
+
+# Backend-specific safety:
+# - Codex receives `sandbox:`.
+# - Claude receives `permission_mode:` directly.
+# - Gemini maps permission_mode to --approval-mode:
+#   default -> default, acceptEdits -> auto_edit, plan -> plan,
+#   bypassPermissions -> yolo.
 
 # Optional: shell command that must exit 0 before a valid LGTM+rationale
 # convergence proposal can count. Runs in the worktree when worktree mode has
@@ -97,3 +105,17 @@ agents:
 #   - name: claude-partner
 #     backend: claude
 #     role: reviewer
+#
+# Gemini reviewer + Codex coder. Gemini requires a CLI build whose
+# `--output-format json` output includes `session_id`; duet stops with
+# agent_error if that field is missing. `add_dirs:` is passed to Gemini as
+# repeated --include-directories.
+# agents:
+#   - name: codex-lead
+#     backend: codex
+#     role: coder
+#   - name: gemini-partner
+#     backend: gemini
+#     role: reviewer
+#     # model: gemini-3-pro-preview
+#     # session_id: gemini-session-id-from-state-json
