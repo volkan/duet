@@ -719,9 +719,10 @@ CLAUDE_SID=$(jq -r '.agents[] | select(.backend=="claude") | .session_id' \
                  <runs_dir>/<id>/state.json)
 claude --resume "$CLAUDE_SID"
 
-> Commit the changes from our duet with a clear message that summarises
-> what we did, push the branch, and open a PR with a description that
-> links back to the spec we agreed on.
+> If needed, create a topic branch first. Commit the changes from our duet
+> with a clear message that summarises what we did, push the branch, and open
+> a PR against main with a description that links back to the spec we agreed
+> on. Do not push directly to main or master.
 ```
 
 claude already knows the spec, exactly what codex changed (it reviewed the
