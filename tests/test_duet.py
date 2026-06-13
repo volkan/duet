@@ -337,6 +337,37 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("session_id", str(ctx.exception))
 
+    def test_gemini_error_payload_precedes_missing_session_id(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 0, '{"error":"auth failed"}', ""
+
+        agent = duet.Agent(name="gemini-partner", backend="gemini", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_gemini(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("gemini returned error: auth failed", str(ctx.exception))
+        self.assertNotIn("session_id", str(ctx.exception))
+
+    def test_malformed_gemini_json_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 0, "not json", ""
+
+        agent = duet.Agent(name="gemini-partner", backend="gemini", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_gemini(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("malformed JSON", str(ctx.exception))
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -785,7 +816,7 @@ class TestConfigValidation(unittest.TestCase):
             duet.validate_config(cfg)
 
 
-class TestCodexSharedCwdGuards(unittest.TestCase):
+class TestCwdKeyedResumeGuards(unittest.TestCase):
     def test_missing_uuid_after_first_turn_fails_for_shared_cwd(self) -> None:
         lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
         partner = duet.Agent(name="codex-partner", backend="codex", role="coder")
@@ -793,7 +824,7 @@ class TestCodexSharedCwdGuards(unittest.TestCase):
         partner.session_id = "codex-current"
 
         with self.assertRaises(SystemExit):
-            duet.guard_codex_shared_cwd_after_call(
+            duet.guard_cwd_keyed_resume_after_call(
                 cfg, partner, first_turn_for_agent=True
             )
 
@@ -808,7 +839,7 @@ class TestCodexSharedCwdGuards(unittest.TestCase):
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
         partner.session_id = "codex-current"
 
-        duet.guard_codex_shared_cwd_after_call(
+        duet.guard_cwd_keyed_resume_after_call(
             cfg, partner, first_turn_for_agent=True
         )
 
@@ -823,7 +854,7 @@ class TestCodexSharedCwdGuards(unittest.TestCase):
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
 
         with self.assertRaises(SystemExit):
-            duet.guard_codex_shared_cwd_before_call(
+            duet.guard_cwd_keyed_resume_before_call(
                 cfg, partner, first_turn_for_agent=False
             )
 

@@ -205,6 +205,8 @@ CODEX_REASONING_MAP = {
 # Gemini CLI does not expose a documented reasoning-effort flag. Keep the duet
 # abstraction accepted for topology symmetry, but emit no backend effort args.
 GEMINI_REASONING_MAP = {level: "" for level in REASONING_LEVELS}
+# Gemini intentionally reuses Claude's prompt nudges. Treat both tables as
+# read-only constants.
 GEMINI_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
 
 # Map duet's existing Claude-flavored permission mode knob to Gemini CLI's
@@ -324,8 +326,6 @@ class BackendAdapter:
     call: Callable[..., tuple[str, Optional[str]]]
     reasoning_map: dict[str, str]
     reasoning_prompt_prefix: dict[str, str]
-    supports_fast: bool = False
-    consumes_add_dirs: bool = False
     resume_is_cwd_keyed: Callable[[Agent], bool] = _resume_never_cwd_keyed
 
 
@@ -388,10 +388,6 @@ def shared_cwd_backend_peers(cfg: DuetConfig, backend: str) -> bool:
     )
 
 
-def shared_cwd_codex_peers(cfg: DuetConfig) -> bool:
-    return shared_cwd_backend_peers(cfg, "codex")
-
-
 def codex_session_is_uuid(agent: Agent) -> bool:
     return bool(agent.session_id and _CODEX_UUID_RE.match(agent.session_id))
 
@@ -408,10 +404,6 @@ def cwd_keyed_resume_isolation_error(agent: Agent) -> str:
         "--worktree/--worktree-for to isolate one peer, or use a backend build "
         "that reliably emits id-keyed session handles."
     )
-
-
-def codex_shared_cwd_isolation_error(agent: Agent) -> str:
-    return cwd_keyed_resume_isolation_error(agent)
 
 
 def guard_cwd_keyed_resume_before_call(cfg: DuetConfig,
@@ -431,18 +423,6 @@ def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
     if (shared_cwd_backend_peers(cfg, agent.backend)
             and backend_adapter(agent.backend).resume_is_cwd_keyed(agent)):
         raise SystemExit(cwd_keyed_resume_isolation_error(agent))
-
-
-def guard_codex_shared_cwd_before_call(cfg: DuetConfig,
-                                       agent: Agent,
-                                       first_turn_for_agent: bool) -> None:
-    guard_cwd_keyed_resume_before_call(cfg, agent, first_turn_for_agent)
-
-
-def guard_codex_shared_cwd_after_call(cfg: DuetConfig,
-                                      agent: Agent,
-                                      first_turn_for_agent: bool) -> None:
-    guard_cwd_keyed_resume_after_call(cfg, agent, first_turn_for_agent)
 
 
 @dataclasses.dataclass
@@ -1303,6 +1283,9 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
                 pid_file_path: Optional[pathlib.Path] = None,
                 add_dirs: Optional[list[pathlib.Path]] = None) -> tuple[str, Optional[str]]:
     """Returns (assistant_text, new_session_id) from Gemini CLI JSON output."""
+    # Gemini does not need first-turn command bifurcation; the argument keeps
+    # the backend call signature aligned with Codex/adapter dispatch.
+    _ = first_turn
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
         prefix = backend_adapter("gemini").reasoning_prompt_prefix.get(reasoning, "")
@@ -1352,16 +1335,16 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
             FINISHED_AGENT_ERROR,
             f"gemini returned malformed JSON output: {snippet!r}",
         )
-    new_sid = payload.get("session_id")
+    if payload.get("error"):
+        raise AgentRunError(FINISHED_AGENT_ERROR, f"gemini returned error: {payload['error']}")
+    new_sid = _parse_gemini_session_id(out)
     if not new_sid:
         raise AgentRunError(
             FINISHED_AGENT_ERROR,
             "gemini JSON output did not include session_id; duet requires a "
             "Gemini CLI build with JSON session_id support for multi-turn memory.",
         )
-    if payload.get("error"):
-        raise AgentRunError(FINISHED_AGENT_ERROR, f"gemini returned error: {payload['error']}")
-    return (payload.get("response") or "").rstrip(), str(new_sid)
+    return (payload.get("response") or "").rstrip(), new_sid
 
 
 def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
@@ -1423,7 +1406,6 @@ BACKENDS = {
         call=_call_claude_backend,
         reasoning_map=CLAUDE_REASONING_MAP,
         reasoning_prompt_prefix=CLAUDE_REASONING_PROMPT_PREFIX,
-        consumes_add_dirs=True,
     ),
     "codex": BackendAdapter(
         name="codex",
@@ -1431,7 +1413,6 @@ BACKENDS = {
         call=_call_codex_backend,
         reasoning_map=CODEX_REASONING_MAP,
         reasoning_prompt_prefix={},
-        supports_fast=True,
         resume_is_cwd_keyed=codex_resume_is_cwd_keyed,
     ),
     "gemini": BackendAdapter(
