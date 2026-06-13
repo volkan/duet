@@ -1,0 +1,20 @@
+{
+  "name": "volkan-duet",
+  "interface": {
+    "displayName": "Volkan Duet"
+  },
+  "plugins": [
+    {
+      "name": "duet",
+      "source": {
+        "source": "local",
+        "path": "./plugins/duet"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

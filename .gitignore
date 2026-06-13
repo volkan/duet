@@ -1,6 +1,6 @@
 # Top-level repo only versions docs (REQUIREMENTS, DECISION, SURVEY).
 # duet/ is its own git repo — exclude it here so we don't double-track.
-duet/
+/duet/
 
 # OS / editor noise
 .DS_Store

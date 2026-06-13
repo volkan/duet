@@ -9,6 +9,7 @@ mode, force prompt, and session memory.
 
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
+- [Plugin entry points](#plugin-entry-points)
 - [Real loop test](#real-loop-test)
 - [Same-backend peering](#same-backend-peering)
 - [CLI flags](#cli-flags)
@@ -106,8 +107,11 @@ duet --recap --task-from-cmd 'claude -p /review' \
 # Let duet run the upstream tool itself from inside the target project.
 duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
 
-# With the /duet plugin (or user-level skill) installed, plain /duet runs /review.
+# With the Claude Code /duet plugin installed, plain /duet runs /review.
 /duet
+
+# With the Codex plugin installed, invoke the packaged skill.
+$duet
 
 # Or pass a different upstream command.
 /duet 'npm test 2>&1' --turns 4
@@ -206,6 +210,8 @@ To adapt:
 
 Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invocation.
 
+## Plugin entry points
+
 ### `/duet` Claude Code command (plugin or manual skill)
 
 Plain `/duet` runs Claude Code's real `/review` through duet, while still
@@ -245,6 +251,40 @@ plain `/duet`, Claude Code may spend time in `claude -p /review` before
 Full install checklist, custom examples, troubleshooting, and the manual skill
 fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
 
+### `$duet` Codex skill plugin
+
+The Codex plugin ships a `duet` skill. Invoke it explicitly as `$duet`, or ask
+Codex to use Duet in natural language. The plugin does not install `duet`,
+`claude`, `codex`, or `gemini`; it shells out to whichever binaries are already
+on PATH.
+
+Install from a local checkout:
+
+```bash
+codex plugin marketplace add /path/to/duet
+codex plugin add duet@volkan-duet
+```
+
+Install from GitHub:
+
+```bash
+codex plugin marketplace add volkan/duet
+codex plugin add duet@volkan-duet
+```
+
+Start a new Codex thread after installing so the bundled skill is loaded. The
+default skill recipe runs the same Claude `/review` kickoff:
+
+```bash
+duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
+  --lead claude:reviewer --partner codex:coder \
+  --worktree --turns 6 \
+  --task-from-cmd 'claude -p /review'
+```
+
+Full install checklist, examples, and troubleshooting live in
+[Codex Plugin](CODEX_PLUGIN.md).
+
 ---
 
 ## Real loop test
@@ -261,10 +301,11 @@ CLI surface and exit-code contract). Use `make unit-test` or
 `make reasoning-check` (the reasoning-effort translation check),
 `make complexity` (a stdlib cyclomatic-complexity/length budget that guards
 this single file against sprawl), and `make distribution-check` (source
-package/plugin metadata validation). GitHub Actions also runs package artifact
-validation, an installed-wheel smoke test, and `claude plugin validate .` on
-every PR; `.github/BRANCH_PROTECTION.md` shows how to make all jobs required
-(admins keep a force-merge escape hatch).
+package/plugin metadata validation, including the Claude and Codex plugin
+files). GitHub Actions also runs package artifact validation, an
+installed-wheel smoke test, and `claude plugin validate .` on every PR;
+`.github/BRANCH_PROTECTION.md` shows how to make all jobs required (admins
+keep a force-merge escape hatch).
 
 To check the actual product loop with real agents, run:
 
