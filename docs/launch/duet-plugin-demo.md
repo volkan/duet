@@ -10,6 +10,12 @@ The live recording should be done by the user. A real two-agent run needs
 authenticated `claude`, `codex`, and `duet` binaries, and the useful timings
 depend on the local project and model latency.
 
+This is the Claude Code plugin entry point. A separate cast,
+[demo-script.md](demo-script.md), tells the terminal-CLI story (duet reviewing
+its own packaging branch). The two are complementary — pick whichever matches
+the launch surface you are showing, and update the `showhn.md` demo placeholder
+to point at the cast you publish.
+
 ## Pre-flight (off camera)
 
 ```bash
