@@ -63,7 +63,6 @@ TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 VERIFY_LIVE_PREFIX = "  │ [verify] "
-SUPPORTED_BACKENDS = {"claude", "codex"}
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
 FINISHED_CONVERGED = "converged"
 FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
@@ -218,7 +217,7 @@ def effective_reasoning(agent: Agent, cfg_reasoning: Optional[str]) -> Optional[
 @dataclasses.dataclass
 class Agent:
     name: str
-    backend: str                    # "claude" or "codex"
+    backend: str                    # supported backend key, e.g. "claude" or "codex"
     role: str = "coder"             # planner | coder | reviewer | triage-reviewer | custom
     role_prompt: Optional[str] = None
     model: Optional[str] = None
@@ -299,6 +298,26 @@ class DuetConfig:
     continue_from: Optional[str] = None       # prior run dir/id when created by --continue
 
 
+def _resume_never_cwd_keyed(agent: Agent) -> bool:
+    return False
+
+
+@dataclasses.dataclass(frozen=True)
+class BackendAdapter:
+    name: str
+    binary: str
+    call: Callable[..., tuple[str, Optional[str]]]
+    reasoning_map: dict[str, str]
+    reasoning_prompt_prefix: dict[str, str]
+    supports_fast: bool = False
+    consumes_add_dirs: bool = False
+    resume_is_cwd_keyed: Callable[[Agent], bool] = _resume_never_cwd_keyed
+
+
+def backend_adapter(backend: str) -> BackendAdapter:
+    return BACKENDS[backend]
+
+
 def _config_error(message: str,
                   parser: Optional[argparse.ArgumentParser] = None) -> None:
     if parser is not None:
@@ -344,48 +363,71 @@ def effective_agent_cwd(agent: Agent, default_cwd: pathlib.Path) -> pathlib.Path
     return (agent.cwd_override or default_cwd).resolve()
 
 
-def shared_cwd_codex_peers(cfg: DuetConfig) -> bool:
-    codex_agents = [a for a in cfg.agents if a.backend == "codex"]
-    if len(codex_agents) != 2:
+def shared_cwd_backend_peers(cfg: DuetConfig, backend: str) -> bool:
+    backend_agents = [a for a in cfg.agents if a.backend == backend]
+    if len(backend_agents) != 2:
         return False
     return (
-        effective_agent_cwd(codex_agents[0], cfg.cwd)
-        == effective_agent_cwd(codex_agents[1], cfg.cwd)
+        effective_agent_cwd(backend_agents[0], cfg.cwd)
+        == effective_agent_cwd(backend_agents[1], cfg.cwd)
     )
+
+
+def shared_cwd_codex_peers(cfg: DuetConfig) -> bool:
+    return shared_cwd_backend_peers(cfg, "codex")
 
 
 def codex_session_is_uuid(agent: Agent) -> bool:
     return bool(agent.session_id and _CODEX_UUID_RE.match(agent.session_id))
 
 
-def codex_shared_cwd_isolation_error(agent: Agent) -> str:
+def codex_resume_is_cwd_keyed(agent: Agent) -> bool:
+    return bool(agent.session_id and not codex_session_is_uuid(agent))
+
+
+def cwd_keyed_resume_isolation_error(agent: Agent) -> str:
     return (
-        "[duet] fatal: cannot safely continue codex/codex peering in one cwd "
-        f"because {agent.name} did not produce a Codex session UUID. "
-        "`codex exec resume --last` is cwd-based and could resume the other "
-        "Codex peer's session. Use --worktree/--worktree-for to isolate one "
-        "peer, or use a Codex build that reliably emits `session id: <uuid>`."
+        f"[duet] fatal: cannot safely continue {agent.backend}/{agent.backend} "
+        f"peering in one cwd because {agent.name} would use cwd-keyed resume. "
+        "That could resume the other peer's session. Use "
+        "--worktree/--worktree-for to isolate one peer, or use a backend build "
+        "that reliably emits id-keyed session handles."
     )
+
+
+def codex_shared_cwd_isolation_error(agent: Agent) -> str:
+    return cwd_keyed_resume_isolation_error(agent)
+
+
+def guard_cwd_keyed_resume_before_call(cfg: DuetConfig,
+                                       agent: Agent,
+                                       first_turn_for_agent: bool) -> None:
+    if cfg.dry_run or not shared_cwd_backend_peers(cfg, agent.backend):
+        return
+    if not first_turn_for_agent and backend_adapter(agent.backend).resume_is_cwd_keyed(agent):
+        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
+
+
+def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
+                                      agent: Agent,
+                                      first_turn_for_agent: bool) -> None:
+    if cfg.dry_run or not first_turn_for_agent:
+        return
+    if (shared_cwd_backend_peers(cfg, agent.backend)
+            and backend_adapter(agent.backend).resume_is_cwd_keyed(agent)):
+        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
 
 
 def guard_codex_shared_cwd_before_call(cfg: DuetConfig,
                                        agent: Agent,
                                        first_turn_for_agent: bool) -> None:
-    if cfg.dry_run or agent.backend != "codex" or not shared_cwd_codex_peers(cfg):
-        return
-    if (not first_turn_for_agent
-            and agent.session_id
-            and not codex_session_is_uuid(agent)):
-        raise SystemExit(codex_shared_cwd_isolation_error(agent))
+    guard_cwd_keyed_resume_before_call(cfg, agent, first_turn_for_agent)
 
 
 def guard_codex_shared_cwd_after_call(cfg: DuetConfig,
                                       agent: Agent,
                                       first_turn_for_agent: bool) -> None:
-    if cfg.dry_run or agent.backend != "codex" or not first_turn_for_agent:
-        return
-    if shared_cwd_codex_peers(cfg) and not codex_session_is_uuid(agent):
-        raise SystemExit(codex_shared_cwd_isolation_error(agent))
+    guard_cwd_keyed_resume_after_call(cfg, agent, first_turn_for_agent)
 
 
 @dataclasses.dataclass
@@ -1033,10 +1075,11 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     """Returns (assistant_text, new_session_id)."""
     eff_cwd = agent.cwd_override or cwd
     if reasoning:
-        system_prompt = CLAUDE_REASONING_PROMPT_PREFIX.get(reasoning, "") + system_prompt
+        prefix = backend_adapter("claude").reasoning_prompt_prefix.get(reasoning, "")
+        system_prompt = prefix + system_prompt
     reasoning_args: list[str] = []
     if reasoning:
-        claude_value = CLAUDE_REASONING_MAP.get(reasoning, reasoning)
+        claude_value = backend_adapter("claude").reasoning_map.get(reasoning, reasoning)
         reasoning_args = ["--effort", claude_value]
     if dry:
         new_sid = agent.session_id or f"dry-claude-{agent.name}-{int(time.time())}"
@@ -1150,7 +1193,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
     reasoning_args: list[str] = []
     if effective:
-        codex_value = CODEX_REASONING_MAP.get(effective, effective)
+        codex_value = backend_adapter("codex").reasoning_map.get(effective, effective)
         # `medium` is Codex's default; only override when we actually want a
         # different effort level.
         if codex_value != "medium":
@@ -1221,6 +1264,64 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     return out.rstrip(), parsed_sid or agent.session_id or "codex-current"
 
 
+def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
+                         cfg: DuetConfig, first_turn: bool,
+                         stderr_log_path: Optional[pathlib.Path],
+                         pid_file_path: Optional[pathlib.Path],
+                         reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    return call_claude(
+        agent, system_prompt, message, cfg.cwd,
+        cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
+        reasoning=reasoning,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+        add_dirs=cfg.add_dirs,
+    )
+
+
+def _call_codex_backend(agent: Agent, system_prompt: str, message: str,
+                        cfg: DuetConfig, first_turn: bool,
+                        stderr_log_path: Optional[pathlib.Path],
+                        pid_file_path: Optional[pathlib.Path],
+                        reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    # Fast mode is scoped to coder-role codex agents so it can't silently
+    # downgrade a planner/reviewer when a user pairs `--reasoning max` with
+    # `--codex-fast`. Config validation in main() warns when no codex:coder
+    # agent exists at all.
+    fast = cfg.codex_fast and agent.role == "coder"
+    return call_codex(
+        agent, system_prompt, message, cfg.cwd,
+        cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
+        first_turn=first_turn,
+        reasoning=reasoning,
+        fast=fast,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
+
+
+BACKENDS = {
+    "claude": BackendAdapter(
+        name="claude",
+        binary="claude",
+        call=_call_claude_backend,
+        reasoning_map=CLAUDE_REASONING_MAP,
+        reasoning_prompt_prefix=CLAUDE_REASONING_PROMPT_PREFIX,
+        consumes_add_dirs=True,
+    ),
+    "codex": BackendAdapter(
+        name="codex",
+        binary="codex",
+        call=_call_codex_backend,
+        reasoning_map=CODEX_REASONING_MAP,
+        reasoning_prompt_prefix={},
+        supports_fast=True,
+        resume_is_cwd_keyed=codex_resume_is_cwd_keyed,
+    ),
+}
+SUPPORTED_BACKENDS = set(BACKENDS)
+
+
 def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool,
                *, run_dir: Optional[pathlib.Path] = None,
                turn_label: Optional[str] = None) -> str:
@@ -1235,31 +1336,13 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
     if run_dir is not None and turn_label is not None:
         log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
         pid_path = run_dir / f"turn-{turn_label}-{agent.name}.pid"
-    if agent.backend == "claude":
-        text, new_sid = call_claude(agent, sys_prompt, message, cfg.cwd,
-                                    cfg.permission_mode, cfg.per_turn_timeout, cfg.dry_run,
-                                    reasoning=reasoning,
-                                    stderr_log_path=log_path,
-                                    pid_file_path=pid_path,
-                                    add_dirs=cfg.add_dirs)
-        agent.session_id = new_sid
-        return text
-    if agent.backend == "codex":
-        # Fast mode is scoped to coder-role codex agents so it can't silently
-        # downgrade a planner/reviewer when a user pairs `--reasoning max`
-        # with `--codex-fast`. Config validation in main() warns when no
-        # codex:coder agent exists at all.
-        fast = cfg.codex_fast and agent.role == "coder"
-        text, new_sid = call_codex(agent, sys_prompt, message, cfg.cwd,
-                                   cfg.sandbox, cfg.per_turn_timeout, cfg.dry_run,
-                                   first_turn=first_turn_for_agent,
-                                   reasoning=reasoning,
-                                   fast=fast,
-                                   stderr_log_path=log_path,
-                                   pid_file_path=pid_path)
-        agent.session_id = new_sid
-        return text
-    raise SystemExit(f"unknown backend '{agent.backend}'")
+    adapter = backend_adapter(agent.backend)
+    text, new_sid = adapter.call(
+        agent, sys_prompt, message, cfg, first_turn_for_agent,
+        log_path, pid_path, reasoning,
+    )
+    agent.session_id = new_sid
+    return text
 
 
 def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
@@ -1632,7 +1715,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     caller — this handles only the mechanics of one turn.
     """
     first_turn_for_agent = not seen_first_turn[speaker.name]
-    guard_codex_shared_cwd_before_call(cfg, speaker, first_turn_for_agent)
+    guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
     t0 = time.time()
     inflight: Optional[tuple[threading.Event, threading.Thread]] = None
     if cfg.recap:
@@ -1666,7 +1749,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     if cfg.recap and inflight is not None:
         _stop_recap_inflight(*inflight)
     if call_succeeded:
-        guard_codex_shared_cwd_after_call(cfg, speaker, first_turn_for_agent)
+        guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn_for_agent)
     seen_first_turn[speaker.name] = True
     elapsed = time.time() - t0
     raw_reply = reply
@@ -1799,7 +1882,7 @@ def _derive_seed_or_failure(
     seed_t0 = time.time()
     try:
         if not cfg.kickoff and cfg.agents[0].session_id:
-            guard_codex_shared_cwd_before_call(
+            guard_cwd_keyed_resume_before_call(
                 cfg, cfg.agents[0], first_turn_for_agent=False
             )
         return derive_seed(cfg, run_dir=run_dir), None
@@ -2025,7 +2108,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
     if cfg.recap and inflight is not None:
         _stop_recap_inflight(*inflight)
     if call_succeeded:
-        guard_codex_shared_cwd_after_call(cfg, next_speaker, first_turn_for_agent)
+        guard_cwd_keyed_resume_after_call(cfg, next_speaker, first_turn_for_agent)
     elapsed = time.time() - t0
     seen_first_turn[next_speaker.name] = True
     raw_reply = reply
@@ -2104,7 +2187,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
         first_turn_for_agent = not seen_first_turn[next_speaker.name]
-        guard_codex_shared_cwd_before_call(cfg, next_speaker, first_turn_for_agent)
+        guard_cwd_keyed_resume_before_call(cfg, next_speaker, first_turn_for_agent)
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
         forced_msg = (
@@ -3290,9 +3373,10 @@ def main() -> int:
 
     # Sanity: are CLIs on PATH?
     if not cfg.dry_run:
-        for b in {a.backend for a in cfg.agents}:
-            if shutil.which(b) is None:
-                print(f"[duet] WARNING: '{b}' not on PATH — this run will fail. "
+        for backend in {a.backend for a in cfg.agents}:
+            binary = backend_adapter(backend).binary
+            if shutil.which(binary) is None:
+                print(f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "
                       f"Install it or use --dry-run.", file=sys.stderr)
 
     run_duet(cfg)
