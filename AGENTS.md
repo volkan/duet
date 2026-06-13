@@ -40,6 +40,11 @@ If this file and `CLAUDE.md` ever disagree, follow `CLAUDE.md`.
 - If a direct push to `main` is rejected or GitHub says required checks are
   expected, do not bypass the rule. Move the work to a topic branch and open a
   PR so the six required checks run normally.
+- When asked to merge work to `main`, use the PR merge process from
+  `CLAUDE.md`: confirm the PR contains the intended scope, wait for all six
+  required checks to pass, merge through GitHub with a Conventional Commit
+  title, delete the topic branch, and verify the post-merge `main` run. Do not
+  replace that with a direct push.
 - Keep changes scoped to the requested task and consistent with the existing
   single-file Python harness design.
 - Preserve the constraints documented in `CLAUDE.md`, especially the stdlib-only

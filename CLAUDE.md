@@ -85,6 +85,44 @@ protected by required status checks plus force-push/deletion blocking. If a push
 is rejected or GitHub reports required checks are expected, keep the protection
 in place and move the work to a topic branch + PR.
 
+### Merge/release-to-main checklist
+
+Treat every merge to `main` as a release of the repository state. Merge through
+GitHub; do not land work by pushing directly to `main`.
+
+Before merging:
+
+1. Confirm the PR diff matches the requested scope and does not include local
+   scratch files or unrelated generated artifacts.
+2. Confirm the PR title or squash commit title is a Conventional Commit.
+3. Confirm all six required checks are passing:
+   `test (py3.9)`, `test (py3.11)`, `test (py3.13)`,
+   `distribution metadata`, `plugin validate`, and `complexity gate`.
+4. For packaging/plugin changes, confirm `make package-check` and
+   `make plugin-check` were run locally or passed in CI. For PyPI releases,
+   stop before upload unless the owner explicitly approves publishing.
+
+Useful commands:
+
+```bash
+gh pr view <number> --json title,headRefName,baseRefName,mergeStateStatus
+gh pr checks <number>
+gh pr diff <number> --stat
+gh pr merge <number> --squash --delete-branch
+```
+
+After merging:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only
+gh run list --branch main --limit 3
+```
+
+Verify the latest `main` run is green. If it is not, treat the failed run as the
+next task and fix it through another topic branch + PR.
+
 ## Architecture you'll need to read multiple files to grasp
 
 ### Two state objects
