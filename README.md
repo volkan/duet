@@ -112,13 +112,18 @@ Plain `pip install duet-cli` works too, but the installed top-level module is
 named `duet`, which collides with Google's PyPI `duet` package in a shared
 environment — pipx/uvx isolation avoids that.
 
-Claude Code plugin — adds the `/duet` command (it shells out to the `duet`
-CLI, so install the binary with one of the methods above as well):
+Claude Code plugin — adds the `/duet` slash command. The plugin shells out to
+the `duet` CLI, so install the binary with one of the methods above first:
 
 ```text
 /plugin marketplace add volkan/duet
 /plugin install duet@volkan-duet
 ```
+
+Some Claude Code installs show the command as `/duet:duet` when namespacing is
+needed. For the full install checklist, default `/review` recipe, and
+troubleshooting notes, see
+[docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 
 CI (`.github/workflows/ci.yml`) runs the runtime checks on every PR across
 Python 3.9/3.11/3.13, plus required distribution metadata, package build,
@@ -176,9 +181,9 @@ The `/review` skill supplies the initial findings; duet handles the subsequent
 Codex fix turn, Claude verification turn, worktree diff handoff, and any extra
 rounds.
 
-With the `/duet` Claude Code command installed (the plugin from the install
-section above, or the manual skill copy in [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md)),
-plain `/duet` runs that same `/review` kickoff recipe.
+With the `/duet` Claude Code command installed (see
+[docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md)),
+plain `/duet` or `/duet:duet` runs that same `/review` kickoff recipe.
 
 Let duet run the upstream command inside the target project:
 

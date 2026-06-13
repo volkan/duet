@@ -209,9 +209,10 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 ### `/duet` Claude Code command (plugin or manual skill)
 
 Plain `/duet` runs Claude Code's real `/review` through duet, while still
-letting you pass any other upstream command. The primary install path is the
-plugin shipped in this repo (`.claude-plugin/plugin.json` +
-`.claude-plugin/marketplace.json` plus `commands/duet.md`):
+letting you pass any other upstream command. Some Claude Code installs expose
+the namespaced form `/duet:duet`.
+
+The primary install path is the plugin shipped in this repo:
 
 ```text
 /plugin marketplace add volkan/duet
@@ -221,63 +222,25 @@ plugin shipped in this repo (`.claude-plugin/plugin.json` +
 The `/duet` command shells out to the `duet` CLI, so the binary must be on
 PATH too: `make install` from a clone, `pipx install duet-cli`, or
 `pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml` (the
-PyPI package is `duet-cli`; the command it installs is `duet`).
+PyPI package is `duet-cli`; the command it installs is `duet`). The default
+recipe also needs `claude` and `codex` on PATH.
 
-If you can't use plugins, the manual fallback is copying the same command in
-as a user-level skill:
-
-````bash
-mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'
----
-name: duet
-description: Run Claude Code's real /review through the duet two-agent harness, or hand off another command's output to duet. Wraps `duet --task-from-cmd <shell>` so /review, gh, npm test, cat error.log, or another upstream tool can drive a two-agent loop. Use when asked to "duet on …", "run duet with …", "kick off duet from …", "run /review through duet", or "have duet pick up <some output>".
-argument-hint: "['<shell command>' extra duet flags…]"
-allowed-tools: Bash(*)
----
-
-# /duet
-
-## Prerequisite check
-
-First confirm the `duet` CLI is on PATH:
+The plugin command uses an explicit run root:
 
 ```bash
-command -v duet
+duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
+  --lead claude:reviewer --partner codex:coder \
+  --worktree --turns 6 \
+  --task-from-cmd 'claude -p /review'
 ```
 
-If it is not found, do NOT improvise an alternative. Stop and tell the user:
+Important: `--task-from-cmd` runs before duet allocates a run directory. For
+plain `/duet`, Claude Code may spend time in `claude -p /review` before
+`.duet/runs/<id>/` exists. Wait for `[duet] run: ...` in recap mode, or
+`[duet] run dir: ...` without recap, then use `duet --status <run_dir>`.
 
-> The `duet` CLI is not on PATH. Install it with `pipx install duet-cli`
-> (the package is `duet-cli`; the command it installs is `duet`), or clone
-> the repo (https://github.com/volkan/duet) and run `make install` (symlinks
-> `duet.py` to `~/.local/bin/duet`; make sure `~/.local/bin` is on PATH).
-> Then re-run `/duet`.
-
-## Run
-
-If `$ARGUMENTS` is empty, run exactly:
-
-```bash
-duet --recap --task-from-cmd 'claude -p /review' --cwd "$(pwd)" --lead claude:reviewer --partner codex:coder --worktree --turns 6
-```
-
-Otherwise run exactly:
-
-```bash
-duet --task-from-cmd $ARGUMENTS --cwd "$(pwd)" --partner codex:coder --worktree
-```
-
-After spawn, print the run dir + the `duet --status <run_dir>` hint.
-
-Notes:
-- The first quoted token of `$ARGUMENTS` is the shell command duet runs
-  for the kickoff. Anything after that is forwarded to duet (e.g.
-  `--turns 8`, `--reasoning high`, `--lead claude:reviewer`).
-- Plain `/duet` seeds the loop from Claude Code's real `/review` skill.
-  `/review` produces the kickoff; duet manages the Codex/Claude turns after
-  that.
-EOF
-````
+Full install checklist, custom examples, troubleshooting, and the manual skill
+fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
 
 ---
 
