@@ -146,7 +146,10 @@ Each agent keeps its own conversation memory:
   older builds fail clearly instead of losing multi-turn memory.
 - Copilot resumes with `copilot --resume=<session_id> -p ... --output-format json`.
   Duet requires Copilot CLI JSONL output with a final `sessionId`; missing or
-  malformed JSONL fails clearly instead of losing multi-turn memory.
+  malformed JSONL fails clearly instead of losing multi-turn memory. Copilot
+  turns run non-interactively with `--allow-all-tools`; use per-agent
+  `extra_args` such as `--deny-tool` or URL/path policy flags to narrow that
+  default.
 
 On each turn, duet sends the latest reply from one agent to the other. It
 continues until both agents accept convergence in back-to-back turns, `--turns`

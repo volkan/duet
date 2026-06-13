@@ -131,7 +131,7 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 ## Copilot-specific quirks
 
-- **JSONL `sessionId` is required.** `copilot -p ... --output-format json` emits a JSONL event stream; duet takes the last `assistant.message` content as the reply and the final `result.sessionId` as the resume handle. Missing or malformed JSONL stops with `agent_error` because multi-turn memory would be unsafe. There is no `--resume-copilot` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed Copilot agents.
+- **JSONL `sessionId` is required.** `copilot -p ... --output-format json` emits a JSONL event stream; duet takes the last `assistant.message` content as the reply, the final `result.sessionId` as the resume handle, and treats nonzero `result.exitCode` as `agent_error`. Missing or malformed JSONL stops with `agent_error` because multi-turn memory would be unsafe. There is no `--resume-copilot` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed Copilot agents.
 - **Permissions are Copilot-native.** `--sandbox` and `permission_mode` do not apply to Copilot. duet runs Copilot non-interactively with `--allow-all-tools`, sends the effective cwd via `-C`, and maps `add_dirs:` to repeated `--add-dir`. Use per-agent `extra_args` for Copilot's `--deny-tool`, URL/path policy, or broader `--allow-all` / `--yolo` modes.
 - **Reasoning names differ at the floor.** Copilot accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`; duet maps user-facing `minimal` to Copilot's `none`.
 

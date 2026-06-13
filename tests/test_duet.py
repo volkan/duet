@@ -402,6 +402,28 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("malformed JSONL", str(ctx.exception))
 
+    def test_copilot_result_exit_code_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return (
+                0,
+                "\n".join([
+                    '{"type":"assistant.message","data":{"content":"failed"}}',
+                    '{"type":"result","sessionId":"sid","exitCode":2}',
+                ]),
+                "",
+            )
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("exitCode=2", str(ctx.exception))
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -477,10 +499,11 @@ class TestParseCopilotJsonl(unittest.TestCase):
             '{"type":"result","sessionId":"copilot-session-123","exitCode":0}',
         ])
 
-        text, session_id = duet._parse_copilot_jsonl(out)
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
 
         self.assertEqual(text, "final")
         self.assertEqual(session_id, "copilot-session-123")
+        self.assertEqual(exit_code, 0)
 
     def test_extracts_text_from_list_content(self) -> None:
         out = "\n".join([
@@ -488,13 +511,14 @@ class TestParseCopilotJsonl(unittest.TestCase):
             '{"type":"result","sessionId":"sid","exitCode":0}',
         ])
 
-        text, session_id = duet._parse_copilot_jsonl(out)
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
 
         self.assertEqual(text, "hello world")
         self.assertEqual(session_id, "sid")
+        self.assertEqual(exit_code, 0)
 
     def test_empty_returns_no_session(self) -> None:
-        self.assertEqual(duet._parse_copilot_jsonl(""), ("", None))
+        self.assertEqual(duet._parse_copilot_jsonl(""), ("", None, None))
 
     def test_malformed_line_raises_value_error(self) -> None:
         with self.assertRaises(ValueError):

@@ -1377,10 +1377,11 @@ def _copilot_content_to_text(content: object) -> str:
     return "".join(parts)
 
 
-def _parse_copilot_jsonl(stdout: str) -> tuple[str, Optional[str]]:
-    """Return (last assistant message, sessionId) from Copilot JSONL output."""
+def _parse_copilot_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[int]]:
+    """Return (last assistant message, sessionId, result exitCode)."""
     assistant_text = ""
     session_id: Optional[str] = None
+    exit_code: Optional[int] = None
     for raw_line in stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -1403,7 +1404,13 @@ def _parse_copilot_jsonl(stdout: str) -> tuple[str, Optional[str]]:
             sid = event.get("sessionId")
             if sid:
                 session_id = str(sid)
-    return assistant_text.rstrip(), session_id
+            raw_exit_code = event.get("exitCode")
+            if raw_exit_code is not None:
+                try:
+                    exit_code = int(raw_exit_code)
+                except (TypeError, ValueError):
+                    pass
+    return assistant_text.rstrip(), session_id, exit_code
 
 
 def call_copilot(agent: Agent, system_prompt: str, message: str,
@@ -1463,11 +1470,16 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
         raise AgentRunError(reason, f"copilot exited {rc}\nstderr:\n{err}")
     try:
-        text, new_sid = _parse_copilot_jsonl(out)
+        text, new_sid, result_exit_code = _parse_copilot_jsonl(out)
     except ValueError as e:
         raise AgentRunError(
             FINISHED_AGENT_ERROR,
             f"copilot returned malformed JSONL output: {e}",
+        )
+    if result_exit_code not in (None, 0):
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"copilot result exitCode={result_exit_code}",
         )
     if not new_sid:
         raise AgentRunError(
