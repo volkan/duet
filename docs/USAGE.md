@@ -9,9 +9,9 @@ mode, force prompt, and session memory.
 
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
+- [Plugin entry points](#plugin-entry-points)
 - [Real loop test](#real-loop-test)
 - [Same-backend peering](#same-backend-peering)
-- [Plugin entry points](#plugin-entry-points)
 - [CLI flags](#cli-flags)
 - [Output layout and status mode](#output-layout-and-status-mode)
 - [How session memory works](#how-session-memory-works)
