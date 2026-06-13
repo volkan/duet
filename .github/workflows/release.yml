@@ -1,11 +1,12 @@
 name: release
 
-# Tag-triggered release: build -> publish to PyPI (Trusted Publishing / OIDC,
-# no stored secret) -> create the GitHub Release. Push an annotated `vX.Y.Z`
-# tag whose version matches the three lockstep manifests to fire it.
+# Release-triggered: when a GitHub Release for `vX.Y.Z` is published (via the
+# Releases UI or `gh release create`), build -> publish to PyPI (Trusted
+# Publishing / OIDC, no stored secret) -> attach the built dists to that Release.
+# The tag's version must match the three lockstep manifests.
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 # Least privilege: declaring `permissions` sets every unset scope to `none`,
 # so each job grants back only what it needs.
@@ -78,18 +79,17 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         # Trusted Publishing is the default: no username / password / token inputs.
 
-  github-release:
-    needs: pypi-publish # only after a successful upload
+  attach-artifacts:
+    needs: pypi-publish # only after a successful PyPI upload
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the GitHub Release
+      contents: write # upload assets onto the release that triggered this run
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
-      - name: Create GitHub Release
+      - name: Attach built distributions to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "duet $GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
