@@ -45,6 +45,8 @@ expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hel
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
 expect_stdout "reasoning xhigh accepted"     0 "reasoning=xhigh"    "$DUET" --task "x" --dry-run --cwd "$TMPD" --reasoning xhigh
+expect_stdout "gemini dry-run accepted"      0 "dry-run gemini/gemini-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1
+expect_stdout "gemini reasoning no effort"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1 --reasoning max
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)
@@ -645,6 +647,75 @@ resume = calls[-1]
 assert resume[:4] == ["codex", "exec", "resume", "--last"], resume
 assert "model_reasoning_effort=low" in resume, resume
 assert "model_reasoning_summary=concise" in resume, resume
+PY
+
+expect "gemini command args"                 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+cwd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, json.dumps({"response": "ok", "session_id": "gemini-sid"}), ""
+
+m._run = fake_run
+agent = m.Agent(
+    name="gemini-partner",
+    backend="gemini",
+    role="coder",
+    model="gemini-3-pro-preview",
+    extra_args=["--debug"],
+)
+m.call_gemini(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    "acceptEdits",
+    60,
+    dry=False,
+    first_turn=True,
+    reasoning="max",
+    add_dirs=[cwd.parent],
+)
+first = calls[-1]
+assert first[0] == "gemini", first
+assert "-p" in first, first
+assert "--output-format" in first and "json" in first, first
+assert "--approval-mode" in first and "auto_edit" in first, first
+assert "--model" in first and "gemini-3-pro-preview" in first, first
+assert "--include-directories" in first and str(cwd.parent) in first, first
+assert "--debug" in first, first
+assert "--sandbox" not in first, first
+assert "--permission-mode" not in first, first
+assert "-c" not in first, first
+assert "ultrathink" in first[first.index("-p") + 1], first
+
+agent.session_id = "gemini-sid"
+m.call_gemini(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    "bypassPermissions",
+    60,
+    dry=False,
+    first_turn=False,
+)
+resume = calls[-1]
+assert "--resume" in resume and "gemini-sid" in resume, resume
+assert "--approval-mode" in resume and "yolo" in resume, resume
 PY
 
 # Codex resume by parsed session UUID. call_codex must:

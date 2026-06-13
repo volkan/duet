@@ -322,6 +322,21 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("malformed JSON", str(ctx.exception))
 
+    def test_gemini_missing_session_id_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 0, '{"response":"ok"}', ""
+
+        agent = duet.Agent(name="gemini-partner", backend="gemini", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_gemini(
+                    agent, "sys", "msg", _ROOT, "acceptEdits", 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("session_id", str(ctx.exception))
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -384,6 +399,23 @@ class TestParseCodexSessionId(unittest.TestCase):
         # "codex-current" sentinel that legacy continue-mode plants.
         self.assertIsNotNone(duet._CODEX_UUID_RE.match(self.UUID))
         self.assertIsNone(duet._CODEX_UUID_RE.match("codex-current"))
+
+
+# ---------- _parse_gemini_session_id ----------
+
+
+class TestParseGeminiSessionId(unittest.TestCase):
+    def test_extracts_session_id_from_json_stdout(self) -> None:
+        stdout = '{"response":"ok","session_id":"gemini-session-123"}'
+        self.assertEqual(
+            duet._parse_gemini_session_id(stdout),
+            "gemini-session-123",
+        )
+
+    def test_missing_or_malformed_returns_none(self) -> None:
+        self.assertIsNone(duet._parse_gemini_session_id(""))
+        self.assertIsNone(duet._parse_gemini_session_id('{"response":"ok"}'))
+        self.assertIsNone(duet._parse_gemini_session_id("not json"))
 
 
 # ---------- parse_recap_headers ----------
@@ -553,7 +585,9 @@ class TestReasoningHelpers(unittest.TestCase):
             with self.subTest(level=level):
                 self.assertIn(level, duet.CLAUDE_REASONING_MAP)
                 self.assertIn(level, duet.CODEX_REASONING_MAP)
+                self.assertIn(level, duet.GEMINI_REASONING_MAP)
                 self.assertIn(level, duet.CLAUDE_REASONING_PROMPT_PREFIX)
+                self.assertIn(level, duet.GEMINI_REASONING_PROMPT_PREFIX)
 
     def test_codex_max_maps_to_xhigh(self) -> None:
         # Codex documents `xhigh` but not `max`; duet keeps `max` as a
@@ -567,6 +601,11 @@ class TestReasoningHelpers(unittest.TestCase):
     def test_claude_minimal_maps_to_low(self) -> None:
         # Claude has no `minimal`; we route it to `low`.
         self.assertEqual(duet.CLAUDE_REASONING_MAP["minimal"], "low")
+
+    def test_gemini_reasoning_map_emits_no_effort_value(self) -> None:
+        for level in duet.REASONING_LEVELS:
+            with self.subTest(level=level):
+                self.assertEqual(duet.GEMINI_REASONING_MAP[level], "")
 
 
 # ---------- parse_partner ----------
@@ -595,6 +634,12 @@ class TestParsePartner(unittest.TestCase):
             duet.parse_partner(":coder")
         with self.assertRaises(SystemExit):
             duet.parse_partner("")
+
+    def test_gemini_backend_with_role(self) -> None:
+        agent = duet.parse_partner("gemini:coder")
+        self.assertEqual(agent.backend, "gemini")
+        self.assertEqual(agent.role, "coder")
+        self.assertEqual(agent.name, "gemini-coder")
 
 
 # ---------- apply_resume_overrides ----------
