@@ -1386,6 +1386,9 @@ def _parse_copilot_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[int]
         line = raw_line.strip()
         if not line:
             continue
+        # With `--output-format json`, Copilot stdout is expected to be pure
+        # JSONL. Treat any banner/chatter as malformed so we fail before
+        # dropping the session handle or forwarding an ambiguous reply.
         try:
             event = json.loads(line)
         except json.JSONDecodeError as e:
