@@ -40,6 +40,40 @@ gh pr create --base main --fill
 Do not run `git push origin main`, `git push origin master`, or
 `git push --force origin main` for normal work.
 
+## Merge/release-to-main process
+
+Every merge to `main` releases a new repository state. Use this checklist before
+merging any PR:
+
+1. Review the PR diff and confirm it contains only the intended scope.
+2. Confirm the PR title or squash commit title follows Conventional Commits.
+3. Confirm all six required checks are green:
+   - `test (py3.9)`
+   - `test (py3.11)`
+   - `test (py3.13)`
+   - `distribution metadata`
+   - `plugin validate`
+   - `complexity gate`
+4. For packaging/plugin changes, confirm package and plugin validation ran
+   (`make package-check` and `make plugin-check`, or their CI equivalents).
+5. Merge through GitHub, preferably with squash merge and branch deletion:
+
+   ```sh
+   gh pr merge <number> --squash --delete-branch
+   ```
+
+6. After merging, sync local `main` and verify the post-merge CI run:
+
+   ```sh
+   git fetch origin
+   git switch main
+   git pull --ff-only
+   gh run list --branch main --limit 3
+   ```
+
+Do not use an admin direct push as the normal merge path. If a post-merge
+`main` run fails, fix it with another topic branch and PR.
+
 ## One-time setup (GitHub UI)
 
 Settings → Branches → Branch protection rules → Add rule for `main`:

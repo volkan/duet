@@ -740,6 +740,8 @@ Use this shortcut when:
 - The loop converged with pair-approved, rationale-backed `<<<LGTM>>>` turns.
 - You're fine with claude composing the message + PR description.
 - You'll skim the resulting commit / PR but don't need to micro-stage.
+- The final merge will still happen through the PR after all required checks
+  pass; do not use this shortcut to push directly to `main`.
 
 Skip it and use Case A/B below when:
 - You want to read the diff carefully and decide hunk-by-hunk.
