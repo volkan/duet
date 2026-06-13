@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
 PYPROJECT = ROOT / "pyproject.toml"
-FORBIDDEN_TEXT = "volkan.altan@vestiairecollective.com"
+FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
 README_ABSOLUTE_LINKS = [
     "https://github.com/volkan/duet/blob/main/docs/USAGE.md",
