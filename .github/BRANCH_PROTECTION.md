@@ -6,73 +6,9 @@ protection. Once required, GitHub blocks the merge button while any required
 check is failing or pending — while still letting a repo admin force-merge
 (the explicit escape hatch).
 
-## Day-to-day agent workflow
-
-The default branch is `main`, not `master`. Agents and automation should never
-push feature work directly to `main`; protected-branch failures are a signal to
-open a PR, not a rule to bypass.
-
-Use this flow before committing:
-
-```sh
-git fetch origin
-git switch main
-git pull --ff-only
-git switch -c <type>/<short-topic>
-```
-
-If edits already exist on `main`, keep them and create a branch before
-committing:
-
-```sh
-git switch -c <type>/<short-topic>
-```
-
-Before pushing, run `make ci`; for packaging or plugin changes also run
-`make package-check` and `make plugin-check`. Then push the branch and open a
-PR:
-
-```sh
-git push -u origin HEAD
-gh pr create --base main --fill
-```
-
-Do not run `git push origin main`, `git push origin master`, or
-`git push --force origin main` for normal work.
-
-## Merge/release-to-main process
-
-Every merge to `main` releases a new repository state. Use this checklist before
-merging any PR:
-
-1. Review the PR diff and confirm it contains only the intended scope.
-2. Confirm the PR title or squash commit title follows Conventional Commits.
-3. Confirm all six required checks are green:
-   - `test (py3.9)`
-   - `test (py3.11)`
-   - `test (py3.13)`
-   - `distribution metadata`
-   - `plugin validate`
-   - `complexity gate`
-4. For packaging/plugin changes, confirm package and plugin validation ran
-   (`make package-check` and `make plugin-check`, or their CI equivalents).
-5. Merge through GitHub, preferably with squash merge and branch deletion:
-
-   ```sh
-   gh pr merge <number> --squash --delete-branch
-   ```
-
-6. After merging, sync local `main` and verify the post-merge CI run:
-
-   ```sh
-   git fetch origin
-   git switch main
-   git pull --ff-only
-   gh run list --branch main --limit 3
-   ```
-
-Do not use an admin direct push as the normal merge path. If a post-merge
-`main` run fails, fix it with another topic branch and PR.
+For day-to-day branch, PR, and merge/release-to-main workflow, see
+`docs/AGENT_WORKFLOW.md`. This file documents the repository protection setup
+that enforces that workflow.
 
 ## One-time setup (GitHub UI)
 

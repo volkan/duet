@@ -722,7 +722,7 @@ claude --resume "$CLAUDE_SID"
 > If needed, create a topic branch first. Commit the changes from our duet
 > with a clear message that summarises what we did, push the branch, and open
 > a PR against main with a description that links back to the spec we agreed
-> on. Do not push directly to main or master.
+> on. Follow docs/AGENT_WORKFLOW.md; do not push directly to main or master.
 ```
 
 claude already knows the spec, exactly what codex changed (it reviewed the
@@ -741,7 +741,8 @@ Use this shortcut when:
 - You're fine with claude composing the message + PR description.
 - You'll skim the resulting commit / PR but don't need to micro-stage.
 - The final merge will still happen through the PR after all required checks
-  pass; do not use this shortcut to push directly to `main`.
+  pass; follow `docs/AGENT_WORKFLOW.md` and do not use this shortcut to push
+  directly to `main`.
 
 Skip it and use Case A/B below when:
 - You want to read the diff carefully and decide hunk-by-hunk.
