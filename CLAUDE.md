@@ -42,6 +42,49 @@ Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the ru
 5. `claude plugin validate .` (run via `make plugin-check`) — validates the Claude Code plugin with the real Claude Code CLI. CI installs the pinned CLI before running this job.
 6. `scripts/check_complexity.py` (run via `make complexity`) — stdlib AST cyclomatic-complexity/length gate (budget: CC ≤ 25, length ≤ 160). duet is single-file, so the only defense against sprawl is keeping individual functions small; this fails CI if any function exceeds budget. After a refactor, re-run it — the orchestration entrypoints (`run_duet`, `main`) sit a few points under budget, so a careless inline addition can trip it.
 
+## Required GitHub workflow for agents
+
+The default branch is `main`. Do not use `master` in commands, PR bases, docs,
+or automation for this repo.
+
+Agents and automation must not commit or push feature work directly to `main`.
+Start from an up-to-date `main`, create a topic branch, then commit there:
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only
+git switch -c <type>/<short-topic>
+```
+
+If edits were already made on `main`, preserve them by creating a branch before
+committing:
+
+```bash
+git switch -c <type>/<short-topic>
+```
+
+Before pushing, run the relevant local gates:
+
+```bash
+make ci
+# For package/plugin metadata changes:
+make package-check
+make plugin-check
+```
+
+Then push the current branch and open a PR against `main`:
+
+```bash
+git push -u origin HEAD
+gh pr create --base main --fill
+```
+
+Do not use `git push origin main` or `git push --force origin main`. `main` is
+protected by required status checks plus force-push/deletion blocking. If a push
+is rejected or GitHub reports required checks are expected, keep the protection
+in place and move the work to a topic branch + PR.
+
 ## Architecture you'll need to read multiple files to grasp
 
 ### Two state objects

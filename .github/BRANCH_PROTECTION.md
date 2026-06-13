@@ -6,6 +6,40 @@ protection. Once required, GitHub blocks the merge button while any required
 check is failing or pending — while still letting a repo admin force-merge
 (the explicit escape hatch).
 
+## Day-to-day agent workflow
+
+The default branch is `main`, not `master`. Agents and automation should never
+push feature work directly to `main`; protected-branch failures are a signal to
+open a PR, not a rule to bypass.
+
+Use this flow before committing:
+
+```sh
+git fetch origin
+git switch main
+git pull --ff-only
+git switch -c <type>/<short-topic>
+```
+
+If edits already exist on `main`, keep them and create a branch before
+committing:
+
+```sh
+git switch -c <type>/<short-topic>
+```
+
+Before pushing, run `make ci`; for packaging or plugin changes also run
+`make package-check` and `make plugin-check`. Then push the branch and open a
+PR:
+
+```sh
+git push -u origin HEAD
+gh pr create --base main --fill
+```
+
+Do not run `git push origin main`, `git push origin master`, or
+`git push --force origin main` for normal work.
+
 ## One-time setup (GitHub UI)
 
 Settings → Branches → Branch protection rules → Add rule for `main`:
