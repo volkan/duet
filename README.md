@@ -2,6 +2,9 @@
 
 Two CLI agents in conversation. One Python file. Stdlib only.
 
+Run them from your terminal, or drive the same loop inside Claude Code with
+the `/duet` slash command.
+
 `duet.py` runs two command-line coding agents, usually Claude and Codex, in
 alternating turns. Gemini CLI and GitHub Copilot CLI are also supported. You
 can mix backends or pair two agents from the same backend, such as Codex
@@ -18,6 +21,54 @@ Use duet when you want:
 - Isolation through an optional git worktree while the partner agent edits.
 
 ## Quick Start
+
+### Inside Claude Code (`/duet`)
+
+The `/duet` plugin is the fastest path if you already work inside Claude Code.
+It shells out to the `duet` CLI, so install the binary once and confirm Claude
+Code's shell can find it:
+
+```bash
+pipx install duet-cli
+command -v duet
+```
+
+From a clone, `make install` works too:
+
+```bash
+make install
+command -v duet
+```
+
+Then enable the plugin from inside Claude Code:
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
+/reload-plugins
+/duet
+```
+
+Some Claude Code installs expose the command as `/duet:duet` when namespacing
+is needed. Plain `/duet` runs Claude Code's real `/review` first, then uses
+duet to loop Codex and Claude in a worktree until convergence or the turn
+limit.
+
+Pass any upstream command as the kickoff text:
+
+```text
+/duet 'npm test 2>&1' --turns 4
+```
+
+For the full install checklist, default `/review` recipe, and troubleshooting
+notes, see
+[docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
+
+<!-- After recording, replace <ID> and uncomment:
+[![asciicast](https://asciinema.org/a/<ID>.svg)](https://asciinema.org/a/<ID>)
+-->
+
+### From the terminal
 
 Pair-programming pattern: plan with codex in its own session first, then hand
 the session id to duet — codex implements with the plan in context while
@@ -85,6 +136,8 @@ In the review recipe, Claude's `/review` runs once to produce the kickoff
 critique. Duet then hands that critique to Codex, preserves both agent
 sessions, and manages the back-and-forth until convergence or the turn limit.
 
+## Installation
+
 Install the `duet` command:
 
 ```bash
@@ -113,17 +166,19 @@ Plain `pip install duet-cli` works too, but the installed top-level module is
 named `duet`, which collides with Google's PyPI `duet` package in a shared
 environment — pipx/uvx isolation avoids that.
 
-Claude Code plugin — adds the `/duet` slash command. The plugin shells out to
-the `duet` CLI, so install the binary with one of the methods above first:
+Claude Code plugin — adds the `/duet` slash command. The plugin still shells
+out to the `duet` CLI, so `command -v duet` must pass in Claude Code's shell
+before `/duet` can run:
 
 ```text
 /plugin marketplace add volkan/duet
 /plugin install duet@volkan-duet
+/reload-plugins
 ```
 
 Some Claude Code installs show the command as `/duet:duet` when namespacing is
-needed. For the full install checklist, default `/review` recipe, and
-troubleshooting notes, see
+needed. The Quick Start above shows the shortest Claude Code flow. For the full
+install checklist, default `/review` recipe, and troubleshooting notes, see
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 
 CI (`.github/workflows/ci.yml`) runs the runtime checks on every PR across
@@ -191,6 +246,8 @@ rounds.
 With the `/duet` Claude Code command installed (see
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md)),
 plain `/duet` or `/duet:duet` runs that same `/review` kickoff recipe.
+Inside Claude Code, that is the shortest way to hand `/review` findings to the
+duet loop.
 
 Let duet run the upstream command inside the target project:
 

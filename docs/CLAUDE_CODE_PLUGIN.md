@@ -4,6 +4,43 @@ The Claude Code plugin installs the `/duet` slash command. It does not install
 the `duet`, `claude`, `codex`, or `gemini` binaries. The slash command shells
 out to the `duet` CLI on your PATH.
 
+## 30-Second Setup
+
+Install the `duet` CLI and confirm Claude Code's shell can find it:
+
+```bash
+pipx install duet-cli
+command -v duet
+```
+
+From this repository, `make install` is equivalent if `~/.local/bin` is on
+PATH:
+
+```bash
+make install
+command -v duet
+```
+
+Then run this inside Claude Code:
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
+/reload-plugins
+/duet
+```
+
+Use `/duet:duet` if your Claude Code install shows the namespaced command.
+Use `/plugin list` to inspect installed plugins, or
+`/plugin enable duet@volkan-duet` followed by `/reload-plugins` if the plugin
+was installed but disabled.
+
+Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
+
+<!-- After recording, replace <ID> and uncomment:
+[![asciicast](https://asciinema.org/a/<ID>.svg)](https://asciinema.org/a/<ID>)
+-->
+
 ## Install Checklist
 
 1. Install the `duet` CLI.
@@ -43,10 +80,11 @@ out to the `duet` CLI on your PATH.
    ```text
    /plugin marketplace add volkan/duet
    /plugin install duet@volkan-duet
+   /reload-plugins
    ```
 
    If Claude Code says the plugin is already installed globally, that is fine.
-   Use `/plugin` to inspect or manage the installed plugin.
+   Use `/plugin` or `/plugin list` to inspect or manage the installed plugin.
 
 ## Run It
 
@@ -141,6 +179,7 @@ end of the run.
 | Symptom | Fix |
 |---|---|
 | `/plugin install duet@volkan-duet` says the plugin is already installed globally | Nothing else is needed for the plugin. Use `/plugin` to inspect or manage it. |
+| `/duet` does not appear after install | Run `/reload-plugins`, then try `/duet` or `/duet:duet`. Use `/plugin list` to confirm the plugin is installed and enabled. |
 | `/duet` says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Claude Code's shell can resolve `command -v duet`. |
 | Plain `/duet` says `claude` is not on PATH | Install/authenticate Claude Code before using the default `/review` recipe. |
 | Plain `/duet` says `codex` is not on PATH | Install Codex, or pass a custom partner/config that does not use Codex. |

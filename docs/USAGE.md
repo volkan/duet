@@ -210,13 +210,16 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 
 Plain `/duet` runs Claude Code's real `/review` through duet, while still
 letting you pass any other upstream command. Some Claude Code installs expose
-the namespaced form `/duet:duet`.
+the namespaced form `/duet:duet`. The README's
+[Quick Start](../README.md#inside-claude-code-duet) leads with this Claude
+Code flow; this section is the concise command reference.
 
 The primary install path is the plugin shipped in this repo:
 
 ```text
 /plugin marketplace add volkan/duet
 /plugin install duet@volkan-duet
+/reload-plugins
 ```
 
 The `/duet` command shells out to the `duet` CLI, so the binary must be on
