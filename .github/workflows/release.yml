@@ -1,0 +1,95 @@
+name: release
+
+# Tag-triggered release: build -> publish to PyPI (Trusted Publishing / OIDC,
+# no stored secret) -> create the GitHub Release. Push an annotated `vX.Y.Z`
+# tag whose version matches the three lockstep manifests to fire it.
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege: declaring `permissions` sets every unset scope to `none`,
+# so each job grants back only what it needs.
+permissions: {}
+
+jobs:
+  gate:
+    # Fast subset of CI on the exact tagged tree. The full six required checks
+    # (py3.9/3.11/3.13 matrix, plugin validate, wheel smoke) already ran on main
+    # via branch protection; the ancestry check below is what enforces that the
+    # tag points at such a commit.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # full history for the ancestry check
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          [ "$TAG" = "$PKG" ] || { echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $PKG"; exit 1; }
+      - name: Tag commit is on main
+        run: |
+          git fetch --no-tags --quiet origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main; only gated, merged commits may be released"; exit 1; }
+      - name: Fast gate
+        run: make ci
+
+  build:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Validate artifacts match the manifest version
+        run: python scripts/check_distribution_metadata.py --artifacts dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/duet-cli
+    permissions:
+      id-token: write # OIDC token for PyPI Trusted Publishing; the only job with it
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        # Trusted Publishing is the default: no username / password / token inputs.
+
+  github-release:
+    needs: pypi-publish # only after a successful upload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "duet $GITHUB_REF_NAME" --generate-notes --verify-tag

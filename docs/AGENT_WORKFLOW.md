@@ -56,8 +56,10 @@ Before merging:
    `distribution metadata`, `plugin validate`, and `complexity gate`.
 4. For packaging/plugin changes, confirm `make package-check` was run locally
    or passed in CI, and confirm `make plugin-check` too when the Claude Code
-   plugin surface changed. For PyPI releases, stop before upload unless the
-   owner explicitly approves publishing.
+   plugin surface changed. PyPI publishing is **tag-triggered**: a `chore:
+   release X.Y.Z` merge only bumps the version; pushing the `vX.Y.Z` tag fires
+   `.github/workflows/release.yml`, which pauses for manual approval on the
+   `pypi` environment before uploading. Full runbook: [RELEASING.md](RELEASING.md).
 
 Useful commands:
 
