@@ -3,9 +3,10 @@
 duet ships from one repo three ways, all pinned to the same version string: the
 **`duet-cli` PyPI package** and the **Claude Code** + **Codex** plugins (which
 install from this GitHub repo). A release is a `chore: release X.Y.Z` commit that
-bumps the three lockstep manifests, merged to `main`, then an annotated `vX.Y.Z`
-tag. Pushing that tag fires `.github/workflows/release.yml`, which builds,
-publishes to PyPI, and creates the GitHub Release.
+bumps the three lockstep manifests, merged to `main`, then a **published GitHub
+Release** for `vX.Y.Z` (created in the Releases UI or via `gh release create`),
+which fires `.github/workflows/release.yml` to build, publish to PyPI, and attach
+the built distributions to that Release.
 
 ## How publishing works
 
@@ -17,9 +18,9 @@ presents a short-lived OIDC token that PyPI exchanges for a 15-minute upload
 token. Do **not** add `PYPI_USERNAME`/`PYPI_PASSWORD` — account passwords are not
 accepted for uploads, and Codespaces secrets are invisible to Actions anyway.
 
-`release.yml` is intentionally **not** a required PR check: it triggers on tags,
-not pull requests, so it never runs against a PR and is not part of branch
-protection.
+`release.yml` is intentionally **not** a required PR check: it triggers on
+published releases, not pull requests, so it never runs against a PR and is not
+part of branch protection.
 
 ## The three lockstep version locations
 
@@ -30,7 +31,7 @@ version). `scripts/check_distribution_metadata.py` fails if they disagree:
 - `.claude-plugin/plugin.json` — `"version": "..."`
 - `plugins/duet/.codex-plugin/plugin.json` — `"version": "..."`
 
-## One-time setup (required before the first tagged release)
+## One-time setup (required before the first release)
 
 These need PyPI / GitHub account access and are done once:
 
@@ -51,7 +52,7 @@ These need PyPI / GitHub account access and are done once:
 
 3. **Tag ruleset** (*Settings → Rules → Rulesets*) protecting `v*` — restrict who
    may create/delete release tags. PyPI's security notes recommend tag protection
-   for tag-triggered publishing.
+   for release-triggered publishing.
 
 ## Cutting a release
 
@@ -71,14 +72,21 @@ gh pr create --base main --title "chore: release X.Y.Z" --body "..."
 gh pr merge <num> --squash --delete-branch
 git switch main && git pull --ff-only && gh run list --branch main --limit 3
 
-# 3. Release = push the annotated tag (one-time setup above must be done first).
-git tag -a vX.Y.Z -m "duet X.Y.Z"
-git push origin vX.Y.Z
+# 3. Release = publish a GitHub Release for the tag (one-time setup must be done first).
+gh release create vX.Y.Z --target main --title "duet X.Y.Z" --generate-notes
+#    ...or GitHub UI -> Releases -> Draft a new release -> new tag vX.Y.Z, target main -> Publish.
 ```
 
-Pushing the tag runs `release.yml`: `gate` (tag==version, tag-on-main, fast
+Publishing the release runs `release.yml`: `gate` (tag==version, tag-on-main, fast
 `make ci`) → `build` (sdist+wheel, artifact/version validation) → **approve the
-`pypi` environment in the GitHub UI** → `pypi-publish` → `github-release`.
+`pypi` environment in the GitHub UI** → `pypi-publish` → `attach-artifacts`.
+
+The Release is created *before* the workflow runs (it is the trigger), so if `gate`,
+`build`, or `pypi-publish` fails you are left with a published Release that has no
+attached dists and nothing on PyPI. Recover by fixing the cause and re-cutting:
+`gh release delete vX.Y.Z --cleanup-tag --yes`, then create the release again. PyPI
+versions are immutable, so if PyPI already *partially* uploaded, bump to the next
+patch instead of reusing the version.
 
 ## Verify
 
