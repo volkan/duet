@@ -291,12 +291,14 @@ heuristic) followed by `scripts/smoke.sh` dry-run cases that exercise the
 CLI surface and exit-code contract). Use `make unit-test` or
 `make smoke-test` to run just one half.
 
-`make ci` runs the full merge gate — `make test` plus `make reasoning-check`
-(the reasoning-effort translation check) and `make complexity` (a stdlib
-cyclomatic-complexity/length budget that guards this single file against
-sprawl). The same checks run on every PR via `.github/workflows/ci.yml` across
-Python 3.9/3.11/3.13; `.github/BRANCH_PROTECTION.md` shows how to make them
-required (admins keep a force-merge escape hatch).
+`make ci` runs the fast local merge gate — `make test` plus
+`make reasoning-check` (the reasoning-effort translation check),
+`make complexity` (a stdlib cyclomatic-complexity/length budget that guards
+this single file against sprawl), and `make distribution-check` (source
+package/plugin metadata validation). GitHub Actions also runs package artifact
+validation, an installed-wheel smoke test, and `claude plugin validate .` on
+every PR; `.github/BRANCH_PROTECTION.md` shows how to make all jobs required
+(admins keep a force-merge escape hatch).
 
 To check the actual product loop with real agents, run:
 

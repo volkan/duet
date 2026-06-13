@@ -87,11 +87,13 @@ Install the `duet` command:
 
 ```bash
 make install      # symlinks duet.py to ~/.local/bin/duet
-make ci           # everything the CI gate runs: unit + reasoning + smoke + complexity
+make ci           # fast local gate: unit + reasoning + smoke + complexity + source metadata
 make test         # unit tests (tests/test_duet.py) + scripts/smoke.sh dry-run checks
 make unit-test    # only the stdlib unittest suite under tests/
 make smoke-test   # only scripts/smoke.sh dry-run regression checks
 make complexity   # cyclomatic-complexity/length gate (single-file sprawl guard)
+make package-check # build sdist/wheel and validate packaged metadata
+make plugin-check # validate the Claude Code plugin manifest with claude
 make build        # sdist + wheel into dist/ (needs: python3 -m pip install build)
 make loop-test    # slow real Claude/Codex loop checks; writes runs/test-loop/
 ```
@@ -117,9 +119,11 @@ CLI, so install the binary with one of the methods above as well):
 /plugin install duet@volkan-duet
 ```
 
-CI (`.github/workflows/ci.yml`) runs `make ci`'s checks on every PR across
-Python 3.9/3.11/3.13. To make them block merges, mark them required in branch
-protection — see [`.github/BRANCH_PROTECTION.md`](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md)
+CI (`.github/workflows/ci.yml`) runs the runtime checks on every PR across
+Python 3.9/3.11/3.13, plus required distribution metadata, package build,
+installed-wheel smoke, plugin validation, and complexity jobs. To make them
+block merges, mark them required in branch protection — see
+[`.github/BRANCH_PROTECTION.md`](https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md)
 (admins can still force-merge).
 
 ## How It Works

@@ -14,12 +14,15 @@ Two packaging shims sit beside the file without changing its shape: `pyproject.t
 
 ```bash
 make install            # symlink duet.py → ~/.local/bin/duet (PREFIX= to override)
-make ci                 # everything the CI merge gate runs (unit + reasoning + smoke + complexity)
+make ci                 # fast local gate: unit + reasoning + smoke + complexity + source metadata
 make test               # unit tests (tests/test_duet.py) + scripts/smoke.sh
 make unit-test          # only the stdlib unittest suite under tests/
 make smoke-test         # only scripts/smoke.sh dry-run cases
 make complexity         # cyclomatic-complexity/length gate (scripts/check_complexity.py)
 make reasoning-check    # reasoning-effort translation check (scripts/check_reasoning_levels.py)
+make distribution-check # validate pyproject/plugin manifests and source metadata
+make package-check      # build sdist/wheel and validate packaged metadata
+make plugin-check       # validate the Claude Code plugin manifest with claude
 make loop-test          # real Claude/Codex E2E loop suite; slow, writes runs/test-loop/
 make build              # sdist+wheel into dist/ (needs: python3 -m pip install build)
 make uninstall
@@ -30,12 +33,14 @@ make uninstall
 ./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
 ```
 
-Four regression nets, in order of granularity. `.github/workflows/ci.yml` runs all four on every PR (unit + reasoning + smoke on Python 3.9/3.11/3.13, complexity once) — `make ci` runs the same set locally. They are advisory until marked **required** in branch protection; see `.github/BRANCH_PROTECTION.md` (admins can still force-merge).
+Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the runtime checks on every PR (unit + reasoning + smoke on Python 3.9/3.11/3.13), plus source/package metadata validation, Claude Code plugin validation, and complexity once. `make ci` runs the fast local subset that does not install external CLIs or build frontends. All jobs are advisory until marked **required** in branch protection; see `.github/BRANCH_PROTECTION.md` (admins can still force-merge).
 
 1. `tests/test_duet.py` (run via `make unit-test` or `python3 -m unittest discover -s tests`) — pure-function unit tests, stdlib `unittest` only. Covers `_convergence_markers` / `convergence_proposed`, `_parse_codex_session_id`, `parse_recap_headers`, `extract_files_heuristic`, the reasoning maps + `validate_reasoning` / `effective_reasoning`, `parse_partner`, `_markdown_fence`, `_humanize_age`, `derive_status_heuristic`, `_next_speaker_idx_from_state`, `_format_byte_size`, `normalize_verify_cmd`, and `_resolve_opt_path`. No subprocesses, no filesystem writes, no agent CLIs — runs in well under a second. Add a test in the same commit as any change to those helpers.
 2. `scripts/smoke.sh` (run via `make smoke-test` or as part of `make test`) — the integration net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
 3. `scripts/check_reasoning_levels.py` (run via `make reasoning-check`) — monkey-patches `_run` and asserts each reasoning level emits the right backend cmd; the executable half of invariant 1 below.
-4. `scripts/check_complexity.py` (run via `make complexity`) — stdlib AST cyclomatic-complexity/length gate (budget: CC ≤ 25, length ≤ 160). duet is single-file, so the only defense against sprawl is keeping individual functions small; this fails CI if any function exceeds budget. After a refactor, re-run it — the orchestration entrypoints (`run_duet`, `main`) sit a few points under budget, so a careless inline addition can trip it.
+4. `scripts/check_distribution_metadata.py` (run via `make distribution-check`, and after builds via `python3 scripts/check_distribution_metadata.py --artifacts dist`) — validates `pyproject.toml`, plugin manifests, version lockstep, the forbidden employer-email regression, and built wheel/sdist metadata including absolute README links.
+5. `claude plugin validate .` (run via `make plugin-check`) — validates the Claude Code plugin with the real Claude Code CLI. CI installs the pinned CLI before running this job.
+6. `scripts/check_complexity.py` (run via `make complexity`) — stdlib AST cyclomatic-complexity/length gate (budget: CC ≤ 25, length ≤ 160). duet is single-file, so the only defense against sprawl is keeping individual functions small; this fails CI if any function exceeds budget. After a refactor, re-run it — the orchestration entrypoints (`run_duet`, `main`) sit a few points under budget, so a careless inline addition can trip it.
 
 ## Architecture you'll need to read multiple files to grasp
 
