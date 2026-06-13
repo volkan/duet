@@ -1,7 +1,7 @@
 """Unit tests for duet.py pure functions.
 
 These tests cover the correctness-critical helpers that `scripts/smoke.sh`
-can't observe through exit codes alone: convergence detection, codex
+can't observe through exit codes alone: convergence detection, codex/copilot
 session-id parsing, recap header parsing, file-path heuristics, reasoning
 mappings, partner-spec parsing, markdown-fence sizing, and the age
 formatter. They are pure-function tests — no subprocesses, no filesystem
@@ -368,6 +368,92 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("malformed JSON", str(ctx.exception))
 
+    def test_copilot_missing_session_id_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return (
+                0,
+                '{"type":"assistant.message","data":{"content":"ok"}}\n',
+                "",
+            )
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("sessionId", str(ctx.exception))
+
+    def test_malformed_copilot_jsonl_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 0, "not json\n", ""
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("malformed JSONL", str(ctx.exception))
+
+    def test_copilot_result_exit_code_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return (
+                0,
+                "\n".join([
+                    '{"type":"assistant.message","data":{"content":"failed"}}',
+                    '{"type":"result","sessionId":"sid","exitCode":2}',
+                ]),
+                "",
+            )
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("exitCode=2", str(ctx.exception))
+
+    def test_copilot_rc_124_maps_to_timeout(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 124, "", "[duet] TIMEOUT after 1s"
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 1,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_TIMEOUT)
+        self.assertIn("copilot exited 124", str(ctx.exception))
+
+    def test_copilot_nonzero_rc_maps_to_agent_error(self) -> None:
+        def fake_run(cmd, **kwargs):
+            return 2, "", "backend failed"
+
+        agent = duet.Agent(name="copilot-partner", backend="copilot", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_copilot(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("copilot exited 2", str(ctx.exception))
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -430,6 +516,60 @@ class TestParseCodexSessionId(unittest.TestCase):
         # "codex-current" sentinel that legacy continue-mode plants.
         self.assertIsNotNone(duet._CODEX_UUID_RE.match(self.UUID))
         self.assertIsNone(duet._CODEX_UUID_RE.match("codex-current"))
+
+
+# ---------- _parse_copilot_jsonl ----------
+
+
+class TestParseCopilotJsonl(unittest.TestCase):
+    def test_extracts_last_assistant_message_and_result_session_id(self) -> None:
+        out = "\n".join([
+            '{"type":"assistant.message","data":{"content":"draft"}}',
+            '{"type":"assistant.message","data":{"content":"final"}}',
+            '{"type":"result","sessionId":"copilot-session-123","exitCode":0}',
+        ])
+
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
+
+        self.assertEqual(text, "final")
+        self.assertEqual(session_id, "copilot-session-123")
+        self.assertEqual(exit_code, 0)
+
+    def test_extracts_text_from_list_content(self) -> None:
+        out = "\n".join([
+            '{"type":"assistant.message","data":{"content":[{"text":"hello"},{"content":" world"}]}}',
+            '{"type":"result","sessionId":"sid","exitCode":0}',
+        ])
+
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
+
+        self.assertEqual(text, "hello world")
+        self.assertEqual(session_id, "sid")
+        self.assertEqual(exit_code, 0)
+
+    def test_empty_trailing_content_does_not_overwrite_reply(self) -> None:
+        # Real Copilot streams can emit an empty assistant.message before and/or
+        # after the substantive one; the `if text:` guard must keep the last
+        # NON-EMPTY reply rather than letting a blank event clobber it.
+        out = "\n".join([
+            '{"type":"assistant.message","data":{"content":""}}',
+            '{"type":"assistant.message","data":{"content":"the real answer"}}',
+            '{"type":"assistant.message","data":{"content":[]}}',
+            '{"type":"result","sessionId":"sid","exitCode":0}',
+        ])
+
+        text, session_id, exit_code = duet._parse_copilot_jsonl(out)
+
+        self.assertEqual(text, "the real answer")
+        self.assertEqual(session_id, "sid")
+        self.assertEqual(exit_code, 0)
+
+    def test_empty_returns_no_session(self) -> None:
+        self.assertEqual(duet._parse_copilot_jsonl(""), ("", None, None))
+
+    def test_malformed_line_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            duet._parse_copilot_jsonl("not json")
 
 
 # ---------- _parse_gemini_session_id ----------
@@ -617,8 +757,10 @@ class TestReasoningHelpers(unittest.TestCase):
                 self.assertIn(level, duet.CLAUDE_REASONING_MAP)
                 self.assertIn(level, duet.CODEX_REASONING_MAP)
                 self.assertIn(level, duet.GEMINI_REASONING_MAP)
+                self.assertIn(level, duet.COPILOT_REASONING_MAP)
                 self.assertIn(level, duet.CLAUDE_REASONING_PROMPT_PREFIX)
                 self.assertIn(level, duet.GEMINI_REASONING_PROMPT_PREFIX)
+                self.assertIn(level, duet.COPILOT_REASONING_PROMPT_PREFIX)
 
     def test_codex_max_maps_to_xhigh(self) -> None:
         # Codex documents `xhigh` but not `max`; duet keeps `max` as a
@@ -632,6 +774,10 @@ class TestReasoningHelpers(unittest.TestCase):
     def test_claude_minimal_maps_to_low(self) -> None:
         # Claude has no `minimal`; we route it to `low`.
         self.assertEqual(duet.CLAUDE_REASONING_MAP["minimal"], "low")
+
+    def test_copilot_minimal_maps_to_none(self) -> None:
+        # Copilot names its lowest documented effort level `none`.
+        self.assertEqual(duet.COPILOT_REASONING_MAP["minimal"], "none")
 
     def test_gemini_reasoning_map_emits_no_effort_value(self) -> None:
         for level in duet.REASONING_LEVELS:
@@ -671,6 +817,12 @@ class TestParsePartner(unittest.TestCase):
         self.assertEqual(agent.backend, "gemini")
         self.assertEqual(agent.role, "coder")
         self.assertEqual(agent.name, "gemini-coder")
+
+    def test_copilot_backend_with_role(self) -> None:
+        agent = duet.parse_partner("copilot:coder")
+        self.assertEqual(agent.backend, "copilot")
+        self.assertEqual(agent.role, "coder")
+        self.assertEqual(agent.name, "copilot-coder")
 
 
 # ---------- apply_resume_overrides ----------

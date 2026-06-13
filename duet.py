@@ -28,6 +28,8 @@ Each agent keeps its own session across turns:
     UUID makes resume robust to parallel Codex sessions sharing the cwd, but
     `--last` is still keyed on cwd — use `--worktree` to isolate duet's Codex
     cwd from the host repo when no UUID is available.
+  - Copilot: `copilot -p ... --output-format json`; subsequent turns use
+    `copilot --resume=<sessionId>` from the JSONL result event.
 
 Transcript is always logged to runs/<ts>/transcript.md for humans, but each
 prompt sent to an agent is just the latest counterpart message — keeping
@@ -209,6 +211,18 @@ GEMINI_REASONING_MAP = {level: "" for level in REASONING_LEVELS}
 # read-only constants.
 GEMINI_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
 
+# Copilot CLI accepts none/low/medium/high/xhigh/max via `--effort`. Map
+# duet's `minimal` abstraction to Copilot's lowest documented value.
+COPILOT_REASONING_MAP = {
+    "minimal": "none",
+    "low":     "low",
+    "medium":  "medium",
+    "high":    "high",
+    "xhigh":   "xhigh",
+    "max":     "max",
+}
+COPILOT_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
+
 # Map duet's existing Claude-flavored permission mode knob to Gemini CLI's
 # approval vocabulary. Unknown values pass through so advanced users can try
 # newer Gemini modes without waiting for a duet release.
@@ -288,7 +302,7 @@ class DuetConfig:
     per_turn_timeout: int = DEFAULT_TIMEOUT
     runs_dir: pathlib.Path = pathlib.Path("runs")
     sandbox: str = "workspace-write"          # codex
-    permission_mode: str = "acceptEdits"      # claude
+    permission_mode: str = "acceptEdits"      # claude/gemini
     dry_run: bool = False
     recap: bool = False
     verify_cmd: Optional[str] = None          # shell command that must pass before
@@ -1347,6 +1361,143 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
     return (payload.get("response") or "").rstrip(), new_sid
 
 
+def _copilot_content_to_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            text = item.get("text") or item.get("content")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _parse_copilot_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[int]]:
+    """Return (last assistant message, sessionId, result exitCode)."""
+    assistant_text = ""
+    session_id: Optional[str] = None
+    exit_code: Optional[int] = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # With `--output-format json`, Copilot stdout is expected to be pure
+        # JSONL. Treat any banner/chatter as malformed so we fail before
+        # dropping the session handle or forwarding an ambiguous reply.
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as e:
+            snippet = line[:200]
+            raise ValueError(f"malformed JSONL line: {snippet!r}") from e
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "assistant.message":
+            data = event.get("data") or {}
+            if isinstance(data, dict):
+                text = _copilot_content_to_text(data.get("content"))
+                if text:
+                    assistant_text = text
+        elif event_type == "result":
+            sid = event.get("sessionId")
+            if sid:
+                session_id = str(sid)
+            raw_exit_code = event.get("exitCode")
+            if raw_exit_code is not None:
+                try:
+                    exit_code = int(raw_exit_code)
+                except (TypeError, ValueError):
+                    pass
+    return assistant_text.rstrip(), session_id, exit_code
+
+
+def call_copilot(agent: Agent, system_prompt: str, message: str,
+                 cwd: pathlib.Path, timeout: int, dry: bool,
+                 first_turn: bool, reasoning: Optional[str] = None,
+                 stderr_log_path: Optional[pathlib.Path] = None,
+                 pid_file_path: Optional[pathlib.Path] = None,
+                 add_dirs: Optional[list[pathlib.Path]] = None) -> tuple[str, Optional[str]]:
+    """Returns (assistant_text, new_session_id) from Copilot CLI JSONL."""
+    _ = first_turn
+    eff_cwd = agent.cwd_override or cwd
+    if reasoning:
+        prefix = backend_adapter("copilot").reasoning_prompt_prefix.get(reasoning, "")
+        system_prompt = prefix + system_prompt
+    if dry:
+        new_sid = agent.session_id or f"dry-copilot-{agent.name}-{int(time.time())}"
+        wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
+        rn = f" reasoning={reasoning}" if reasoning else ""
+        return (
+            f"[dry-run copilot/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            "LGTM rationale: dry-run accepted the harness path and has no real "
+            "agent output to review.\n"
+            f"{DEFAULT_SENTINEL}"
+        ), new_sid
+
+    full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    cmd = [
+        "copilot",
+        "-C", str(eff_cwd),
+        "--output-format", "json",
+        "--stream", "off",
+        "--no-color",
+        "--no-auto-update",
+        "--allow-all-tools",
+    ]
+    if agent.session_id:
+        cmd.append(f"--resume={agent.session_id}")
+    if reasoning:
+        value = backend_adapter("copilot").reasoning_map.get(reasoning, reasoning)
+        cmd += ["--effort", value]
+    if agent.model:
+        cmd += ["--model", agent.model]
+    for d in (add_dirs or []):
+        cmd += ["--add-dir", str(d)]
+    cmd += agent.extra_args
+    cmd += ["-p", full_prompt]
+    rc, out, err = _agent_run(
+        cmd,
+        backend="copilot",
+        cwd=eff_cwd,
+        stdin=None,
+        timeout=timeout,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
+    if rc != 0:
+        reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+        raise AgentRunError(reason, f"copilot exited {rc}\nstderr:\n{err}")
+    try:
+        text, new_sid, result_exit_code = _parse_copilot_jsonl(out)
+    except ValueError as e:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"copilot returned malformed JSONL output: {e}",
+        )
+    # The `result` event's exitCode is the Copilot agent's own exit status, not
+    # the exit code of any shell/tool the agent ran during the turn — a verified
+    # turn that runs a failing inner command still reports exitCode 0. So a
+    # nonzero value here means the agent itself errored out; treat it as
+    # agent_error rather than forwarding a broken reply.
+    if result_exit_code not in (None, 0):
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"copilot result exitCode={result_exit_code}",
+        )
+    if not new_sid:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            "copilot JSONL output did not include sessionId; duet requires a "
+            "Copilot CLI build with JSON sessionId support for multi-turn memory.",
+        )
+    return text, new_sid
+
+
 def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
                          cfg: DuetConfig, first_turn: bool,
                          stderr_log_path: Optional[pathlib.Path],
@@ -1399,6 +1550,22 @@ def _call_gemini_backend(agent: Agent, system_prompt: str, message: str,
     )
 
 
+def _call_copilot_backend(agent: Agent, system_prompt: str, message: str,
+                          cfg: DuetConfig, first_turn: bool,
+                          stderr_log_path: Optional[pathlib.Path],
+                          pid_file_path: Optional[pathlib.Path],
+                          reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    return call_copilot(
+        agent, system_prompt, message, cfg.cwd,
+        cfg.per_turn_timeout, cfg.dry_run,
+        first_turn=first_turn,
+        reasoning=reasoning,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+        add_dirs=cfg.add_dirs,
+    )
+
+
 BACKENDS = {
     "claude": BackendAdapter(
         name="claude",
@@ -1421,6 +1588,13 @@ BACKENDS = {
         call=_call_gemini_backend,
         reasoning_map=GEMINI_REASONING_MAP,
         reasoning_prompt_prefix=GEMINI_REASONING_PROMPT_PREFIX,
+    ),
+    "copilot": BackendAdapter(
+        name="copilot",
+        binary="copilot",
+        call=_call_copilot_backend,
+        reasoning_map=COPILOT_REASONING_MAP,
+        reasoning_prompt_prefix=COPILOT_REASONING_PROMPT_PREFIX,
     ),
 }
 SUPPORTED_BACKENDS = set(BACKENDS)
@@ -1699,7 +1873,7 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
     if cfg.task:
         return cfg.task
     raise SystemExit("nothing to start the conversation with — supply --task, "
-                     "--kickoff, or --resume-claude <session_id>")
+                     "--kickoff, or a lead agent session_id")
 
 
 def _setup_run_worktree(
@@ -1957,7 +2131,7 @@ def _dry_run_recap_state(cfg: DuetConfig, transcript_path: pathlib.Path,
     agent calls are stubbed); only the recap variant short-circuits here."""
     if not (cfg.task or cfg.kickoff or cfg.agents[0].session_id):
         raise SystemExit("nothing to start the conversation with — supply --task, "
-                         "--kickoff, or --resume-claude <session_id>")
+                         "--kickoff, or a lead agent session_id")
     write_text_atomic(transcript_path, "")
     state = _build_run_state(
         cfg, turns_used=0, history=history, finished_reason="dry_run",
@@ -3194,9 +3368,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default="codex:coder",
-                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder (default codex:coder)")
+                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder (default codex:coder)")
     ap.add_argument("--lead", default="claude:planner",
-                    help="lead agent spec, e.g. claude:planner, gemini:reviewer (default; ignored if --resume-claude given)")
+                    help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--cwd", default=".", help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=DEFAULT_SENTINEL,
@@ -3209,9 +3383,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",
-                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini.")
+                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot.")
     ap.add_argument("--permission-mode", default="acceptEdits",
-                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode")
+                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot.")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     ap.add_argument("--worktree", action="store_true",
                     help="run the partner agent in a throwaway git worktree on a fresh branch; "
@@ -3230,14 +3404,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
     ap.add_argument("--add-dir", action="append", metavar="PATH", default=[],
                     dest="add_dirs",
-                    help="extra path claude/gemini may access outside cwd. "
-                         "Repeatable. Claude receives --add-dir; Gemini receives "
-                         "--include-directories. YAML key: `add_dirs:` (list).")
+                    help="extra path claude/gemini/copilot may access outside cwd. "
+                         "Repeatable. Claude and Copilot receive --add-dir; "
+                         "Gemini receives --include-directories. YAML key: "
+                         "`add_dirs:` (list).")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
                          "`-c model_reasoning_effort=<v>` except for medium "
                          "(max → xhigh). Claude: passes `--effort <v>` "
                          "(minimal → low) and adds high/xhigh/max prompt nudges. "
+                         "Copilot: passes `--effort <v>` (minimal → none). "
                          "Gemini: no effort flag; high/xhigh/max are prompt nudges only.")
     ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
                     help="Codex-only fast mode: pin codex coder turns to "

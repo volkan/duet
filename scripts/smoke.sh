@@ -47,6 +47,8 @@ expect "task literal still works"            0 "$DUET" --task "literal" --dry-ru
 expect_stdout "reasoning xhigh accepted"     0 "reasoning=xhigh"    "$DUET" --task "x" --dry-run --cwd "$TMPD" --reasoning xhigh
 expect_stdout "gemini dry-run accepted"      0 "dry-run gemini/gemini-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1
 expect_stdout "gemini reasoning no effort"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1 --reasoning max
+expect_stdout "copilot dry-run accepted"     0 "dry-run copilot/copilot-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1
+expect_stdout "copilot reasoning accepted"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1 --reasoning max
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)
@@ -78,6 +80,15 @@ expect "same-backend claude dry-run slots"   0 bash -c '
     || { echo "missing claude partner turn"; echo "$out"; exit 1; }
   echo "$out" | grep -q "Turn 2 :: claude-lead" \
     || { echo "missing claude lead turn"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
+expect "same-backend copilot dry-run slots" 0 bash -c '
+  out=$("$1" --task "x" --turns 2 --dry-run --cwd "$2" \
+         --lead copilot:planner --partner copilot:coder)
+  echo "$out" | grep -q "Turn 1 :: copilot-partner" \
+    || { echo "missing copilot partner turn"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: copilot-lead" \
+    || { echo "missing copilot lead turn"; echo "$out"; exit 1; }
   exit 0
 ' _ "$DUET_ABS" "$TMPD"
 echo "kickoff from file" > "$TMPD/k.txt"

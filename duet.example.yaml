@@ -14,6 +14,7 @@ dry_run: false
 # Optional reasoning effort for both agents:
 # minimal | low | medium | high | xhigh | max
 # Codex: max maps to xhigh. Claude: minimal maps to low.
+# Copilot: minimal maps to none.
 # Gemini: no effort flag; high/xhigh/max are prompt nudges only.
 # reasoning: high
 
@@ -23,6 +24,9 @@ dry_run: false
 # - Gemini maps permission_mode to --approval-mode:
 #   default -> default, acceptEdits -> auto_edit, plan -> plan,
 #   bypassPermissions -> yolo.
+# - Copilot runs non-interactively with --allow-all-tools, receives add_dirs as
+#   repeated --add-dir, and can be further scoped with extra_args such as
+#   --deny-tool / --allow-url.
 
 # Optional: shell command that must exit 0 before a valid LGTM+rationale
 # convergence proposal can count. Runs in the worktree when worktree mode has
@@ -119,3 +123,19 @@ agents:
 #     role: reviewer
 #     # model: gemini-3-pro-preview
 #     # session_id: gemini-session-id-from-state-json
+#
+# Copilot planner + Copilot coder. Copilot requires a CLI build whose
+# `--output-format json` stream ends with a result `sessionId`; duet stops with
+# agent_error if that field is missing. `add_dirs:` is passed to Copilot as
+# repeated --add-dir.
+# worktree: true
+# agents:
+#   - name: copilot-lead
+#     backend: copilot
+#     role: planner
+#   - name: copilot-partner
+#     backend: copilot
+#     role: coder
+#     # model: gpt-5.2
+#     # session_id: copilot-session-id-from-state-json
+#     # extra_args: ["--allow-url=github.com"]
