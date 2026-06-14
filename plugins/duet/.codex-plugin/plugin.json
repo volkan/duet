@@ -1,6 +1,6 @@
 {
   "name": "duet",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Run the duet two-agent CLI harness from Codex as a reusable skill.",
   "author": {
     "name": "Volkan Altan",
