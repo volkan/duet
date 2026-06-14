@@ -26,6 +26,38 @@ a worktree until they converge. Pass any upstream command as the kickoff:
 install that first (see below) and make sure `command -v duet` passes in Claude
 Code's shell. Full guide:
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
+If Claude Code disambiguates plugin commands with namespaces, `/duet:duet` is
+the same command.
+
+Autonomous handoff example:
+
+![Claude Code handoff using duet](./docs/assets/claude-duet-workflow.png?raw=true)
+
+While the handoff runs, Claude Code shows the shell in auto mode and exposes
+the exact `duet` command under shell details:
+
+![Claude Code auto mode shell status](./docs/assets/claude-duet-auto-mode.png?raw=true)
+
+![Claude Code shell details running duet](./docs/assets/claude-duet-shell-details.png?raw=true)
+
+Copy-ready version:
+
+```text
+/loop /goal Create a temporary todo.md from the plan above and the remaining
+tasks in todo_codex.md.
+
+1. Use /duet:duet with max reasoning to confirm the plan.
+2. After the plan is confirmed, implement it.
+3. Once the first implementation is done, use /duet:duet with max reasoning
+   for code review.
+4. Use /duet:duet with max reasoning to review the second plan, then implement
+   it.
+5. When the process is complete and all checks are green, merge the approved
+   changes.
+
+P.S. I will not be around, so handle decisions without me. If you need another
+opinion, use /duet:duet to discuss it with Codex.
+```
 
 ### 2. Inside Codex — `$duet`
 
