@@ -50,6 +50,10 @@ jobs:
             echo "Automated version bump to $VERSION across the three lockstep manifests"
             echo "(pyproject.toml + both plugin.json), opened by the bump-version workflow."
             echo
+            echo "NOTE: opened by Actions (GITHUB_TOKEN), so the required checks start in an"
+            echo "approval-required state — click 'Approve workflows to run' in the merge box"
+            echo "below to run them. No PAT needed; this is the intended one-time human gate."
+            echo
             echo "Next steps (see docs/RELEASING.md):"
             echo "1. Review and squash-merge this PR (after the six required checks pass)."
             echo "2. Publish a GitHub Release for v$VERSION (Releases UI, or:"

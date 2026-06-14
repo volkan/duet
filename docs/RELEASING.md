@@ -68,7 +68,9 @@ gh run list --branch main --limit 3        # confirm the latest main run is gree
 #    (GitHub -> Actions -> bump-version -> Run workflow -> enter X.Y.Z). It bumps
 #    the three lockstep manifests and opens a "chore: release X.Y.Z" PR.
 #    Local equivalent: python scripts/bump_release_version.py X.Y.Z
-#    Review + squash-merge that PR after the six required checks pass:
+#    The bot-opened PR's required checks start in an approval-required state
+#    (it was opened by GITHUB_TOKEN) — click "Approve workflows to run" in the
+#    PR's merge box. Then review + squash-merge once the six checks pass:
 gh pr merge <num> --squash --delete-branch
 git switch main && git pull --ff-only && gh run list --branch main --limit 3
 
