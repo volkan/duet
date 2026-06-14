@@ -1,0 +1,62 @@
+name: bump-version
+
+# Manual helper to start a release: bump the version across the three lockstep
+# manifests and open a `chore: release X.Y.Z` PR. It deliberately does NOT create
+# a tag or a GitHub Release — after this PR merges, a human publishes the Release
+# (Releases UI or `gh release create`), which is what fires release.yml. Keeping
+# release creation human-initiated is intentional (a GITHUB_TOKEN-created release
+# would not trigger release.yml, and we want no PAT). See docs/RELEASING.md.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version, exactly X.Y.Z (no leading v, no prerelease suffix)"
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open the chore: release PR
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: main
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Bump the three lockstep manifests
+        env:
+          VERSION: ${{ inputs.version }} # validated as strict X.Y.Z by the script (exits 1 otherwise)
+        run: python scripts/bump_release_version.py "$VERSION"
+      - name: Validate lockstep + metadata (hard gate before opening a PR)
+        run: make distribution-check
+      - name: Open the release-bump PR
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="chore/release-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore: release $VERSION"
+          git push -u origin "$branch"
+          {
+            echo "Automated version bump to $VERSION across the three lockstep manifests"
+            echo "(pyproject.toml + both plugin.json), opened by the bump-version workflow."
+            echo
+            echo "Next steps (see docs/RELEASING.md):"
+            echo "1. Review and squash-merge this PR (after the six required checks pass)."
+            echo "2. Publish a GitHub Release for v$VERSION (Releases UI, or:"
+            echo "   gh release create v$VERSION --target main --generate-notes) — that fires release.yml."
+            echo "3. Approve the pypi environment when the run pauses; it publishes via OIDC and attaches dists."
+            echo
+            echo "This workflow intentionally does NOT create the tag or Release."
+          } > pr_body.md
+          gh pr create --base main --head "$branch" --title "chore: release $VERSION" --body-file pr_body.md
+          rm -f pr_body.md
