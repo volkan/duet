@@ -144,13 +144,18 @@ jobs:
           TAG: ${{ needs.detect.outputs.tag }}
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
+          # Verify any existing tag points at THIS commit BEFORE touching the release.
+          # Hoisted above the retry-upload path so a tag/release created at a different
+          # commit during the pypi-environment approval window can't get our freshly
+          # built dists clobbered onto it (provenance guard for BOTH paths below). A
+          # legitimate retry has the tag at $GITHUB_SHA, so it still passes this check.
+          existing="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG already exists at $existing, not $GITHUB_SHA"; exit 1
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG already exists (retry) — attaching dists"
             gh release upload "$TAG" dist/* --clobber
             exit 0
-          fi
-          existing="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
-          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-            echo "::error::$TAG already exists at $existing, not $GITHUB_SHA"; exit 1
           fi
           gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "duet $VERSION" --generate-notes
