@@ -3,12 +3,32 @@
 duet ships from one repo three ways, all pinned to the same version string: the
 **`duet-cli` PyPI package** and the **Claude Code** + **Codex** plugins (which
 install from this GitHub repo). A release is a `chore: release X.Y.Z` commit that
-bumps the three lockstep manifests, merged to `main`, then a **published GitHub
-Release** for `vX.Y.Z` (created in the Releases UI or via `gh release create`),
-which fires `.github/workflows/release.yml` to build, publish to PyPI, and attach
-the built distributions to that Release.
+bumps the three lockstep manifests, merged to `main`. Merging it is the whole
+trigger: `.github/workflows/release.yml` (`on: push: main`) detects the version
+bump, builds, publishes to PyPI, then **auto-creates** the `vX.Y.Z` tag + GitHub
+Release with the built distributions attached. There is no manual "create a
+Release" step.
+
+This supersedes the prior release-triggered design (where a human published a
+GitHub Release to fire the workflow, and a bot was forbidden from creating one).
+That "never bot-create the Release" rule was only a recursion-prevention artifact
+of the release-triggered design — publishing no longer happens via a release
+event, so a `GITHUB_TOKEN`-created Release here is fine and intentional.
 
 ## How publishing works
+
+`release.yml` triggers `on: push: main` and runs a `detect` job first: it
+releases only when the `pyproject.toml` version **changed** in that push **and**
+no `vX.Y.Z` tag exists yet. Routine pushes (docs, code) and the merge of this
+rework itself are no-ops. When a push is release-worthy the jobs run in order:
+
+1. `gate` — fast `make ci`.
+2. `build` — sdist + wheel, then `check_distribution_metadata.py --artifacts dist`.
+3. `pypi-publish` — uploads to PyPI; pauses on the protected `pypi` environment
+   for **manual approval** first.
+4. `create-release` — runs only **after** PyPI succeeds; auto-creates the
+   `vX.Y.Z` tag + GitHub Release (`gh release create … --generate-notes`) with
+   the built dists attached.
 
 PyPI upload uses **Trusted Publishing (OpenID Connect)** — the
 [PyPI](https://docs.pypi.org/trusted-publishers/)- and
@@ -17,10 +37,14 @@ mechanism. There is **no PyPI secret stored in GitHub**: the `pypi-publish` job
 presents a short-lived OIDC token that PyPI exchanges for a 15-minute upload
 token. Do **not** add `PYPI_USERNAME`/`PYPI_PASSWORD` — account passwords are not
 accepted for uploads, and Codespaces secrets are invisible to Actions anyway.
+Because publishing happens in this same run (not via a release event), the
+`GITHUB_TOKEN`-created Release in `create-release` does not need to fire any
+other workflow, so no PAT/App token is required — the whole flow stays secretless
+OIDC.
 
-`release.yml` is intentionally **not** a required PR check: it triggers on
-published releases, not pull requests, so it never runs against a PR and is not
-part of branch protection.
+`release.yml` is intentionally **not** a required PR check: it triggers on pushes
+to `main`, not on pull requests, so it never gates a PR and is not part of branch
+protection.
 
 ## The three lockstep version locations
 
@@ -51,11 +75,13 @@ These need PyPI / GitHub account access and are done once:
    environment* `pypi`):
    - **Required reviewers** (a maintainer) — the manual approval gate; the
      `pypi-publish` job pauses here until approved.
-   - **Deployment branches and tags** → restrict to tags matching `v*`.
+   - **Deployment branches and tags** → allow `main` **and** `v*`. The publish
+     run is on `refs/heads/main` (the push that merged the bump PR), not on a
+     tag, so the branch must be allowed or the job can never start.
 
 3. **Tag ruleset** (*Settings → Rules → Rulesets*) protecting `v*` — restrict who
-   may create/delete release tags. PyPI's security notes recommend tag protection
-   for release-triggered publishing.
+   may delete release tags. It must **allow Actions to create tags** (have no
+   `creation` rule), because `create-release` creates the `vX.Y.Z` tag itself.
 
 ## Cutting a release
 
@@ -74,21 +100,24 @@ gh run list --branch main --limit 3        # confirm the latest main run is gree
 gh pr merge <num> --squash --delete-branch
 git switch main && git pull --ff-only && gh run list --branch main --limit 3
 
-# 3. Release = publish a GitHub Release for the tag (one-time setup must be done first).
-gh release create vX.Y.Z --target main --title "duet X.Y.Z" --generate-notes
-#    ...or GitHub UI -> Releases -> Draft a new release -> new tag vX.Y.Z, target main -> Publish.
+# 3. Merging the bump PR fires release.yml. Approve the `pypi` environment when
+#    the run pauses (GitHub -> Actions -> the release run, or the email). The
+#    tag vX.Y.Z and the GitHub Release are then created automatically, after
+#    PyPI succeeds — there is nothing to type by hand.
 ```
 
-Publishing the release runs `release.yml`: `gate` (tag==version, tag-on-main, fast
-`make ci`) → `build` (sdist+wheel, artifact/version validation) → **approve the
-`pypi` environment in the GitHub UI** → `pypi-publish` → `attach-artifacts`.
+Merging the bump PR fires `release.yml`: `detect` (version changed + no `vX.Y.Z`
+tag) → `gate` (fast `make ci`) → `build` (sdist+wheel, artifact/version
+validation) → **approve the `pypi` environment in the GitHub UI** →
+`pypi-publish` → `create-release` (auto tag + Release with generated notes and
+dists attached).
 
-The Release is created *before* the workflow runs (it is the trigger), so if `gate`,
-`build`, or `pypi-publish` fails you are left with a published Release that has no
-attached dists and nothing on PyPI. Recover by fixing the cause and re-cutting:
-`gh release delete vX.Y.Z --cleanup-tag --yes`, then create the release again. PyPI
-versions are immutable, so if PyPI already *partially* uploaded, bump to the next
-patch instead of reusing the version.
+Recovery: the Release is created only **after** a successful PyPI publish, so a
+failed or rejected run never leaves a published Release with nothing on PyPI. If a
+run fails *after* PyPI already published, do **not** bump again or hand-create a
+tag — use **"Re-run failed jobs"** on that same run. `skip-existing: true` makes
+the PyPI step idempotent on the re-run, so typically only the `create-release`
+(tag + Release) step needs to complete.
 
 ## Verify
 

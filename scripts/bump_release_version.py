@@ -3,9 +3,11 @@
 
 Used by `.github/workflows/bump-version.yml` (a manual ``workflow_dispatch``
 helper) and runnable locally. It only edits the version strings; it never
-creates a tag or a GitHub Release — publishing stays human-initiated via the
-Releases UI / ``gh release create``, which is what fires
-``.github/workflows/release.yml``.
+creates a tag or a GitHub Release. Merging the resulting ``chore: release X.Y.Z``
+PR to ``main`` triggers ``.github/workflows/release.yml`` (``on: push: main``),
+which detects the bump, publishes to PyPI via OIDC, then auto-creates the
+``vX.Y.Z`` tag + GitHub Release. This script still only edits the three version
+manifests below.
 
 Stdlib-only and Python 3.9-clean on the write path (no ``tomllib``): the
 ``pyproject.toml`` version lives in the ``[project]`` table and is rewritten by

@@ -1,50 +1,94 @@
 name: release
 
-# Release-triggered: when a GitHub Release for `vX.Y.Z` is published (via the
-# Releases UI or `gh release create`), build -> publish to PyPI (Trusted
-# Publishing / OIDC, no stored secret) -> attach the built dists to that Release.
-# The tag's version must match the three lockstep manifests.
+# Release-on-merge. When a bump-version PR merges to main (the pyproject version
+# changes to an untagged X.Y.Z), this builds, publishes duet-cli to PyPI via OIDC
+# Trusted Publishing (no stored secret, gated by the protected `pypi` environment
+# approval), then creates the vX.Y.Z tag + GitHub Release with generated notes —
+# all in ONE run. No manual "create a release" step: run bump-version, merge its
+# PR, approve the pypi environment. See docs/RELEASING.md.
+#
+# The tag/Release are created AFTER a successful PyPI publish, so a failed/rejected
+# run never leaves a published Release with nothing on PyPI. A GITHUB_TOKEN-created
+# Release does not trigger other workflows — that's fine here, because publishing
+# happens in THIS run, not via a release event, so no PAT/App token is needed.
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
-# Least privilege: declaring `permissions` sets every unset scope to `none`,
-# so each job grants back only what it needs.
 permissions: {}
 
+concurrency:
+  group: release-main
+  cancel-in-progress: false # never interrupt an in-flight publish
+
 jobs:
+  detect:
+    # Release only when the pyproject version CHANGED in this push AND no vX.Y.Z tag
+    # exists yet. So merging this rework is a no-op (version unchanged), and routine
+    # main pushes (docs, etc.) never publish.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_release: ${{ steps.decide.outputs.should_release }}
+      version: ${{ steps.decide.outputs.version }}
+      tag: ${{ steps.decide.outputs.tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0 # need the `before` commit to diff the version
+      - id: decide
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          read_version() { # $1 = git ref; prints the [project] version, if any
+            git show "$1:pyproject.toml" 2>/dev/null \
+              | sed -n '/^\[project\]/,/^\[/{ s/^version = "\([^"]*\)"$/\1/p; }' | head -1
+          }
+          NEW="$(read_version "$GITHUB_SHA")"
+          echo "current version: ${NEW:-<none>}"
+          if ! printf '%s' "$NEW" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "version is not strict X.Y.Z — not a release push"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -z "$BEFORE" ] || printf '%s' "$BEFORE" | grep -Eq '^0+$'; then
+            echo "no usable before-SHA (first push / force-push) — not releasing"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          OLD="$(read_version "$BEFORE")"
+          echo "previous version: ${OLD:-<unreadable>}"
+          if [ -z "$OLD" ]; then
+            echo "could not read baseline version — not releasing"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$OLD" = "$NEW" ]; then
+            echo "version unchanged in this push — nothing to release"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          TAG="v$NEW"
+          if git ls-remote --tags --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists — not re-releasing"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "release-worthy: $OLD -> $NEW ($TAG)"
+          { echo "should_release=true"; echo "version=$NEW"; echo "tag=$TAG"; } >> "$GITHUB_OUTPUT"
+
   gate:
-    # Fast subset of CI on the exact tagged tree. The full six required checks
-    # (py3.9/3.11/3.13 matrix, plugin validate, wheel smoke) already ran on main
-    # via branch protection; the ancestry check below is what enforces that the
-    # tag points at such a commit.
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0 # full history for the ancestry check
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: Tag matches package version
-        # `release: published` cannot filter the tag the way `push.tags: ["v*"]`
-        # did, so enforce the `vX.Y.Z` contract here: the tag must equal `v` +
-        # the pyproject version exactly (no bare `0.2.1`, no `-rc1` prerelease).
-        run: |
-          PKG="$(python -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          [ "$GITHUB_REF_NAME" = "v$PKG" ] || { echo "::error::release tag $GITHUB_REF_NAME must be v$PKG (pyproject version)"; exit 1; }
-      - name: Tag commit is on main
-        run: |
-          git fetch --no-tags --quiet origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::$GITHUB_SHA is not an ancestor of origin/main; only gated, merged commits may be released"; exit 1; }
       - name: Fast gate
         run: make ci
 
   build:
-    needs: gate
+    needs: gate # skipped gate (no release) skips this and everything downstream
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -79,22 +123,39 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          skip-existing: true # idempotent if a prior run published then failed before tagging
         # Trusted Publishing is the default: no username / password / token inputs.
 
-  attach-artifacts:
-    needs: pypi-publish # only after a successful PyPI upload
+  create-release:
+    needs: [detect, pypi-publish] # only AFTER a successful PyPI upload
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload assets onto the release that triggered this run
+      contents: write # create the vX.Y.Z tag + GitHub Release
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dist
           path: dist/
-      - name: Attach built distributions to the release
+      - name: Create tag + Release (generated notes) and attach dists
         env:
           GH_TOKEN: ${{ github.token }}
-          # No checkout in this job, so `gh` has no git remote to infer the repo
-          # from; GitHub exposes GITHUB_REPOSITORY but `gh` only reads GH_REPO.
-          GH_REPO: ${{ github.repository }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          GH_REPO: ${{ github.repository }} # no checkout; gh reads GH_REPO, not GITHUB_REPOSITORY
+          TAG: ${{ needs.detect.outputs.tag }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          # Verify any existing tag points at THIS commit BEFORE touching the release.
+          # Hoisted above the retry-upload path so a tag/release created at a different
+          # commit during the pypi-environment approval window can't get our freshly
+          # built dists clobbered onto it (provenance guard for BOTH paths below). A
+          # legitimate retry has the tag at $GITHUB_SHA, so it still passes this check.
+          existing="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG already exists at $existing, not $GITHUB_SHA"; exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists (retry) — attaching dists"
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "duet $VERSION" --generate-notes

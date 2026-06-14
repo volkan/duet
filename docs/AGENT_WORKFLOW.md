@@ -56,13 +56,13 @@ Before merging:
    `distribution metadata`, `plugin validate`, and `complexity gate`.
 4. For packaging/plugin changes, confirm `make package-check` was run locally
    or passed in CI, and confirm `make plugin-check` too when the Claude Code
-   plugin surface changed. PyPI publishing is **release-triggered**: a `chore:
-   release X.Y.Z` merge only bumps the version (open that PR via the
-   **bump-version** workflow — Actions → bump-version → Run workflow → enter
-   X.Y.Z); publishing a GitHub Release for
-   `vX.Y.Z` (Releases UI or `gh release create`) fires
-   `.github/workflows/release.yml`, which pauses for manual approval on the
-   `pypi` environment before uploading. Full runbook: [RELEASING.md](RELEASING.md).
+   plugin surface changed. PyPI publishing is **merge-triggered**: a `chore:
+   release X.Y.Z` PR (opened by the **bump-version** workflow — Actions →
+   bump-version → Run workflow → enter X.Y.Z) merging to `main` fires
+   `.github/workflows/release.yml` (`on: push: main`), which detects the bump,
+   runs gate/build, pauses for manual approval on the `pypi` environment,
+   publishes via OIDC, then auto-creates the `vX.Y.Z` tag + GitHub Release.
+   Full runbook: [RELEASING.md](RELEASING.md).
 
 Useful commands:
 
