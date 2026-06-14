@@ -28,8 +28,11 @@ The release bump edits exactly these (the `marketplace.json` files carry no
 version). `scripts/check_distribution_metadata.py` fails if they disagree:
 
 - `pyproject.toml` — `version = "..."`
-- `.claude-plugin/plugin.json` — `"version": "..."`
+- `plugins/duet-claude/.claude-plugin/plugin.json` — `"version": "..."`
 - `plugins/duet/.codex-plugin/plugin.json` — `"version": "..."`
+
+`scripts/bump_release_version.py` (run by the **bump-version** workflow, below)
+edits exactly these three and refuses a bad/duplicate/downgrade version.
 
 ## One-time setup (required before the first release)
 
@@ -61,14 +64,13 @@ These need PyPI / GitHub account access and are done once:
 git switch main && git pull --ff-only
 gh run list --branch main --limit 3        # confirm the latest main run is green
 
-# 2. Bump the version on a release branch.
-git switch -c chore/release-X.Y.Z
-#    Edit the three lockstep manifests OLD -> X.Y.Z.
-make ci && make package-check              # package-check builds + validates artifacts
-git commit -am "chore: release X.Y.Z"      # body: what changed; semver rationale
-git push -u origin chore/release-X.Y.Z
-gh pr create --base main --title "chore: release X.Y.Z" --body "..."
-#    Wait for the six required checks, then squash-merge.
+# 2. Bump the version. Preferred: run the bump-version workflow
+#    (GitHub -> Actions -> bump-version -> Run workflow -> enter X.Y.Z). It bumps
+#    the three lockstep manifests and opens a "chore: release X.Y.Z" PR.
+#    Local equivalent: python scripts/bump_release_version.py X.Y.Z
+#    The bot-opened PR's required checks start in an approval-required state
+#    (it was opened by GITHUB_TOKEN) — click "Approve workflows to run" in the
+#    PR's merge box. Then review + squash-merge once the six checks pass:
 gh pr merge <num> --squash --delete-branch
 git switch main && git pull --ff-only && gh run list --branch main --limit 3
 
