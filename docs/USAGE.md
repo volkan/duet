@@ -229,10 +229,12 @@ The primary install path is the plugin shipped in this repo:
 ```
 
 The `/duet` command shells out to the `duet` CLI, so the binary must be on
-PATH too: `make install` from a clone, `pipx install duet-cli`, or
-`pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml` (the
-PyPI package is `duet-cli`; the command it installs is `duet`). The default
-recipe also needs `claude` and `codex` on PATH.
+PATH too: `make install` from a clone, `pipx install duet-cli` (recommended),
+or `pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml`.
+`uv tool install duet-cli` and `python3 -m pip install --user duet-cli` are
+equivalent persistent installs (the PyPI package is `duet-cli`; the command it
+installs is `duet`). The default recipe also needs `claude` and `codex` on
+PATH.
 
 The plugin command uses an explicit run root:
 

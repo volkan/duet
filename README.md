@@ -43,16 +43,26 @@ Codex's shell. Full guide:
 ### 3. From the terminal — `duet`
 
 ```bash
-pipx install duet-cli        # the command it installs is `duet`
+pipx install duet-cli        # recommended; the command it installs is `duet`
 duet --task "Fix the failing test" --cwd ~/code/myrepo
 ```
 
-The PyPI package is `duet-cli` (bare `duet` on PyPI is Google's async library),
-so `pipx`/`uvx` isolation is recommended. Add `'duet-cli[yaml]'` if you want
-`--config foo.yaml`. One-shot, no install:
+`pipx` is the recommended install. Two other persistent options put `duet` on
+PATH the same way:
+
+```bash
+uv tool install duet-cli
+python3 -m pip install --user duet-cli
+```
+
+The PyPI package is `duet-cli` (bare `duet` on PyPI is Google's async library).
+Add the `[yaml]` extra for `--config foo.yaml` support — `pipx install
+'duet-cli[yaml]'`, `uv tool install 'duet-cli[yaml]'`, or `python3 -m pip
+install --user 'duet-cli[yaml]'`. One-shot, no install:
 `uvx --from duet-cli duet --task "..."` — note this is ephemeral and does not put
 `duet` on PATH, so the `/duet` and `$duet` plugins need a persistent install
-(`pipx install duet-cli` or `make install`) instead.
+(`pipx install duet-cli`, `uv tool install duet-cli`,
+`python3 -m pip install --user duet-cli`, or `make install`) instead.
 
 ## Examples
 
