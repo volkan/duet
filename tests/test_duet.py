@@ -825,6 +825,45 @@ class TestParsePartner(unittest.TestCase):
         self.assertEqual(agent.name, "copilot-coder")
 
 
+# ---------- _build_cfg_from_cli ----------
+
+
+class TestBuildCfgFromCli(unittest.TestCase):
+    def _parse(self, *argv: str):
+        parser = duet._build_arg_parser()
+        return parser, parser.parse_args(list(argv))
+
+    def test_lead_and_partner_models_attach_to_cli_agents(self) -> None:
+        parser, args = self._parse(
+            "--task", "x",
+            "--lead", "claude:reviewer",
+            "--partner", "codex:coder",
+            "--lead-model", "claude-opus-4-5",
+            "--partner-model", "gpt-5",
+        )
+
+        cfg = duet._build_cfg_from_cli(args, parser, {})
+
+        self.assertEqual(cfg.agents[0].backend, "claude")
+        self.assertEqual(cfg.agents[0].role, "reviewer")
+        self.assertEqual(cfg.agents[0].model, "claude-opus-4-5")
+        self.assertEqual(cfg.agents[1].backend, "codex")
+        self.assertEqual(cfg.agents[1].role, "coder")
+        self.assertEqual(cfg.agents[1].model, "gpt-5")
+
+    def test_empty_cli_model_flags_normalize_to_none(self) -> None:
+        parser, args = self._parse(
+            "--task", "x",
+            "--lead-model", "",
+            "--partner-model", "",
+        )
+
+        cfg = duet._build_cfg_from_cli(args, parser, {})
+
+        self.assertIsNone(cfg.agents[0].model)
+        self.assertIsNone(cfg.agents[1].model)
+
+
 # ---------- apply_resume_overrides ----------
 
 
@@ -877,6 +916,32 @@ class TestApplyResumeOverrides(unittest.TestCase):
         self.assertEqual(agents[1].name, "codex-partner")
         self.assertEqual(agents[1].role, "coder")
         self.assertEqual(agents[1].session_id, "codex-sid")
+
+    def test_resume_codex_move_preserves_model(self) -> None:
+        agents = duet.apply_resume_overrides(
+            [
+                duet.Agent(
+                    name="codex-planner",
+                    backend="codex",
+                    role="planner",
+                    model="gpt-5",
+                ),
+                duet.Agent(
+                    name="claude-coder",
+                    backend="claude",
+                    role="coder",
+                    model="claude-sonnet-4-6",
+                ),
+            ],
+            resume_codex="codex-sid",
+            rename_slots=True,
+        )
+
+        self.assertEqual(agents[0].backend, "claude")
+        self.assertEqual(agents[0].model, "claude-sonnet-4-6")
+        self.assertEqual(agents[1].backend, "codex")
+        self.assertEqual(agents[1].session_id, "codex-sid")
+        self.assertEqual(agents[1].model, "gpt-5")
 
     def test_resume_claude_partner_moves_to_lead(self) -> None:
         agents = duet.apply_resume_overrides(
