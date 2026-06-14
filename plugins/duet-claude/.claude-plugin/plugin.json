@@ -1,7 +1,7 @@
 {
   "name": "duet",
   "description": "Two-agent CLI harness: run claude + codex (or same-backend pairings) in alternating turns with session persistence, worktree mode, and LGTM convergence detection. Provides the /duet command, which kicks off Claude Code's /review (or any upstream command's output) through the duet loop.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "author": {
     "name": "Volkan Altan",
     "email": "volkanaltan@gmail.com"
