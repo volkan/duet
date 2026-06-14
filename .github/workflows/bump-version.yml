@@ -1,11 +1,10 @@
 name: bump-version
 
 # Manual helper to start a release: bump the version across the three lockstep
-# manifests and open a `chore: release X.Y.Z` PR. It deliberately does NOT create
-# a tag or a GitHub Release — after this PR merges, a human publishes the Release
-# (Releases UI or `gh release create`), which is what fires release.yml. Keeping
-# release creation human-initiated is intentional (a GITHUB_TOKEN-created release
-# would not trigger release.yml, and we want no PAT). See docs/RELEASING.md.
+# manifests and open a `chore: release X.Y.Z` PR. Merging that PR is the whole
+# trigger — release.yml (on: push: main) detects the version bump, publishes to
+# PyPI after the `pypi` environment approval, then auto-creates the vX.Y.Z tag +
+# GitHub Release. No manual release creation. See docs/RELEASING.md.
 on:
   workflow_dispatch:
     inputs:
@@ -56,11 +55,9 @@ jobs:
             echo
             echo "Next steps (see docs/RELEASING.md):"
             echo "1. Review and squash-merge this PR (after the six required checks pass)."
-            echo "2. Publish a GitHub Release for v$VERSION (Releases UI, or:"
-            echo "   gh release create v$VERSION --target main --generate-notes) — that fires release.yml."
-            echo "3. Approve the pypi environment when the run pauses; it publishes via OIDC and attaches dists."
-            echo
-            echo "This workflow intentionally does NOT create the tag or Release."
+            echo "2. On merge, release.yml auto-detects the bump and runs — approve the 'pypi'"
+            echo "   environment when it pauses. It publishes via OIDC, then auto-creates the"
+            echo "   v$VERSION tag + GitHub Release (generated notes). No manual release step."
           } > pr_body.md
           gh pr create --base main --head "$branch" --title "chore: release $VERSION" --body-file pr_body.md
           rm -f pr_body.md
