@@ -149,9 +149,12 @@ jobs:
           # commit during the pypi-environment approval window can't get our freshly
           # built dists clobbered onto it (provenance guard for BOTH paths below). A
           # legitimate retry has the tag at $GITHUB_SHA, so it still passes this check.
-          existing="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
-          if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-            echo "::error::$TAG already exists at $existing, not $GITHUB_SHA"; exit 1
+          # NOTE: gh api prints a 404 body on stdout, so only a successful
+          # response proves the tag exists.
+          if existing="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null)"; then
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "::error::$TAG already exists at $existing, not $GITHUB_SHA"; exit 1
+            fi
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG already exists (retry) — attaching dists"
