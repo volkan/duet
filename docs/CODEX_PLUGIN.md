@@ -14,11 +14,15 @@ on your PATH.
    make install
    ```
 
-   Or from PyPI:
+   Or from PyPI (`pipx` recommended; `uv tool install` or
+   `python3 -m pip install --user` also work):
 
    ```bash
    pipx install duet-cli
-   pipx install 'duet-cli[yaml]'   # optional PyYAML support for --config
+   pipx install 'duet-cli[yaml]'                       # optional PyYAML support for --config
+   uv tool install duet-cli                            # alternative
+   python3 -m pip install --user duet-cli              # alternative
+   python3 -m pip install --user 'duet-cli[yaml]'      # alternative, with --config support
    ```
 
 2. Confirm `duet` is visible to Codex's shell.

@@ -26,8 +26,9 @@ distribution-check: ## validate pyproject/plugin manifests and source metadata
 package-check: ## build artifacts and validate wheel/sdist metadata
 	@if command -v uv >/dev/null 2>&1; then uv build; else python3 -m build; fi
 	@python3 scripts/check_distribution_metadata.py --artifacts dist
-plugin-check: ## validate the Claude Code plugin manifest with the claude CLI
+plugin-check: ## validate the Claude Code plugin (root marketplace + narrowed plugin root)
 	@claude plugin validate .
+	@claude plugin validate plugins/duet-claude
 loop-test: ## run real Claude/Codex end-to-end loop scenarios (slow, costs model turns)
 	@python3 scripts/duet_loop_e2e.py $(LOOP_TEST_ARGS)
 build: ## build sdist+wheel into dist/ (needs current python3 to import build: python3 -m pip install build)

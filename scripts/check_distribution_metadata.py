@@ -25,9 +25,10 @@ except ModuleNotFoundError:  # pragma: no cover - CI runs this on Python 3.11+.
 
 
 ROOT = Path(__file__).resolve().parent.parent
-CLAUDE_PLUGIN_JSON = ROOT / ".claude-plugin" / "plugin.json"
+CLAUDE_PLUGIN_ROOT = ROOT / "plugins" / "duet-claude"
+CLAUDE_PLUGIN_JSON = CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 CLAUDE_MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-CLAUDE_COMMAND = ROOT / "commands" / "duet.md"
+CLAUDE_COMMAND = CLAUDE_PLUGIN_ROOT / "commands" / "duet.md"
 CODEX_PLUGIN_ROOT = ROOT / "plugins" / "duet"
 CODEX_PLUGIN_JSON = CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CODEX_MARKETPLACE_JSON = ROOT / ".agents" / "plugins" / "marketplace.json"
@@ -137,12 +138,16 @@ def _assert_claude_plugin_metadata(
     plugins = marketplace.get("plugins")
     if not isinstance(plugins, list) or not plugins:
         _fail(".claude-plugin/marketplace.json plugins must be a non-empty list")
-    if not any(p.get("name") == "duet" and p.get("source") == "./"
+    if not any(p.get("name") == "duet" and p.get("source") == "./plugins/duet-claude"
                for p in plugins if isinstance(p, dict)):
-        _fail(".claude-plugin/marketplace.json must list the local duet plugin source './'")
+        _fail(".claude-plugin/marketplace.json must list the duet plugin source './plugins/duet-claude'")
 
     if not CLAUDE_COMMAND.exists():
-        _fail("commands/duet.md must exist for the Claude Code plugin")
+        _fail("plugins/duet-claude/commands/duet.md must exist for the Claude Code plugin")
+    if (ROOT / ".claude-plugin" / "plugin.json").exists():
+        _fail("root .claude-plugin/plugin.json must be removed; the Claude plugin now lives under plugins/duet-claude/")
+    if (ROOT / "commands" / "duet.md").exists():
+        _fail("root commands/duet.md must be removed; the Claude command now lives under plugins/duet-claude/commands/")
 
 
 def _assert_codex_plugin_metadata(

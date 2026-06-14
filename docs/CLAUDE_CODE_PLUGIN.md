@@ -13,6 +13,9 @@ pipx install duet-cli
 command -v duet
 ```
 
+`pipx` is recommended; `uv tool install duet-cli` or
+`python3 -m pip install --user duet-cli` also put `duet` on PATH.
+
 From this repository, `make install` is equivalent if `~/.local/bin` is on
 PATH:
 
@@ -51,12 +54,20 @@ Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
    make install
    ```
 
-   Or from PyPI:
+   Or from PyPI (`pipx` recommended; `uv tool install` or
+   `python3 -m pip install --user` also work):
 
    ```bash
    pipx install duet-cli
-   pipx install 'duet-cli[yaml]'   # optional PyYAML support for --config
+   pipx install 'duet-cli[yaml]'                       # optional PyYAML support for --config
+   uv tool install duet-cli                            # alternative
+   python3 -m pip install --user duet-cli              # alternative
+   python3 -m pip install --user 'duet-cli[yaml]'      # alternative, with --config support
    ```
+
+   Existing plugin users: run `/plugin marketplace update` and reinstall the
+   plugin to pick up the narrowed plugin payload. Old cached versions are not
+   cleaned up automatically.
 
 2. Confirm `duet` is visible to Claude Code's shell.
 
