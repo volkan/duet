@@ -355,8 +355,9 @@ ambiguity if any of them hit the fallback.
 
 ## Same-backend peering
 
-`--lead` and `--partner` may use the same backend when you want role separation
-without model diversity:
+`--lead` and `--partner` may use the same backend when you want role separation.
+Use `--lead-model` and `--partner-model` when those roles should use different
+models:
 
 ```bash
 # Codex planner + Codex coder. Partner speaks first and runs in the worktree.
@@ -401,6 +402,8 @@ worktree gated by `verify_cmd`.
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`. May use the same backend as `--lead` |
+| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared lead into the other slot, the model follows that agent |
+| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared partner into the other slot, the model follows that agent |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |

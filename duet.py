@@ -3371,6 +3371,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder (default codex:coder)")
     ap.add_argument("--lead", default="claude:planner",
                     help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner (default; ignored if --resume-claude given)")
+    ap.add_argument("--lead-model", metavar="MODEL", default=None,
+                    help="model name to pass to the lead agent's backend via --model")
+    ap.add_argument("--partner-model", metavar="MODEL", default=None,
+                    help="model name to pass to the partner agent's backend via --model")
     ap.add_argument("--cwd", default=".", help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=DEFAULT_SENTINEL,
@@ -3542,9 +3546,18 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         parser=ap,
         stdin_cache=stdin_cache,
     )
+    agents = [
+        dataclasses.replace(
+            parse_partner(args.lead, default_role="planner"),
+            model=args.lead_model or None,
+        ),
+        dataclasses.replace(
+            parse_partner(args.partner, default_role="coder"),
+            model=args.partner_model or None,
+        ),
+    ]
     agents = apply_resume_overrides(
-        [parse_partner(args.lead, default_role="planner"),
-         parse_partner(args.partner, default_role="coder")],
+        agents,
         resume_claude=args.resume_claude,
         resume_codex=args.resume_codex,
         rename_slots=True,
