@@ -31,7 +31,7 @@ the same command.
 
 Autonomous handoff example:
 
-![Claude Code handoff using duet](https://github.com/volkan/duet/blob/main/docs/assets/claude-duet-workflow.png?raw=true)
+![Claude Code handoff using duet](./docs/assets/claude-duet-workflow.png?raw=true)
 
 Copy-ready version:
 
