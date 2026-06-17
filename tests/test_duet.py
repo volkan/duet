@@ -534,8 +534,9 @@ class TestAgentFinishReasons(unittest.TestCase):
 
     def test_opencode_command_construction_and_resume(self) -> None:
         # Capture the constructed argv to pin the flags the reasoning-check and
-        # dry-run exit codes can't see — especially the `-s` resume flag, whose
-        # silent loss would orphan multi-turn memory while still returning rc=0.
+        # dry-run exit codes can't see: the `-s` resume flag, whose silent loss
+        # would orphan multi-turn memory while still returning rc=0, and the
+        # `-m provider/model` form OpenCode requires for model selection.
         captured: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
@@ -546,7 +547,12 @@ class TestAgentFinishReasons(unittest.TestCase):
                 "",
             )
 
-        agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
+        agent = duet.Agent(
+            name="opencode-partner",
+            backend="opencode",
+            role="coder",
+            model="anthropic/claude-sonnet-4-6",
+        )
         with mock.patch.object(duet, "_run", fake_run):
             # First turn: no session_id yet.
             duet.call_opencode(agent, "sys", "msg", _ROOT, 60,
@@ -557,6 +563,8 @@ class TestAgentFinishReasons(unittest.TestCase):
             self.assertEqual(first[first.index("--format") + 1], "json")
             self.assertIn("--dir", first)
             self.assertIn("--dangerously-skip-permissions", first)
+            self.assertIn("-m", first)
+            self.assertEqual(first[first.index("-m") + 1], "anthropic/claude-sonnet-4-6")
             self.assertNotIn("-s", first)  # nothing to resume on turn 1
             # The prompt is the trailing positional arg (options come first).
             self.assertIn("=== MESSAGE FROM PARTNER ===", first[-1])

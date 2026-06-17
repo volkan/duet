@@ -1,8 +1,8 @@
 # OpenCode Plugin
 
 The OpenCode integration installs a `/duet` custom command. It does not install
-the `duet`, `claude`, `codex`, or `gemini` binaries. The command shells out to
-the `duet` CLI on your PATH.
+the `duet`, `claude`, or `codex` binaries. The command shells out to the `duet`
+CLI on your PATH.
 
 Unlike the Claude Code plugin (a marketplace plugin) and the Codex plugin (a
 marketplace skill), OpenCode custom commands are **drop-in markdown files** —

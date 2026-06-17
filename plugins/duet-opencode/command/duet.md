@@ -6,8 +6,8 @@ agent: build
 # /duet
 
 Run the installed `duet` CLI to pair two CLI coding agents in a reviewed loop
-from the current project. This command does not install `duet`, `claude`,
-`codex`, or `gemini` — it shells out to the `duet` CLI on your PATH.
+from the current project. This command does not install `duet`, `claude`, or
+`codex` — it shells out to the `duet` CLI on your PATH.
 
 ## Prerequisite check
 
