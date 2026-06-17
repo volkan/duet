@@ -23,7 +23,7 @@ make reasoning-check    # reasoning-effort translation check (scripts/check_reas
 make distribution-check # validate pyproject/plugin manifests and source metadata
 make package-check      # build sdist/wheel and validate packaged metadata
 make plugin-check       # validate the Claude Code plugin manifest with claude
-make loop-test          # real Claude/Codex E2E loop suite; slow, writes runs/test-loop/
+make loop-test          # real E2E loop suite (default Claude/Codex; any backend via --lead-backend/--partner-backend); slow, writes runs/test-loop/
 make build              # sdist+wheel into dist/ (needs: python3 -m pip install build)
 make uninstall
 
@@ -49,6 +49,41 @@ or automation. Do not commit or push feature work directly to `main`. Create a
 topic branch, run the relevant local gates, open a PR, wait for all six required
 checks, and merge through GitHub. The detailed branch and merge checklist lives
 in `docs/AGENT_WORKFLOW.md`.
+
+## Testing discipline (do not ship broken code)
+
+**Broken code must never reach `main` or PyPI. Run tests proportional to what a
+change touches — and always against this repo's code, never an installed copy.**
+
+1. **Minimum, every change:** `make ci` must be green (unit + reasoning + smoke
+   + complexity + distribution). It is the hard floor, not optional.
+2. **Risk-scaled:** anything that affects the live loop — a backend adapter /
+   `call_*` helper, session-resume, convergence detection, worktree, or the
+   force prompt — also needs a **real `make loop-test` for the affected
+   backend(s)**. The loop-test is multi-backend: `--lead-backend` /
+   `--partner-backend` / `--lead-model` / `--partner-model` retarget the
+   scenarios at any backend, and the OpenCode free-model pairing
+   (`--lead-backend opencode --partner-backend opencode --lead-model
+   opencode/big-pickle …`) gives a real loop with **no auth**, so there is no
+   excuse to skip a real-loop check for a backend change. Packaging/plugin
+   changes additionally need `make package-check` (+ `make plugin-check`).
+3. **Always test the repo code, via the root path.** Every test harness must
+   invoke duet through the repo-root `duet.py` resolved from the harness's own
+   file location — never a cwd-relative path and never a bare `duet` that could
+   resolve to a pipx/PATH install. The Python harnesses use
+   `Path(__file__).resolve().parent.parent / "duet.py"`; `scripts/smoke.sh`
+   anchors `DUET` to `${BASH_SOURCE[0]}/../duet.py`; `scripts/duet_loop_e2e.py`
+   defaults `--duet` to `REPO_ROOT/duet.py`. Do not regress any of these to a
+   PATH lookup. (The `/duet` plugin recipes deliberately shell out to the PATH
+   `duet` — that is the *product* for end users, not a test path; when
+   exercising the plugins locally, `make install` so PATH `duet` is the repo
+   symlink.)
+4. **No silent skips.** If you genuinely cannot run a relevant real loop (no
+   auth for that backend), say so in the PR and fall back to the OpenCode
+   free-model loop plus the dry-run matrix — do not call the change verified.
+
+The full how-to and the per-change matrix live in `docs/USAGE.md`
+("Which tests to run for a change").
 
 ## Architecture you'll need to read multiple files to grasp
 
@@ -128,6 +163,7 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 - **JSON `session_id` is required.** `gemini -p ... --output-format json` must include top-level `session_id`; duet stops with `agent_error` if it is absent because multi-turn memory would be unsafe. There is no `--resume-gemini` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed Gemini agents.
 - **No effort flag.** Gemini receives the high/xhigh/max prompt nudges but no backend reasoning argument.
 - **Safety flags differ.** `--sandbox` is Codex-only. Gemini maps duet's `permission_mode` to `--approval-mode`: `default`, `auto_edit` for `acceptEdits`, `plan`, or `yolo` for `bypassPermissions`. `add_dirs:` becomes repeated `--include-directories`.
+- **Trusted-folder gate.** The Gemini CLI refuses to run in an untrusted directory (e.g. a fresh `/tmp` fixture), exiting 55 with "not running in a trusted directory"; duet surfaces this cleanly as `agent_error`. It is a Gemini policy, not a duet bug. For real Gemini runs in untrusted/temp cwds, export `GEMINI_CLI_TRUST_WORKSPACE=true` (or run in a trusted dir, or pass a per-agent `extra_args` trust opt-in). Real-loop tests that target Gemini in `/tmp` need this.
 
 ## Copilot-specific quirks
 

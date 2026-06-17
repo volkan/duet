@@ -369,10 +369,49 @@ python3 scripts/duet_loop_e2e.py --base-dir ~/duet-loop-runs/$(date +%Y%m%d-%H%M
 python3 scripts/duet_loop_e2e.py --reasoning low
 ```
 
+### Loop-test any backend pairing
+
+The scenarios default to a Claude reviewer + Codex coder, but
+`--lead-backend` / `--partner-backend` / `--lead-model` / `--partner-model`
+retarget the *same* scenarios at any backend, and the suite then requires only
+the backends it actually uses (not always `claude` + `codex`):
+
+```bash
+# OpenCode loop — uses OpenCode's free zen models, so it needs NO auth and no
+# claude/codex on PATH (only git + opencode):
+make loop-test LOOP_TEST_ARGS="--scenario S1 \
+  --lead-backend opencode --partner-backend opencode \
+  --lead-model opencode/big-pickle --partner-model opencode/big-pickle"
+
+# Gemini coder reviewed by Claude:
+python3 scripts/duet_loop_e2e.py --scenario S1 --partner-backend gemini
+```
+
+This is how `codex`, `claude`, `gemini`, `copilot`, and `opencode` each get
+real-loop coverage. The OpenCode pairing is the cheapest to run in CI because
+its free models need no credentials.
+
 Do not run multiple loop-test sweeps concurrently. UUID-pinned Codex resume is
 parallelism-safe but the `--last` fallback path is still cwd-based; the harness
 isolates each fixture and worktree, but parallel sweeps add unnecessary
 ambiguity if any of them hit the fallback.
+
+### Which tests to run for a change (testing policy)
+
+**Broken code must never reach `main`/PyPI.** Run tests proportional to what a
+change touches — at minimum the fast gate, escalating to a real loop when the
+change is risky:
+
+| change | run before commit/PR |
+|---|---|
+| any change at all | `make ci` (unit + reasoning + smoke + complexity + distribution) — the hard floor; it must be green |
+| a pure helper, flag, exit code, or YAML key | `make ci` (its unit/smoke case is mandatory in the same commit — see the sync table in `../CLAUDE.md`) |
+| backend adapter / `call_*` / session-resume / convergence / worktree / force-prompt — anything that affects the live loop | `make ci` **and** a real `make loop-test` for the affected backend(s); for a new or changed backend, run the loop-test with that backend (`--lead-backend`/`--partner-backend`), using OpenCode free models when you just need a no-auth real loop |
+| packaging / plugin / release tooling | `make ci` + `make package-check` (+ `make plugin-check`) |
+
+If you cannot run the relevant real loop (no auth/keys for that backend), say so
+explicitly in the PR and fall back to the OpenCode free-model loop plus the
+dry-run matrix — do not silently skip it and call the change verified.
 
 ---
 

@@ -530,7 +530,29 @@ def build_config(
     runs_dir: pathlib.Path,
     timeout: int,
     reasoning: Optional[str],
+    *,
+    lead_backend: str = "claude",
+    partner_backend: str = "codex",
+    lead_model: Optional[str] = None,
+    partner_model: Optional[str] = None,
 ) -> dict:
+    lead_agent = {
+        "name": f"{lead_backend}-reviewer",
+        "backend": lead_backend,
+        "role": "reviewer",
+        "role_prompt": scenario.reviewer_prompt,
+    }
+    partner_agent = {
+        "name": f"{partner_backend}-coder",
+        "backend": partner_backend,
+        "role": "coder",
+        "role_prompt": scenario.coder_prompt,
+        "extra_args": [],
+    }
+    if lead_model:
+        lead_agent["model"] = lead_model
+    if partner_model:
+        partner_agent["model"] = partner_model
     cfg = {
         "cwd": str(repo),
         "max_turns": scenario.max_turns,
@@ -543,21 +565,7 @@ def build_config(
         "worktree_for": "partner",
         "recap": True,
         "task": scenario.task,
-        "agents": [
-            {
-                "name": "claude-reviewer",
-                "backend": "claude",
-                "role": "reviewer",
-                "role_prompt": scenario.reviewer_prompt,
-            },
-            {
-                "name": "codex-coder",
-                "backend": "codex",
-                "role": "coder",
-                "role_prompt": scenario.coder_prompt,
-                "extra_args": [],
-            },
-        ],
+        "agents": [lead_agent, partner_agent],
     }
     if reasoning:
         cfg["reasoning"] = reasoning
@@ -842,9 +850,30 @@ def parse_csv(value: Optional[str]) -> Optional[set[str]]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Run real Claude/Codex end-to-end loop scenarios for duet."
+        description="Run real end-to-end loop scenarios for duet. Defaults to a "
+        "Claude reviewer + Codex coder pairing, but --lead-backend / "
+        "--partner-backend / --lead-model / --partner-model retarget the same "
+        "scenarios at any backend (e.g. an OpenCode loop with free zen models, "
+        "which needs no auth)."
     )
     ap.add_argument("--duet", default=str(DEFAULT_DUET), help="path to duet.py")
+    ap.add_argument(
+        "--lead-backend", default="claude",
+        help="backend for the lead (reviewer) agent (default claude)",
+    )
+    ap.add_argument(
+        "--partner-backend", default="codex",
+        help="backend for the partner (coder) agent (default codex)",
+    )
+    ap.add_argument(
+        "--lead-model", default=None,
+        help="model for the lead agent (e.g. opencode/big-pickle for an "
+             "OpenCode loop)",
+    )
+    ap.add_argument(
+        "--partner-model", default=None,
+        help="model for the partner agent (e.g. opencode/big-pickle)",
+    )
     ap.add_argument(
         "--base-dir",
         default=None,
@@ -868,7 +897,11 @@ def main() -> int:
     if not duet_path.is_file():
         print(f"[test-loop] duet not found: {duet_path}", file=sys.stderr)
         return 2
-    for required in ("git", "claude", "codex"):
+    # Require git plus only the backends this run actually uses, so an
+    # OpenCode loop (--lead-backend opencode --partner-backend opencode) does
+    # not demand claude/codex be installed.
+    required_cmds = ["git", *sorted({args.lead_backend, args.partner_backend})]
+    for required in required_cmds:
         if shutil.which(required) is None:
             print(f"[test-loop] required command not on PATH: {required}", file=sys.stderr)
             return 2
@@ -910,7 +943,10 @@ def main() -> int:
         wanted_ids = {s.sid for s in wanted}
         all_scenarios = [s for s in all_scenarios if s.sid in wanted_ids]
 
+    lead_label = args.lead_backend + (f"/{args.lead_model}" if args.lead_model else "")
+    partner_label = args.partner_backend + (f"/{args.partner_model}" if args.partner_model else "")
     print(f"[test-loop] running {len(all_scenarios)} scenario(s)")
+    print(f"[test-loop] backends: lead={lead_label} reviewer · partner={partner_label} coder")
     print(f"[test-loop] artifacts: {base_dir}")
     print(f"[test-loop] reasoning: {args.reasoning or 'default'}")
 
@@ -932,7 +968,13 @@ def main() -> int:
             runs_dir = duet_runs_dir / label
             config_path = scenario_root / "duet-config.json"
             log_path = scenario_root / "duet.log"
-            cfg = build_config(scenario, repo, runs_dir, args.timeout, args.reasoning)
+            cfg = build_config(
+                scenario, repo, runs_dir, args.timeout, args.reasoning,
+                lead_backend=args.lead_backend,
+                partner_backend=args.partner_backend,
+                lead_model=args.lead_model,
+                partner_model=args.partner_model,
+            )
             write_text(config_path, json.dumps(cfg, indent=2) + "\n")
 
             timeout = scenario_timeout(
