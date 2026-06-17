@@ -293,7 +293,7 @@ Full install checklist, examples, and troubleshooting live in
 
 `make test` is the fast regression suite — it runs the stdlib unit tests in
 `tests/test_duet.py` (pure-function coverage of the convergence detector,
-codex/copilot session-id parsers, recap header parser, file-path heuristic, reasoning
+codex/copilot/opencode session-id parsers, recap header parser, file-path heuristic, reasoning
 maps, partner spec parser, markdown fence sizer, age formatter, and status
 heuristic) followed by `scripts/smoke.sh` dry-run cases that exercise the
 CLI surface and exit-code contract). Use `make unit-test` or
@@ -374,6 +374,12 @@ models:
 ./duet.py --task "Fix the issue" \
      --lead copilot:planner --partner copilot:coder \
      --worktree --turns 6
+
+# OpenCode planner + OpenCode coder (set per-agent models in YAML, or via
+# --lead-model / --partner-model, in the provider/model form OpenCode expects).
+./duet.py --task "Fix the issue" \
+     --lead opencode:planner --partner opencode:coder \
+     --worktree --turns 6
 ```
 
 For `codex`/`codex` peers sharing the same effective cwd, duet requires both
@@ -400,27 +406,27 @@ worktree gated by `verify_cmd`.
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
 | `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
-| `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`. May use the same backend as `--partner` |
-| `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`. May use the same backend as `--lead` |
+| `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
+| `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
 | `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared lead into the other slot, the model follows that agent |
 | `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared partner into the other slot, the model follows that agent |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
 | `--cwd PATH` | working dir for both agents |
-| `--sandbox` | Codex sandbox: `read-only`, `workspace-write`, `danger-full-access`. No-op for Claude, Gemini, and Copilot |
-| `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot |
+| `--sandbox` | Codex sandbox: `read-only`, `workspace-write`, `danger-full-access`. No-op for Claude, Gemini, Copilot, and OpenCode |
+| `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot and OpenCode |
 | `--timeout SEC` | per-turn timeout (default 900) |
 | `--runs-dir DIR` | where to save transcripts; default is `runs/` from the invocation directory, or `<cwd>/.duet/runs/` for a foreign `--cwd` |
 | `--config PATH` | YAML/JSON config (overrides most flags) |
 | `--worktree` | run the partner agent in a throwaway git worktree on a fresh `duet/<run_id>` branch; the worktree is left intact at the end |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
-| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `xhigh` passes through and `max` maps to `xhigh` because Codex does not document a separate `max` value. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
+| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `xhigh` passes through and `max` maps to `xhigh` because Codex does not document a separate `max` value. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** passes `run --variant <v>` with the level unchanged; OpenCode variants are provider-specific, but it silently ignores a variant a model doesn't define, so duet passes the level through for forward-compatibility. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
-| `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex ignores this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
+| `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--recap` | compact per-turn debug view; suppresses the live `│`-mirror and writes `recap.md` next to `transcript.md` |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
@@ -564,6 +570,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
+- **OpenCode**: each call uses `opencode run --format json`, and resumes with `opencode run -s <sessionID> ...`. Duet reads the top-level `sessionID` from OpenCode's JSONL event stream and persists it; the id is stable across turns (OpenCode does not rotate it), so resume is robustly id-keyed and two OpenCode agents can safely share one cwd. **`opencode run` exits 0 even when the model or a tool errors** — the failure is an `{"type":"error"}` event in the stream — so duet inspects the events and stops with `agent_error` on an error event or a missing `sessionID` rather than forwarding a broken reply.
 
 ---
 
@@ -621,7 +628,11 @@ Backend safety flags are adapter-specific. `--sandbox` is sent only to Codex.
 Gemini extra roots from `--add-dir` / `add_dirs:` are emitted as
 `--include-directories`. Copilot receives `--add-dir` for extra roots and runs
 in non-interactive mode with `--allow-all-tools`; use Copilot `extra_args` for
-additional `--deny-tool`, URL, or path policy.
+additional `--deny-tool`, URL, or path policy. OpenCode permissions are
+likewise native: duet runs `opencode run --dangerously-skip-permissions` so
+tool-using turns don't hang, scopes the project with `--dir <cwd>`, and has no
+`add_dirs:` equivalent (OpenCode operates on the whole `--dir` project); use
+OpenCode `extra_args` for narrower tool/permission policy.
 
 duet runs Codex with `--sandbox workspace-write` by default (configurable via `--sandbox` / YAML `sandbox:`). That sandbox **blocks outbound network by default** as a security feature — DNS, HTTPS, anything. So `gh`, `curl`, `npm install`, `pip install`, web APIs, etc. all fail from inside codex turns unless you opt in. Symptom looks like:
 

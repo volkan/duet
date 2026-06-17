@@ -151,8 +151,9 @@ coder fixes them). Run one with `duet --config examples/pr-review.yaml`.
 ## How it works
 
 Each agent keeps its own conversation memory across turns (Claude via
-`--resume`, Codex via `codex exec resume`, Gemini and Copilot via their JSON
-session ids). On each turn duet sends one agent's latest reply to the other.
+`--resume`, Codex via `codex exec resume`, Gemini, Copilot, and OpenCode via
+their JSON session ids). On each turn duet sends one agent's latest reply to the
+other.
 
 To converge, an agent must include an `LGTM rationale:` explaining why the work
 is done, followed by the sentinel `<<<LGTM>>>` on its own line — a bare
@@ -165,7 +166,7 @@ stderr logs, and the `wt/` worktree when `--worktree` is on. Inspect a run with
 `duet --status <run-id>`, list runs with `duet --list`, and start a fresh run
 from saved state with `duet --continue <run> --task "next thing"`.
 
-- **Backends:** `claude`, `codex`, `gemini`, `copilot`
+- **Backends:** `claude`, `codex`, `gemini`, `copilot`, `opencode`
 - **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
 - **Reasoning:** `--reasoning minimal|low|medium|high|xhigh|max`
 
