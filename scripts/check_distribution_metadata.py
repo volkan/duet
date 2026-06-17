@@ -34,6 +34,10 @@ CODEX_PLUGIN_JSON = CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CODEX_MARKETPLACE_JSON = ROOT / ".agents" / "plugins" / "marketplace.json"
 CODEX_SKILL = CODEX_PLUGIN_ROOT / "skills" / "duet" / "SKILL.md"
 CODEX_PLUGIN_DOC = ROOT / "docs" / "CODEX_PLUGIN.md"
+# OpenCode ships a drop-in custom command (no manifest / no version lockstep);
+# validate it exists and still wraps the duet CLI recipe.
+OPENCODE_COMMAND = ROOT / "plugins" / "duet-opencode" / "command" / "duet.md"
+OPENCODE_PLUGIN_DOC = ROOT / "docs" / "OPENCODE_PLUGIN.md"
 PYPROJECT = ROOT / "pyproject.toml"
 FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
@@ -232,6 +236,25 @@ def _assert_codex_plugin_metadata(
             _fail(f"plugins/duet/skills/duet/SKILL.md is missing required text: {required!r}")
 
 
+def _assert_opencode_command_metadata() -> None:
+    if not OPENCODE_PLUGIN_DOC.exists():
+        _fail("docs/OPENCODE_PLUGIN.md must exist for the OpenCode plugin")
+    if not OPENCODE_COMMAND.exists():
+        _fail("plugins/duet-opencode/command/duet.md must exist for the OpenCode plugin")
+    command_text = OPENCODE_COMMAND.read_text(encoding="utf-8")
+    for required in (
+        "command -v duet",
+        "command -v claude",
+        "command -v codex",
+        "duet --recap --cwd",
+        "claude -p /review",
+        "--partner codex:coder",
+        "$ARGUMENTS",
+    ):
+        if required not in command_text:
+            _fail(f"plugins/duet-opencode/command/duet.md is missing required text: {required!r}")
+
+
 def _assert_source_metadata() -> str:
     pyproject = _load_pyproject()
     claude_plugin = _load_json(CLAUDE_PLUGIN_JSON)
@@ -244,6 +267,7 @@ def _assert_source_metadata() -> str:
     _assert_project_metadata(project)
     _assert_claude_plugin_metadata(claude_plugin, claude_marketplace, version)
     _assert_codex_plugin_metadata(codex_plugin, codex_marketplace, version)
+    _assert_opencode_command_metadata()
     _assert_no_forbidden_text()
     return version
 

@@ -28,8 +28,12 @@ Each agent keeps its own session across turns:
     UUID makes resume robust to parallel Codex sessions sharing the cwd, but
     `--last` is still keyed on cwd — use `--worktree` to isolate duet's Codex
     cwd from the host repo when no UUID is available.
+  - Gemini: `gemini -p ... --output-format json`; subsequent turns use
+    `gemini --resume <session_id>` from the JSON response.
   - Copilot: `copilot -p ... --output-format json`; subsequent turns use
     `copilot --resume=<sessionId>` from the JSONL result event.
+  - OpenCode: `opencode run --format json`; subsequent turns use
+    `opencode run -s <sessionID>` from the JSONL event stream.
 
 Transcript is always logged to runs/<ts>/transcript.md for humans, but each
 prompt sent to an agent is just the latest counterpart message — keeping
@@ -222,6 +226,18 @@ COPILOT_REASONING_MAP = {
     "max":     "max",
 }
 COPILOT_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
+
+# OpenCode exposes reasoning effort through `run --variant <value>`, documented
+# as "provider-specific reasoning effort (e.g. high, max, minimal)". The valid
+# set is model/provider-dependent, but OpenCode silently ignores a variant a
+# model doesn't define rather than erroring, so we pass duet's level through
+# unchanged (identity map): a model that knows the variant honors it, one that
+# doesn't is unaffected. This keeps the mapping forward-compatible without duet
+# tracking each provider's variant vocabulary.
+OPENCODE_REASONING_MAP = {level: level for level in REASONING_LEVELS}
+# `--variant` is the authoritative effort control; the high/xhigh/max prompt
+# nudges are belt-and-braces, same as Claude/Gemini/Copilot.
+OPENCODE_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
 
 # Map duet's existing Claude-flavored permission mode knob to Gemini CLI's
 # approval vocabulary. Unknown values pass through so advanced users can try
@@ -1498,6 +1514,145 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
     return text, new_sid
 
 
+def _parse_opencode_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Return (assistant_text, sessionID, error_message) from `opencode run --format json`.
+
+    OpenCode emits a JSONL event stream on stdout. Every event carries a
+    top-level `sessionID`; assistant reply text arrives as one or more
+    ``{"type":"text","part":{"type":"text","text":...}}`` events; failures
+    arrive as ``{"type":"error","error":{...}}`` events. Crucially, `opencode
+    run` exits 0 even on model/tool errors — the failure lives in the event
+    stream, not the exit code — so the caller must treat a returned
+    error_message as fatal.
+
+    Text parts that carry an id are keyed by it (last write wins) so a streamed
+    part re-emitted as it grows doesn't duplicate; the rare id-less part gets a
+    unique synthetic key (``__noid_<n>``) so distinct parts (e.g. text split
+    around a tool call) are still concatenated in arrival order without ever
+    aliasing a real id. Non-JSON lines are skipped rather than fatal: OpenCode
+    can print a one-time DB-migration banner on a fresh machine, and a genuine
+    failure still surfaces via a missing sessionID or an error event.
+    """
+    parts: dict[str, str] = {}
+    session_id: Optional[str] = None
+    error_message: Optional[str] = None
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        sid = event.get("sessionID")
+        if sid:
+            session_id = str(sid)
+        etype = event.get("type")
+        if etype == "text":
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str):
+                    # Real OpenCode parts always carry a stable id (prt_…). The
+                    # synthetic key keeps a rare id-less part distinct without
+                    # ever aliasing a real id like "0".
+                    raw_id = part.get("id")
+                    pid = str(raw_id) if raw_id else f"__noid_{len(parts)}"
+                    parts[pid] = text
+        elif etype == "error":
+            err = event.get("error")
+            if isinstance(err, str):
+                # OpenCode documents a dict error payload, but tolerate a
+                # plain-string one so the real cause is surfaced verbatim
+                # instead of degrading to "unknown error".
+                msg = err
+            else:
+                data = err.get("data") if isinstance(err, dict) else None
+                msg = data.get("message") if isinstance(data, dict) else None
+                if not msg and isinstance(err, dict):
+                    msg = err.get("name")
+            error_message = str(msg or "unknown error")
+    return "\n".join(parts.values()).rstrip(), session_id, error_message
+
+
+def call_opencode(agent: Agent, system_prompt: str, message: str,
+                  cwd: pathlib.Path, timeout: int, dry: bool,
+                  first_turn: bool, reasoning: Optional[str] = None,
+                  stderr_log_path: Optional[pathlib.Path] = None,
+                  pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+    """Returns (assistant_text, new_session_id) from the OpenCode CLI JSONL stream."""
+    # OpenCode resume is id-keyed (`-s <sessionID>`) and the id is stable across
+    # turns, so there's no first-turn command bifurcation; the argument keeps the
+    # adapter dispatch signature aligned with Codex/Gemini/Copilot.
+    _ = first_turn
+    eff_cwd = agent.cwd_override or cwd
+    if reasoning:
+        prefix = backend_adapter("opencode").reasoning_prompt_prefix.get(reasoning, "")
+        system_prompt = prefix + system_prompt
+    if dry:
+        new_sid = agent.session_id or f"dry-opencode-{agent.name}-{int(time.time())}"
+        wt_note = f" wt={eff_cwd}" if agent.cwd_override else ""
+        rn = f" reasoning={reasoning}" if reasoning else ""
+        return (
+            f"[dry-run opencode/{agent.name}{wt_note}{rn}] received {len(message)} chars\n"
+            "LGTM rationale: dry-run accepted the harness path and has no real "
+            "agent output to review.\n"
+            f"{DEFAULT_SENTINEL}"
+        ), new_sid
+
+    full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    # OpenCode permissions are native; like Copilot we run non-interactively and
+    # auto-approve so tool-using turns don't hang waiting for an approval that
+    # can never arrive. `--sandbox` / `permission_mode` do not apply. All options
+    # precede the positional message (the `run [message..]` positional is last).
+    cmd = [
+        "opencode", "run",
+        "--format", "json",
+        "--dir", str(eff_cwd),
+        "--dangerously-skip-permissions",
+    ]
+    if agent.session_id:
+        cmd += ["-s", agent.session_id]
+    if reasoning:
+        variant = backend_adapter("opencode").reasoning_map.get(reasoning, reasoning)
+        if variant:
+            cmd += ["--variant", variant]
+    if agent.model:
+        cmd += ["-m", agent.model]
+    cmd += agent.extra_args
+    cmd.append(full_prompt)
+    rc, out, err = _agent_run(
+        cmd,
+        backend="opencode",
+        cwd=eff_cwd,
+        stdin=None,
+        timeout=timeout,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
+    if rc != 0:
+        reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+        raise AgentRunError(reason, f"opencode exited {rc}\nstderr:\n{err}")
+    text, new_sid, error_message = _parse_opencode_jsonl(out)
+    # `opencode run` exits 0 even when the model/tool errored; the failure is an
+    # error event in the JSONL stream. Surface it as agent_error rather than
+    # forwarding an empty or partial reply.
+    if error_message:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            f"opencode reported an error event: {error_message}",
+        )
+    if not new_sid:
+        raise AgentRunError(
+            FINISHED_AGENT_ERROR,
+            "opencode JSONL output did not include a sessionID; duet requires an "
+            "OpenCode CLI build that emits JSON session events for multi-turn memory.",
+        )
+    return text, new_sid
+
+
 def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
                          cfg: DuetConfig, first_turn: bool,
                          stderr_log_path: Optional[pathlib.Path],
@@ -1566,6 +1721,24 @@ def _call_copilot_backend(agent: Agent, system_prompt: str, message: str,
     )
 
 
+def _call_opencode_backend(agent: Agent, system_prompt: str, message: str,
+                           cfg: DuetConfig, first_turn: bool,
+                           stderr_log_path: Optional[pathlib.Path],
+                           pid_file_path: Optional[pathlib.Path],
+                           reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    # OpenCode's `run` operates on the whole project under `--dir`; it has no
+    # per-call extra-root flag, so cfg.add_dirs is intentionally not plumbed
+    # through (mirrors Codex, which also ignores add_dirs).
+    return call_opencode(
+        agent, system_prompt, message, cfg.cwd,
+        cfg.per_turn_timeout, cfg.dry_run,
+        first_turn=first_turn,
+        reasoning=reasoning,
+        stderr_log_path=stderr_log_path,
+        pid_file_path=pid_file_path,
+    )
+
+
 BACKENDS = {
     "claude": BackendAdapter(
         name="claude",
@@ -1595,6 +1768,13 @@ BACKENDS = {
         call=_call_copilot_backend,
         reasoning_map=COPILOT_REASONING_MAP,
         reasoning_prompt_prefix=COPILOT_REASONING_PROMPT_PREFIX,
+    ),
+    "opencode": BackendAdapter(
+        name="opencode",
+        binary="opencode",
+        call=_call_opencode_backend,
+        reasoning_map=OPENCODE_REASONING_MAP,
+        reasoning_prompt_prefix=OPENCODE_REASONING_PROMPT_PREFIX,
     ),
 }
 SUPPORTED_BACKENDS = set(BACKENDS)
@@ -3368,9 +3548,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default="codex:coder",
-                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder (default codex:coder)")
+                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder, opencode:coder (default codex:coder)")
     ap.add_argument("--lead", default="claude:planner",
-                    help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner (default; ignored if --resume-claude given)")
+                    help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--lead-model", metavar="MODEL", default=None,
                     help="model name to pass to the lead agent's backend via --model")
     ap.add_argument("--partner-model", metavar="MODEL", default=None,
@@ -3387,9 +3567,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--sandbox", default="workspace-write",
-                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot.")
+                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot/opencode.")
     ap.add_argument("--permission-mode", default="acceptEdits",
-                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot.")
+                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot/opencode.")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     ap.add_argument("--worktree", action="store_true",
                     help="run the partner agent in a throwaway git worktree on a fresh branch; "

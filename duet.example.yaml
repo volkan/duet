@@ -139,3 +139,21 @@ agents:
 #     # model: gpt-5.2
 #     # session_id: copilot-session-id-from-state-json
 #     # extra_args: ["--allow-url=github.com"]
+#
+# OpenCode planner + OpenCode coder. OpenCode requires a CLI build whose
+# `run --format json` stream carries a `sessionID`; duet stops with agent_error
+# if it is missing or if the stream contains an error event (note that
+# `opencode run` exits 0 even on model/tool errors). Permissions are native:
+# duet runs with `--dangerously-skip-permissions` and `--dir <cwd>`; --sandbox,
+# permission_mode, and add_dirs do not apply. Reasoning maps to `run --variant`.
+# Models use OpenCode's provider/model form.
+# agents:
+#   - name: opencode-lead
+#     backend: opencode
+#     role: planner
+#   - name: opencode-partner
+#     backend: opencode
+#     role: coder
+#     # model: anthropic/claude-sonnet-4-6
+#     # session_id: opencode-session-id-from-state-json
+#     # extra_args: ["--agent", "build"]

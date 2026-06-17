@@ -14,6 +14,8 @@ level, and asserts:
   - codex is invoked with `-c model_reasoning_effort=<mapped>` (or no `-c`
     flag at all for `medium`, which is Codex's default)
   - copilot is invoked with `--effort <mapped>`
+  - opencode is invoked with `--variant <level>` (identity map: OpenCode
+    tolerates/ignores unknown variants, so duet passes the level through)
   - gemini is invoked without any effort flag, because Gemini CLI has no
     documented reasoning-effort option
   - the system-prompt prefix contains the right reasoning-nudge marker for
@@ -40,12 +42,12 @@ import sys
 # near the start of the claude/gemini system-prompt prefix; for levels without
 # a reasoning nudge it's the literal sentinel "sys" we pass in below.
 EXPECTED = {
-    "minimal": {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=minimal", "copilot_effort": "none",   "gemini_arg": "(none)"},
-    "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low",     "copilot_effort": "low",    "gemini_arg": "(none)"},
-    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)",                         "copilot_effort": "medium", "gemini_arg": "(none)"},
-    "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high",    "copilot_effort": "high",   "gemini_arg": "(none)"},
-    "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "xhigh",  "gemini_arg": "(none)"},
-    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "max",    "gemini_arg": "(none)"},
+    "minimal": {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=minimal", "copilot_effort": "none",   "opencode_variant": "minimal", "gemini_arg": "(none)"},
+    "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low",     "copilot_effort": "low",    "opencode_variant": "low",     "gemini_arg": "(none)"},
+    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)",                         "copilot_effort": "medium", "opencode_variant": "medium",  "gemini_arg": "(none)"},
+    "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high",    "copilot_effort": "high",   "opencode_variant": "high",    "gemini_arg": "(none)"},
+    "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "xhigh",  "opencode_variant": "xhigh",   "gemini_arg": "(none)"},
+    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "max",    "opencode_variant": "max",     "gemini_arg": "(none)"},
 }
 
 
@@ -81,6 +83,17 @@ def main() -> int:
                 ]),
                 "",
             )
+        if cmd[0] == "opencode":
+            return (
+                0,
+                "\n".join([
+                    json.dumps({"type": "text", "sessionID": "ses_oc",
+                                "part": {"type": "text", "text": "ok", "id": "p1"}}),
+                    json.dumps({"type": "step_finish", "sessionID": "ses_oc",
+                                "part": {"type": "step-finish"}}),
+                ]),
+                "",
+            )
         return (0, "ok", "")
 
     m._run = fake_run  # type: ignore[attr-defined]
@@ -89,8 +102,9 @@ def main() -> int:
     a_cx = m.Agent(name="x", backend="codex", role="coder")
     a_gm = m.Agent(name="g", backend="gemini", role="coder")
     a_cp = m.Agent(name="p", backend="copilot", role="coder")
+    a_oc = m.Agent(name="o", backend="opencode", role="coder")
 
-    rows: list[tuple[str, str, str, str, str, str, bool, list[str]]] = []
+    rows: list[tuple[str, str, str, str, str, str, str, bool, list[str]]] = []
     bad = 0
 
     for lvl in m.REASONING_LEVELS:
@@ -141,6 +155,19 @@ def main() -> int:
             if "--effort" in copilot_cmd else "(none)"
         )
 
+        captured.clear()
+        m.call_opencode(
+            a_oc, "sys", "msg", pathlib.Path("."),
+            60, dry=False, first_turn=True, reasoning=lvl,
+        )
+        opencode_cmd = captured[-1]
+        # OpenCode takes the prompt as the trailing positional, not via `-p`.
+        opencode_prompt = opencode_cmd[-1]
+        opencode_variant = (
+            opencode_cmd[opencode_cmd.index("--variant") + 1]
+            if "--variant" in opencode_cmd else "(none)"
+        )
+
         want = EXPECTED[lvl]
         problems: list[str] = []
         if want["prefix_marker"] not in prefix[:30]:
@@ -160,24 +187,32 @@ def main() -> int:
                 f"copilot --effort {copilot_effort} "
                 f"(want {want['copilot_effort']})"
             )
+        if want["prefix_marker"] not in opencode_prompt[:60]:
+            problems.append(f"opencode prefix missing {want['prefix_marker']!r}")
+        if opencode_variant != want["opencode_variant"]:
+            problems.append(
+                f"opencode --variant {opencode_variant} "
+                f"(want {want['opencode_variant']})"
+            )
 
         rows.append((lvl, repr(prefix[:30]), effort, codex_arg,
-                     copilot_effort, gemini_arg, not problems, problems))
+                     copilot_effort, opencode_variant, gemini_arg,
+                     not problems, problems))
         if problems:
             bad += 1
 
     # Pretty-print the table even on success — same shape as the original
     # one-liner so the smoke check is easy to eyeball.
-    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     copilot  gemini_arg")
-    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 7}  {'-' * 20}")
-    for lvl, prefix_repr, effort, codex_arg, copilot_effort, gemini_arg, ok, _ in rows:
+    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     copilot  opencode  gemini_arg")
+    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 7}  {'-' * 8}  {'-' * 20}")
+    for lvl, prefix_repr, effort, codex_arg, copilot_effort, opencode_variant, gemini_arg, ok, _ in rows:
         mark = "" if ok else "  ← mismatch"
         print(f"{lvl:>8}  {prefix_repr:35}  {effort:6}  "
-              f"{codex_arg:30}  {copilot_effort:7}  {gemini_arg}{mark}")
+              f"{codex_arg:30}  {copilot_effort:7}  {opencode_variant:8}  {gemini_arg}{mark}")
 
     if bad:
         print(f"\nFAIL: {bad} row(s) mismatch.", file=sys.stderr)
-        for lvl, _, _, _, _, _, ok, problems in rows:
+        for lvl, _, _, _, _, _, _, ok, problems in rows:
             if not ok:
                 print(f"  {lvl}: {'; '.join(problems)}", file=sys.stderr)
         return 1

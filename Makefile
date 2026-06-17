@@ -29,7 +29,7 @@ package-check: ## build artifacts and validate wheel/sdist metadata
 plugin-check: ## validate the Claude Code plugin (root marketplace + narrowed plugin root)
 	@claude plugin validate .
 	@claude plugin validate plugins/duet-claude
-loop-test: ## run real Claude/Codex end-to-end loop scenarios (slow, costs model turns)
+loop-test: ## run real end-to-end loop scenarios (default Claude/Codex; retarget any backend via LOOP_TEST_ARGS="--lead-backend … --partner-backend …"; slow, costs model turns)
 	@python3 scripts/duet_loop_e2e.py $(LOOP_TEST_ARGS)
 build: ## build sdist+wheel into dist/ (needs current python3 to import build: python3 -m pip install build)
 	@python3 -m build

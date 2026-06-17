@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # scripts/smoke.sh - exercise duet's CLI surface in dry-run.
 set -euo pipefail
-DUET=${DUET:-./duet.py}
+# Anchor to THIS repo's duet.py via the script's own location, not cwd or PATH,
+# so smoke always tests the repo code regardless of where it is invoked from
+# and never silently falls back to a pipx-installed `duet`. Override with
+# DUET=… only to deliberately point at a different build.
+_SMOKE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DUET=${DUET:-"$_SMOKE_DIR/../duet.py"}
 # Resolve to absolute so cases that `cd $TMPD && duet …` still find the binary.
 DUET_ABS=$(cd "$(dirname "$DUET")" && pwd)/$(basename "$DUET")
 TMPD=$(mktemp -d -t duet-smoke.XXXX)
@@ -49,6 +54,8 @@ expect_stdout "gemini dry-run accepted"      0 "dry-run gemini/gemini-partner" "
 expect_stdout "gemini reasoning no effort"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1 --reasoning max
 expect_stdout "copilot dry-run accepted"     0 "dry-run copilot/copilot-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1
 expect_stdout "copilot reasoning accepted"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1 --reasoning max
+expect_stdout "opencode dry-run accepted"    0 "dry-run opencode/opencode-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1
+expect_stdout "opencode reasoning accepted"  0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1 --reasoning max
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)
@@ -89,6 +96,15 @@ expect "same-backend copilot dry-run slots" 0 bash -c '
     || { echo "missing copilot partner turn"; echo "$out"; exit 1; }
   echo "$out" | grep -q "Turn 2 :: copilot-lead" \
     || { echo "missing copilot lead turn"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
+expect "same-backend opencode dry-run slots" 0 bash -c '
+  out=$("$1" --task "x" --turns 2 --dry-run --cwd "$2" \
+         --lead opencode:planner --partner opencode:coder)
+  echo "$out" | grep -q "Turn 1 :: opencode-partner" \
+    || { echo "missing opencode partner turn"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: opencode-lead" \
+    || { echo "missing opencode lead turn"; echo "$out"; exit 1; }
   exit 0
 ' _ "$DUET_ABS" "$TMPD"
 echo "kickoff from file" > "$TMPD/k.txt"
@@ -727,6 +743,74 @@ m.call_gemini(
 resume = calls[-1]
 assert "--resume" in resume and "gemini-sid" in resume, resume
 assert "--approval-mode" in resume and "yolo" in resume, resume
+PY
+
+expect "opencode command args"               0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+cwd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+calls = []
+
+def fake_run(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, json.dumps(
+        {"type": "text", "sessionID": "oc-sid",
+         "part": {"type": "text", "text": "ok", "id": "p1"}}
+    ), ""
+
+m._run = fake_run
+agent = m.Agent(
+    name="opencode-partner",
+    backend="opencode",
+    role="coder",
+    model="anthropic/claude-sonnet-4-6",
+    extra_args=["--agent", "build"],
+)
+m.call_opencode(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    60,
+    dry=False,
+    first_turn=True,
+    reasoning="max",
+)
+first = calls[-1]
+assert first[:2] == ["opencode", "run"], first
+assert "--format" in first and "json" in first, first
+assert "--dir" in first, first
+assert "--dangerously-skip-permissions" in first, first
+assert "--variant" in first and first[first.index("--variant") + 1] == "max", first
+assert "-m" in first and "anthropic/claude-sonnet-4-6" in first, first
+assert "--agent" in first and "build" in first, first
+assert "--sandbox" not in first, first
+assert "--permission-mode" not in first, first
+assert "-s" not in first, first
+assert "ultrathink" in first[-1], first  # max -> prompt nudge, prompt is last positional
+
+agent.session_id = "oc-sid"
+m.call_opencode(
+    agent,
+    "sys",
+    "msg",
+    cwd,
+    60,
+    dry=False,
+    first_turn=False,
+)
+resume = calls[-1]
+assert "-s" in resume and resume[resume.index("-s") + 1] == "oc-sid", resume
 PY
 
 # Codex resume by parsed session UUID. call_codex must:

@@ -3,12 +3,12 @@
 **Two CLI agents in conversation. One Python file. Stdlib only.**
 
 `duet` runs two command-line coding agents in alternating turns until they
-agree. By default that is Claude and Codex; Gemini and Copilot are also
-supported, and you can pair two agents from the same backend. One agent plans
-or reviews while the other implements; each keeps its own session memory across
-turns, and every run leaves a transcript you can inspect.
+agree. By default that is Claude and Codex; Gemini, Copilot, and OpenCode are
+also supported, and you can pair two agents from the same backend. One agent
+plans or reviews while the other implements; each keeps its own session memory
+across turns, and every run leaves a transcript you can inspect.
 
-## Use it three ways
+## Use it four ways
 
 ### 1. Inside Claude Code — `/duet`
 
@@ -72,7 +72,26 @@ CLI, so install that first (see below) and make sure `command -v duet` passes in
 Codex's shell. Full guide:
 [docs/CODEX_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md).
 
-### 3. From the terminal — `duet`
+### 3. Inside OpenCode — `/duet`
+
+OpenCode custom commands are drop-in files — no marketplace step:
+
+```bash
+mkdir -p ~/.config/opencode/command
+cp plugins/duet-opencode/command/duet.md ~/.config/opencode/command/duet.md
+```
+
+Then invoke `/duet` in the OpenCode TUI (or `opencode run --command duet "..."`
+non-interactively). Like the other plugins it shells out to the `duet` CLI, so
+install that first and make sure `command -v duet` passes in OpenCode's shell.
+The command runs on OpenCode's `build` agent; plain `/duet` runs the same
+`claude -p /review` kickoff, and `/duet 'npm test 2>&1' --turns 4` seeds from
+any command. Full guide:
+[docs/OPENCODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
+(duet can also drive OpenCode as a backend — `--partner opencode:coder` — so
+OpenCode can be one of the two looped agents too.)
+
+### 4. From the terminal — `duet`
 
 ```bash
 pipx install duet-cli        # recommended; the command it installs is `duet`
@@ -151,8 +170,9 @@ coder fixes them). Run one with `duet --config examples/pr-review.yaml`.
 ## How it works
 
 Each agent keeps its own conversation memory across turns (Claude via
-`--resume`, Codex via `codex exec resume`, Gemini and Copilot via their JSON
-session ids). On each turn duet sends one agent's latest reply to the other.
+`--resume`, Codex via `codex exec resume`, Gemini, Copilot, and OpenCode via
+their JSON session ids). On each turn duet sends one agent's latest reply to the
+other.
 
 To converge, an agent must include an `LGTM rationale:` explaining why the work
 is done, followed by the sentinel `<<<LGTM>>>` on its own line — a bare
@@ -165,7 +185,7 @@ stderr logs, and the `wt/` worktree when `--worktree` is on. Inspect a run with
 `duet --status <run-id>`, list runs with `duet --list`, and start a fresh run
 from saved state with `duet --continue <run> --task "next thing"`.
 
-- **Backends:** `claude`, `codex`, `gemini`, `copilot`
+- **Backends:** `claude`, `codex`, `gemini`, `copilot`, `opencode`
 - **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
 - **Reasoning:** `--reasoning minimal|low|medium|high|xhigh|max`
 
