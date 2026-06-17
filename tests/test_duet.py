@@ -509,6 +509,67 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_TIMEOUT)
         self.assertIn("opencode exited 124", str(ctx.exception))
 
+    def test_opencode_error_event_precedes_missing_session_id(self) -> None:
+        # An error event with no sessionID must surface the error text, not the
+        # generic missing-sessionID message — locks the check ordering in
+        # call_opencode (mirrors the Gemini precedence test).
+        def fake_run(cmd, **kwargs):
+            return (
+                0,
+                '{"type":"error","error":{"data":{"message":"boom"}}}',
+                "",
+            )
+
+        agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_opencode(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("boom", str(ctx.exception))
+        self.assertNotIn("sessionID", str(ctx.exception))
+
+    def test_opencode_command_construction_and_resume(self) -> None:
+        # Capture the constructed argv to pin the flags the reasoning-check and
+        # dry-run exit codes can't see — especially the `-s` resume flag, whose
+        # silent loss would orphan multi-turn memory while still returning rc=0.
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            return (
+                0,
+                '{"type":"text","sessionID":"ses_new","part":{"type":"text","text":"ok","id":"p1"}}',
+                "",
+            )
+
+        agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            # First turn: no session_id yet.
+            duet.call_opencode(agent, "sys", "msg", _ROOT, 60,
+                               dry=False, first_turn=True)
+            first = captured[-1]
+            self.assertEqual(first[:2], ["opencode", "run"])
+            self.assertIn("--format", first)
+            self.assertEqual(first[first.index("--format") + 1], "json")
+            self.assertIn("--dir", first)
+            self.assertIn("--dangerously-skip-permissions", first)
+            self.assertNotIn("-s", first)  # nothing to resume on turn 1
+            # The prompt is the trailing positional arg (options come first).
+            self.assertIn("=== MESSAGE FROM PARTNER ===", first[-1])
+            self.assertTrue(first[-1].rstrip().endswith("msg"))
+
+            # Second turn: resume by the parsed session id.
+            agent.session_id = "ses_prev"
+            duet.call_opencode(agent, "sys", "msg2", _ROOT, 60,
+                               dry=False, first_turn=False)
+            second = captured[-1]
+            self.assertIn("-s", second)
+            self.assertEqual(second[second.index("-s") + 1], "ses_prev")
+
 
 # ---------- _parse_codex_session_id ----------
 
@@ -694,6 +755,30 @@ class TestParseOpencodeJsonl(unittest.TestCase):
         self.assertEqual(text, "ok")
         self.assertEqual(session_id, "ses_x")
         self.assertIsNone(error)
+
+    def test_string_error_payload_is_surfaced(self) -> None:
+        # OpenCode documents a dict error payload, but a plain-string one must
+        # surface verbatim rather than degrading to "unknown error".
+        out = '{"type":"error","sessionID":"ses_x","error":"Model not found: foo"}'
+
+        text, session_id, error = duet._parse_opencode_jsonl(out)
+
+        self.assertEqual(text, "")
+        self.assertEqual(session_id, "ses_x")
+        self.assertEqual(error, "Model not found: foo")
+
+    def test_idless_part_does_not_alias_real_id(self) -> None:
+        # An id-less text part must not collide with a real part whose id is the
+        # bare integer the old `len(parts)` fallback would have produced ("0").
+        # Both texts must survive, in arrival order.
+        out = "\n".join([
+            '{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"A"}}',
+            '{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"B","id":"0"}}',
+        ])
+
+        text, _, _ = duet._parse_opencode_jsonl(out)
+
+        self.assertEqual(text, "A\nB")
 
     def test_empty_returns_no_session(self) -> None:
         self.assertEqual(duet._parse_opencode_jsonl(""), ("", None, None))

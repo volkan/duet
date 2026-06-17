@@ -1525,12 +1525,13 @@ def _parse_opencode_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[str
     stream, not the exit code — so the caller must treat a returned
     error_message as fatal.
 
-    Text parts are keyed by part id (last write wins) so a streamed part that is
-    re-emitted as it grows doesn't duplicate, while multiple distinct text parts
-    (e.g. text split around a tool call) are concatenated in arrival order.
-    Non-JSON lines are skipped rather than fatal: OpenCode can print a one-time
-    DB-migration banner on a fresh machine, and a genuine failure still surfaces
-    via a missing sessionID or an error event.
+    Text parts that carry an id are keyed by it (last write wins) so a streamed
+    part re-emitted as it grows doesn't duplicate; the rare id-less part gets a
+    unique synthetic key (``__noid_<n>``) so distinct parts (e.g. text split
+    around a tool call) are still concatenated in arrival order without ever
+    aliasing a real id. Non-JSON lines are skipped rather than fatal: OpenCode
+    can print a one-time DB-migration banner on a fresh machine, and a genuine
+    failure still surfaces via a missing sessionID or an error event.
     """
     parts: dict[str, str] = {}
     session_id: Optional[str] = None
@@ -1554,14 +1555,24 @@ def _parse_opencode_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[str
             if isinstance(part, dict) and part.get("type") == "text":
                 text = part.get("text")
                 if isinstance(text, str):
-                    pid = str(part.get("id") or len(parts))
+                    # Real OpenCode parts always carry a stable id (prt_…). The
+                    # synthetic key keeps a rare id-less part distinct without
+                    # ever aliasing a real id like "0".
+                    raw_id = part.get("id")
+                    pid = str(raw_id) if raw_id else f"__noid_{len(parts)}"
                     parts[pid] = text
         elif etype == "error":
             err = event.get("error")
-            data = err.get("data") if isinstance(err, dict) else None
-            msg = data.get("message") if isinstance(data, dict) else None
-            if not msg and isinstance(err, dict):
-                msg = err.get("name")
+            if isinstance(err, str):
+                # OpenCode documents a dict error payload, but tolerate a
+                # plain-string one so the real cause is surfaced verbatim
+                # instead of degrading to "unknown error".
+                msg = err
+            else:
+                data = err.get("data") if isinstance(err, dict) else None
+                msg = data.get("message") if isinstance(data, dict) else None
+                if not msg and isinstance(err, dict):
+                    msg = err.get("name")
             error_message = str(msg or "unknown error")
     return "\n".join(parts.values()).rstrip(), session_id, error_message
 
