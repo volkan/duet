@@ -287,6 +287,29 @@ duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
 Full install checklist, examples, and troubleshooting live in
 [Codex Plugin](CODEX_PLUGIN.md).
 
+### `/duet` OpenCode command
+
+OpenCode custom commands are drop-in markdown files — there is no marketplace
+step. Copy (or symlink) the shipped command into OpenCode's command directory
+(`command/`, singular):
+
+```bash
+mkdir -p ~/.config/opencode/command
+cp plugins/duet-opencode/command/duet.md ~/.config/opencode/command/duet.md
+```
+
+The filename becomes the command, so this provides `/duet` in the TUI (and
+`opencode run --command duet "<args>"` non-interactively). It runs on OpenCode's
+`build` agent and shells out to the `duet` CLI, so the binary must be on PATH
+(`make install`, `pipx install duet-cli`, etc.) and the default recipe also
+needs `claude` and `codex`. Plain `/duet` runs the same `claude -p /review`
+kickoff; pass `'<shell cmd>' <duet flags>` to seed from any other command. Note
+that duet can also run OpenCode as a *backend* (`--partner opencode:coder`), so
+OpenCode can be one of the two looped agents, not just the host.
+
+Full install checklist, examples, and troubleshooting live in
+[OpenCode Plugin](OPENCODE_PLUGIN.md).
+
 ---
 
 ## Real loop test
