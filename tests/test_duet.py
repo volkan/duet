@@ -625,7 +625,12 @@ class TestParseCodexSessionId(unittest.TestCase):
             duet._parse_codex_session_id(f"see {self.UUID} for details")
         )
 
-    def test_last_match_wins(self) -> None:
+    def test_inline_session_id_label_rejected(self) -> None:
+        self.assertIsNone(
+            duet._parse_codex_session_id(f"trace: session id: {self.UUID}\n")
+        )
+
+    def test_first_line_start_match_wins(self) -> None:
         first = "11111111-1111-1111-1111-111111111111"
         second = "22222222-2222-2222-2222-222222222222"
         stderr = (
@@ -633,7 +638,19 @@ class TestParseCodexSessionId(unittest.TestCase):
             "...\n"
             f"session id: {second}\n"
         )
-        self.assertEqual(duet._parse_codex_session_id(stderr), second)
+        self.assertEqual(duet._parse_codex_session_id(stderr), first)
+
+    def test_existing_uuid_pin_not_replaced_by_different_parse(self) -> None:
+        existing = "11111111-1111-1111-1111-111111111111"
+        parsed = "22222222-2222-2222-2222-222222222222"
+        agent = duet.Agent(
+            name="codex-partner",
+            backend="codex",
+            role="coder",
+            session_id=existing,
+        )
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(duet._resolve_codex_session_pin(agent, parsed), existing)
 
     def test_uuid_re_pattern_round_trip(self) -> None:
         # Sanity: _CODEX_UUID_RE matches a parsed UUID; rejects the

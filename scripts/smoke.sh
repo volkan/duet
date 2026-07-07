@@ -49,6 +49,29 @@ expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --d
 expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
+expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+cmd = [
+    sys.executable,
+    "-c",
+    "import os; os.write(1, b'out:\\xff\\n'); os.write(2, b'err:\\xff\\n')",
+]
+rc, out, err = m._run(cmd, cwd=tmpd, stdin="", timeout=5)
+assert rc == 0, (rc, out, err)
+assert "out:\ufffd" in out, out
+assert "err:\ufffd" in err, err
+PY
 expect_stdout "reasoning xhigh accepted"     0 "reasoning=xhigh"    "$DUET" --task "x" --dry-run --cwd "$TMPD" --reasoning xhigh
 expect_stdout "gemini dry-run accepted"      0 "dry-run gemini/gemini-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1
 expect_stdout "gemini reasoning no effort"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner gemini:coder --turns 1 --reasoning max
@@ -147,6 +170,97 @@ expect_stdout "continue without task picks next speaker" 0 "Turn 1 :: codex-lead
 CONT_NEW=$(ls -1d "$TMPD/continue-runs-2"/2*/ 2>/dev/null | head -1 || true)
 [[ -n "$CONT_NEW" ]] && grep -q '"continue_from"' "$CONT_NEW/state.json" \
     || { echo "FAIL: continue_from missing from continued state.json"; FAIL=$((FAIL+1)); }
+
+expect "continue restores saved knobs"       0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+run_dir = tmpd / "continue-knobs" / "20260507-130000"
+run_dir.mkdir(parents=True)
+(run_dir / "state.json").write_text(json.dumps({
+    "task": "x",
+    "cwd": str(tmpd),
+    "turns_used": 1,
+    "agents": [
+        {"name": "claude-lead", "backend": "claude", "role": "planner", "session_id": "c1"},
+        {"name": "codex-partner", "backend": "codex", "role": "coder", "session_id": "codex-current"},
+    ],
+    "history": [{"turn": 1, "agent": "claude-lead"}],
+    "finished_reason": None,
+    "sentinel": "DONE",
+    "sandbox": "read-only",
+    "permission_mode": "plan",
+    "per_turn_timeout": 7,
+    "add_dirs": [str(tmpd / "extra")],
+    "reasoning": "high",
+    "codex_fast": True,
+}), encoding="utf-8")
+
+parser = m._build_arg_parser()
+args = parser.parse_args(["--continue", str(run_dir), "--dry-run"])
+cfg = m.build_continue_config(str(run_dir), args, parser, {})
+assert cfg.sentinel == "DONE", cfg.sentinel
+assert cfg.sandbox == "read-only", cfg.sandbox
+assert cfg.permission_mode == "plan", cfg.permission_mode
+assert cfg.per_turn_timeout == 7, cfg.per_turn_timeout
+assert cfg.add_dirs == [(tmpd / "extra").resolve()], cfg.add_dirs
+assert cfg.reasoning == "high", cfg.reasoning
+assert cfg.codex_fast is True
+PY
+
+expect "continue blocks untrusted state commands" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+run_dir = tmpd / "continue-trust" / "20260507-130001"
+run_dir.mkdir(parents=True)
+(run_dir / "state.json").write_text(json.dumps({
+    "task": "x",
+    "cwd": str(tmpd),
+    "turns_used": 1,
+    "agents": [
+        {"name": "claude-lead", "backend": "claude", "role": "planner", "extra_args": ["--debug"]},
+        {"name": "codex-partner", "backend": "codex", "role": "coder"},
+    ],
+    "history": [{"turn": 1, "agent": "claude-lead"}],
+    "finished_reason": None,
+    "verify_cmd": "echo trusted",
+}), encoding="utf-8")
+
+parser = m._build_arg_parser()
+args = parser.parse_args(["--continue", str(run_dir)])
+try:
+    m.build_continue_config(str(run_dir), args, parser, {})
+except SystemExit as exc:
+    assert exc.code == 2, exc.code
+else:
+    raise AssertionError("expected untrusted state command guard")
+
+trusted_args = parser.parse_args(["--continue", str(run_dir), "--trust-state"])
+cfg = m.build_continue_config(str(run_dir), trusted_args, parser, {})
+assert cfg.verify_cmd == "echo trusted", cfg.verify_cmd
+assert cfg.agents[0].extra_args == ["--debug"], cfg.agents[0].extra_args
+PY
 
 # Old crashed worktree runs may have a wt/ directory but no worktree field
 # in their rolling state.json. Continue should still reuse run/wt.
@@ -841,13 +955,21 @@ STDERR_WITH_UUID = (
     f"session id: {UUID}\n"
     "[codex] tool calls: 0\n"
 )
+POISON_UUID = "11111111-2222-3333-4444-555555555555"
+STDERR_WITH_POISON = (
+    f"session id: {UUID}\n"
+    "[codex] later tool output follows\n"
+    f"session id: {POISON_UUID}\n"
+)
 
 # 1. Stderr parser returns the UUID lowercased; tolerates noise; rejects
 #    arbitrary UUIDs that aren't labeled as a session id.
 assert m._parse_codex_session_id(STDERR_WITH_UUID) == UUID
 assert m._parse_codex_session_id("nothing here") is None
 assert m._parse_codex_session_id(f"trace: {UUID} happened") is None
+assert m._parse_codex_session_id(f"trace: session id: {UUID}\n") is None
 assert m._parse_codex_session_id(f"Session ID: {UUID.upper()}") == UUID
+assert m._parse_codex_session_id(STDERR_WITH_POISON) == UUID
 
 calls = []
 
@@ -889,7 +1011,22 @@ assert "--sandbox" not in resume, resume
 assert "--cd" not in resume, resume
 assert resume[-1].startswith("=== ROLE ==="), resume  # options before prompt
 
-# 4. The "codex-current" sentinel still routes through --last (legacy state).
+# 4. A mismatched later session id must not replace an established UUID pin.
+calls.clear()
+def fake_run_poison(cmd, **kwargs):
+    calls.append(cmd)
+    return 0, "ok", f"session id: {POISON_UUID}\n"
+
+m._run = fake_run_poison
+_, kept_sid = m.call_codex(
+    agent, "sys", "msg", cwd, "workspace-write", 60,
+    dry=False, first_turn=False,
+)
+assert kept_sid == UUID, kept_sid
+poison_resume = calls[-1]
+assert poison_resume[:4] == ["codex", "exec", "resume", UUID], poison_resume
+
+# 5. The "codex-current" sentinel still routes through --last (legacy state).
 agent.session_id = "codex-current"
 calls.clear()
 m.call_codex(
@@ -901,7 +1038,7 @@ assert legacy[:4] == ["codex", "exec", "resume", "--last"], legacy
 assert "--sandbox" not in legacy, legacy
 assert "--cd" not in legacy, legacy
 
-# 5. session_id=None plus first_turn=False (anomalous, but possible if state
+# 6. session_id=None plus first_turn=False (anomalous, but possible if state
 #    was hand-edited) takes the safe path: fresh `codex exec` with --sandbox
 #    and --cd, never an unanchored resume.
 agent.session_id = None
@@ -915,7 +1052,7 @@ assert fallback[:2] == ["codex", "exec"], fallback
 assert "resume" not in fallback, fallback
 assert "--sandbox" in fallback, fallback
 
-# 6. If stderr has no UUID, fresh turn returns the legacy sentinel so the
+# 7. If stderr has no UUID, fresh turn returns the legacy sentinel so the
 #    next turn still routes through --last instead of starting another
 #    fresh codex exec.
 def fake_run_no_uuid(cmd, **kwargs):
@@ -1400,6 +1537,58 @@ cat > "$SYNTH/state.json" <<JSON
 {"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":null,"duet_pid":1}
 JSON
 expect "stale duet_pid -> exit 2"             2 "$DUET" --status "$SYNTH"
+
+BAD_PID_ROOT="$TMPD/bad-pid-runs"
+SYNTH_BAD_PID="$BAD_PID_ROOT/20260507-140001"
+mkdir -p "$SYNTH_BAD_PID"
+cat > "$SYNTH_BAD_PID/state.json" <<JSON
+{"task":"x","cwd":".","turns_used":1,"agents":[],"history":[],"finished_reason":null,"duet_pid":"not-a-pid"}
+JSON
+expect "invalid duet_pid -> exit 2"           2 "$DUET" --status "$SYNTH_BAD_PID"
+expect_stdout "list invalid duet_pid"         0 "invalid pid" "$DUET" --list "$BAD_PID_ROOT"
+
+expect "status tolerates pid stat race"       0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import pathlib
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+run_dir = tmpd / "pid-race" / "20260507-140000"
+run_dir.mkdir(parents=True)
+(run_dir / "state.json").write_text(json.dumps({
+    "task": "x",
+    "cwd": str(tmpd),
+    "turns_used": 1,
+    "agents": [],
+    "history": [],
+    "finished_reason": "max_turns",
+}), encoding="utf-8")
+(run_dir / "turn-01-codex.pid").write_text("123\n", encoding="utf-8")
+
+original_stat = pathlib.Path.stat
+def flaky_stat(self, *args, **kwargs):
+    if self.name.endswith(".pid"):
+        raise FileNotFoundError(str(self))
+    return original_stat(self, *args, **kwargs)
+
+pathlib.Path.stat = flaky_stat
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = m.print_run_status(str(run_dir))
+finally:
+    pathlib.Path.stat = original_stat
+assert rc == 0, rc
+PY
 
 # Synthetic mid-run state.json predating duet_pid → exit 2 with legacy
 # fallback message.

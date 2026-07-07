@@ -486,6 +486,7 @@ worktree gated by `verify_cmd`.
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `xhigh` passes through and `max` maps to `xhigh` because Codex does not document a separate `max` value. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** passes `run --variant <v>` with the level unchanged; OpenCode variants are provider-specific, but it silently ignores a variant a model doesn't define, so duet passes the level through for forward-compatibility. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
+| `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd` and agent `extra_args` to be replayed after you inspect and trust that run directory. Without this, pass a fresh `--verify-cmd` when a continued run needs verification |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
@@ -506,6 +507,7 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     recap.md                                 # compact per-turn debug view, if --recap
     state.json                               # task, agents, session_ids, history,
                                              # finished_reason, duet_pid,
+                                             # sentinel/sandbox/permissions/reasoning,
                                              # worktree/worktree_for if present,
                                              # verify_cmd/last_verify if present,
                                              # recap_path if --recap,
@@ -523,7 +525,9 @@ The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your
 
 When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
 command, cwd, exit code, stdout, and stderr for each verification run.
-`state.json` also records `verify_cmd` and a capped `last_verify` summary.
+`state.json` also records the continuation-critical safety knobs
+(`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`,
+`codex_fast`) plus `verify_cmd` and a capped `last_verify` summary.
 
 ### Recap view
 
@@ -904,8 +908,10 @@ git add -p                               # selective (interactive)
 ### 3. Continue the conversation (optional)
 
 The shortest path is `--continue`. It reads the prior `state.json`, restores
-the same agent names/roles/session ids, reuses the saved worktree when present,
-and starts with the agent who should speak next:
+the same agent names/roles/session ids, restores saved run knobs such as
+`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, and
+`codex_fast`, reuses the saved worktree when present, and starts with the
+agent who should speak next:
 
 ```bash
 RUN=<runs_dir>/20260507-191155
@@ -919,6 +925,7 @@ Notes:
 - `--task`, `--kickoff`, and `--task-from-cmd` are optional; if present, they are treated as one extra continuation instruction. Pass at most one.
 - The old run remains intact. Continuation always creates a new run directory whose `state.json` includes `continue_from`.
 - If the old run used worktree mode, duet reuses that worktree. To override which agent owns it, pass `--worktree-for lead` or `--worktree-for partner`.
+- `state.json` is inside the run directory and may have been writable during the original run. `--continue` refuses to replay a saved `verify_cmd` or agent `extra_args` unless you pass `--trust-state` after inspecting that state file. You can also pass a fresh `--verify-cmd` instead of trusting the saved one.
 - Don't run other Codex sessions in the relevant cwd/worktree between runs if the prior run's `state.json` has no Codex `session_id` (i.e. it pre-dates UUID parsing or never managed to capture one) — that continuation will fall back to `codex exec resume --last`, which is cwd-based. When a UUID was captured, continuation pins to it and parallel Codex sessions in the same cwd are safe.
 
 You can also drop into a single agent without duet:
