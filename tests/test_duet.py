@@ -3,9 +3,9 @@
 These tests cover the correctness-critical helpers that `scripts/smoke.sh`
 can't observe through exit codes alone: convergence detection, codex/copilot
 session-id parsing, recap header parsing, file-path heuristics, reasoning
-mappings, partner-spec parsing, markdown-fence sizing, and the age
-formatter. They are pure-function tests — no subprocesses, no filesystem
-writes, no agent CLIs.
+mappings, partner-spec parsing, markdown-fence sizing, age formatting, and
+bounded agent-error transcript formatting. They are pure-function tests — no
+subprocesses, no filesystem writes, no agent CLIs.
 
 Run via:
     python3 -m unittest discover -s tests
@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import io
 import pathlib
+import re
 import subprocess
 import sys
 import unittest
@@ -259,6 +260,30 @@ class TestVerifyHelpers(unittest.TestCase):
 
 
 # ---------- agent finish reasons ----------
+
+
+class TestAgentFailureTranscript(unittest.TestCase):
+    def test_small_error_is_preserved_with_stderr_link(self) -> None:
+        log_path = pathlib.Path("/repo/runs/1/turn-01-codex.stderr.log")
+        block = duet.format_agent_error_for_transcript(
+            RuntimeError("backend failed"), log_path
+        )
+
+        self.assertIn("[duet] error: backend failed", block)
+        self.assertIn(f"[duet] stderr log: {log_path}", block)
+        self.assertNotIn("characters omitted", block)
+
+    def test_large_error_keeps_head_and_tail_with_omitted_count(self) -> None:
+        text = "HEAD-" + ("x" * 2000) + "-TAIL"
+        excerpt = duet._bounded_agent_error_excerpt(text, max_chars=240)
+
+        self.assertLessEqual(len(excerpt), 240)
+        self.assertTrue(excerpt.startswith("HEAD-"))
+        self.assertTrue(excerpt.endswith("-TAIL"))
+        match = re.search(r"(\d+) characters omitted", excerpt)
+        self.assertIsNotNone(match)
+        self.assertGreater(int(match.group(1)), 0)
+        self.assertNotIn("x" * 500, excerpt)
 
 
 class TestAgentFinishReasons(unittest.TestCase):
