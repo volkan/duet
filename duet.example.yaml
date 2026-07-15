@@ -41,7 +41,8 @@ dry_run: false
 # agents are untouched. Useful when the planner (claude) is doing the deep
 # thinking and codex just needs to apply edits quickly. Combine with
 # `reasoning: high` for that split. To force fast on a non-coder codex role,
-# set per-agent `reasoning_effort: low` instead.
+# set per-agent `reasoning_effort: low` instead. CLI `--no-codex-fast`
+# explicitly overrides `true`, including on `--continue`.
 # codex_fast: false
 
 # Optional: where new git worktrees land when --worktree is on. Default is

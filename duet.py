@@ -58,11 +58,16 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 from typing import Callable, Optional
 
 # ---------- defaults ----------
 
 DEFAULT_SENTINEL = "<<<LGTM>>>"
+DEFAULT_SANDBOX = "workspace-write"
+DEFAULT_PERMISSION_MODE = "acceptEdits"
+SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
+SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
@@ -318,8 +323,8 @@ class DuetConfig:
     sentinel: str = DEFAULT_SENTINEL
     per_turn_timeout: int = DEFAULT_TIMEOUT
     runs_dir: pathlib.Path = pathlib.Path("runs")
-    sandbox: str = "workspace-write"          # codex
-    permission_mode: str = "acceptEdits"      # claude/gemini
+    sandbox: str = DEFAULT_SANDBOX            # codex
+    permission_mode: str = DEFAULT_PERMISSION_MODE  # claude/gemini
     dry_run: bool = False
     recap: bool = False
     verify_cmd: Optional[str] = None          # shell command that must pass before
@@ -515,7 +520,8 @@ def is_git_repo(path: pathlib.Path) -> bool:
     try:
         r = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
         )
         return r.returncode == 0 and r.stdout.strip() == "true"
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -541,6 +547,8 @@ def setup_worktree(repo_path: pathlib.Path, branch_name: str,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             start_new_session=True,
         )
     except FileNotFoundError:
@@ -569,15 +577,18 @@ def git_diff_summary(wt_path: pathlib.Path, max_chars: int = 8000) -> str:
     try:
         status = subprocess.run(
             ["git", "-C", str(wt_path), "status", "--short"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
         ).stdout.rstrip()
         diff = subprocess.run(
             ["git", "-C", str(wt_path), "diff", "HEAD", "--stat"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
         ).stdout.rstrip()
         full = subprocess.run(
             ["git", "-C", str(wt_path), "diff", "HEAD"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10,
         ).stdout
         if len(full) > max_chars:
             full = full[:max_chars] + f"\n…[truncated, {len(full)-max_chars} more chars]"
@@ -838,7 +849,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             proc = subprocess.Popen(
                 cmd, cwd=str(cwd),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,  # line-buffered
+                text=True, encoding="utf-8", errors="replace",
+                bufsize=1,  # line-buffered
                 start_new_session=True,
             )
         except FileNotFoundError:
@@ -849,7 +861,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                 pid_file_path.parent.mkdir(parents=True, exist_ok=True)
                 # Write atomically so a poller never reads a half-written PID.
                 tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
-                tmp.write_text(f"{proc.pid}\n")
+                tmp.write_text(f"{proc.pid}\n", encoding="utf-8")
                 os.replace(tmp, pid_file_path)
             except OSError as e:
                 print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
@@ -1159,31 +1171,46 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
 # Codex's `codex exec` prints a line like `session id: 019e12ad-0b1b-7732-bd7b-6acbbd04ab46`
 # to stderr near startup; modern builds also re-emit it on resume. We pin to that
 # UUID for subsequent resumes so duet doesn't depend on `--last`'s cwd-keyed
-# lookup. Anchored to "session id" to avoid false-positives on stray UUIDs in
-# tracebacks or path strings; case-insensitive because the label has varied.
+# lookup. Match only line-start session labels so a stray inline UUID or tool
+# trace does not become a resume pin; case-insensitive because the label has
+# varied.
 _CODEX_UUID_PATTERN = (
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 _CODEX_SESSION_ID_RE = re.compile(
-    r"session[ _-]?id\s*[:=]\s*(" + _CODEX_UUID_PATTERN + r")",
-    re.IGNORECASE,
+    r"^\s*session[ _-]?id\s*[:=]\s*(" + _CODEX_UUID_PATTERN + r")",
+    re.IGNORECASE | re.MULTILINE,
 )
 _CODEX_UUID_RE = re.compile(r"\A" + _CODEX_UUID_PATTERN + r"\Z", re.IGNORECASE)
 
 
 def _parse_codex_session_id(stderr: str) -> Optional[str]:
-    """Return the last `session id: <uuid>` UUID found in Codex's stderr.
+    """Return the first line-start `session id: <uuid>` from Codex stderr.
 
-    The last match wins so a resume that emits both the inherited id and a
-    rotated id (if a future Codex build does that) ends up pinned to the
-    rotated one. Returns the UUID lowercased; None if no match. We never parse
-    stdout — Codex puts the assistant reply there and a UUID inside the reply
-    must not be confused for the harness's session pin.
+    Prefer the startup line over later stderr content from tools. Returns the
+    UUID lowercased; None if no match. We never parse stdout — Codex puts the
+    assistant reply there and a UUID inside the reply must not be confused for
+    the harness's session pin.
     """
     if not stderr:
         return None
-    matches = _CODEX_SESSION_ID_RE.findall(stderr)
-    return matches[-1].lower() if matches else None
+    match = _CODEX_SESSION_ID_RE.search(stderr)
+    return match.group(1).lower() if match else None
+
+
+def _resolve_codex_session_pin(agent: Agent, parsed_sid: Optional[str]) -> Optional[str]:
+    """Merge a parsed Codex session id with the agent's existing resume pin."""
+    if not parsed_sid:
+        return agent.session_id
+    if agent.session_id and _CODEX_UUID_RE.match(agent.session_id):
+        if parsed_sid != agent.session_id.lower():
+            print(
+                "[duet] WARNING: codex stderr reported a different session id "
+                f"({parsed_sid}); keeping established pin {agent.session_id}",
+                file=sys.stderr,
+            )
+            return agent.session_id
+    return parsed_sid
 
 
 def call_codex(agent: Agent, system_prompt: str, message: str,
@@ -1236,10 +1263,10 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # `["--full-auto"]` or `["--yolo"]`) and config overrides (`-c …`).
     #
     # IMPORTANT: `codex exec resume` accepts a SUBSET of `codex exec`'s
-    # flags. In particular, `--sandbox` and `--cd` are exec-only — they
-    # carry over from the resumed session and codex's clap parser rejects
-    # them on resume with "unexpected argument '--sandbox' found". So we
-    # split: exec_only_opts are passed only on the first call.
+    # flags. In particular, `--sandbox` and `--cd` are exec-only, and codex's
+    # clap parser rejects them on resume with "unexpected argument '--sandbox'
+    # found". Resume does accept config overrides, so reassert the sandbox via
+    # `sandbox_mode` instead of relying on the resumed invocation's defaults.
     shared_opts = ["--skip-git-repo-check"]
     if agent.model:
         shared_opts += ["--model", agent.model]
@@ -1251,9 +1278,16 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         cmd = ["codex", "exec", *options, full_prompt]
     else:
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
-        # directory regardless of how we resume. `--sandbox` and `--cd` are
-        # exec-only; sandbox carries over from the resumed session.
-        options = [*shared_opts, *reasoning_args, *agent.extra_args]
+        # directory regardless of how we resume. Keep the supported config
+        # override before the positional prompt so saved or explicitly narrowed
+        # continuation policies are enforced on the resumed turn.
+        resume_sandbox_opts = ["-c", f"sandbox_mode={json.dumps(sandbox)}"]
+        options = [
+            *shared_opts,
+            *reasoning_args,
+            *agent.extra_args,
+            *resume_sandbox_opts,
+        ]
         if _CODEX_UUID_RE.match(agent.session_id):
             # Pin to the UUID we parsed from a prior turn's stderr. This is
             # robust to parallel codex sessions sharing the cwd because
@@ -1287,7 +1321,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # were already carrying; finally fall back to the "codex-current"
     # sentinel so the next turn at least knows a prior turn happened.
     parsed_sid = _parse_codex_session_id(err)
-    return out.rstrip(), parsed_sid or agent.session_id or "codex-current"
+    session_pin = _resolve_codex_session_pin(agent, parsed_sid)
+    return out.rstrip(), session_pin or "codex-current"
 
 
 def _parse_gemini_session_id(stdout: str) -> Optional[str]:
@@ -2122,7 +2157,8 @@ def _setup_run_worktree(
         try:
             r = subprocess.run(
                 ["git", "-C", str(existing), "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=5,
             )
             wt_branch = r.stdout.strip() if r.returncode == 0 else None
         except Exception:
@@ -2179,11 +2215,18 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "history": history,
         "finished_reason": finished_reason,
         "transcript_path": str(transcript_path),
+        "sentinel": cfg.sentinel,
+        "sandbox": cfg.sandbox,
+        "permission_mode": cfg.permission_mode,
+        "per_turn_timeout": cfg.per_turn_timeout,
         "verify_cmd": cfg.verify_cmd,
         "last_verify": last_verify,
         "worktree": str(wt_path) if wt_path else None,
         "worktree_branch": wt_branch,
         "worktree_for": cfg.worktree_for,
+        "add_dirs": [str(d) for d in cfg.add_dirs],
+        "reasoning": cfg.reasoning,
+        "codex_fast": cfg.codex_fast,
         "continue_from": cfg.continue_from,
         "duet_pid": os.getpid(),
     }
@@ -2746,6 +2789,121 @@ def normalize_verify_cmd(value, parser: argparse.ArgumentParser) -> Optional[str
     return cmd
 
 
+def _state_int_or_arg(arg_value: Optional[int],
+                      state: dict,
+                      key: str,
+                      default: int,
+                      parser: argparse.ArgumentParser,
+                      option_name: str) -> int:
+    if arg_value is not None:
+        return arg_value
+    value = state.get(key, default)
+    if isinstance(value, bool):
+        parser.error(f"{option_name}: state.json field {key!r} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        parser.error(f"{option_name}: state.json field {key!r} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        parser.error(f"{option_name}: state.json field {key!r} must be an integer")
+    raise AssertionError("parser.error should have exited")
+
+
+def _state_str_or_arg(arg_value: Optional[str],
+                      state: dict,
+                      key: str,
+                      default: str,
+                      parser: argparse.ArgumentParser,
+                      option_name: str) -> str:
+    if arg_value is not None:
+        return arg_value
+    value = state.get(key, default)
+    if not isinstance(value, str):
+        parser.error(f"{option_name}: state.json field {key!r} must be a string")
+    return value
+
+
+def _state_list_or_arg(arg_value: Optional[list[str]],
+                       state: dict,
+                       key: str,
+                       parser: argparse.ArgumentParser,
+                       option_name: str) -> list[str]:
+    if arg_value is not None:
+        return arg_value
+    value = state.get(key, [])
+    if not isinstance(value, list):
+        parser.error(f"{option_name}: state.json field {key!r} must be a list")
+    return [str(item) for item in value]
+
+
+def _state_extra_args(agents: list[Agent]) -> list[tuple[str, list[str]]]:
+    return [(a.name, list(a.extra_args)) for a in agents if a.extra_args]
+
+
+def _state_authority_replays(args: argparse.Namespace,
+                             sandbox: str,
+                             permission_mode: str,
+                             add_dirs: list[str]) -> list[tuple[str, object]]:
+    """Return state-sourced settings that can widen a continued agent's authority."""
+    restored: list[tuple[str, object]] = []
+    if args.sandbox is None and sandbox not in SAFE_CONTINUE_SANDBOXES:
+        restored.append(("sandbox", sandbox))
+    if (args.permission_mode is None
+            and permission_mode not in SAFE_CONTINUE_PERMISSION_MODES):
+        restored.append(("permission_mode", permission_mode))
+    if args.add_dirs is None and add_dirs:
+        restored.append(("add_dirs", add_dirs))
+    return restored
+
+
+def _guard_continue_state_replay(state: dict,
+                                 agents: list[Agent],
+                                 args: argparse.Namespace,
+                                 parser: argparse.ArgumentParser,
+                                 *,
+                                 sandbox: str,
+                                 permission_mode: str,
+                                 add_dirs: list[str]) -> None:
+    """Require trust for executable or authority-widening state.json fields."""
+    restored_verify = args.verify_cmd is None and bool(state.get("verify_cmd"))
+    restored_extra_args = _state_extra_args(agents)
+    authority_replays = _state_authority_replays(
+        args, sandbox, permission_mode, add_dirs
+    )
+    protected_fields: list[str] = []
+    if restored_verify:
+        protected_fields.append("verify_cmd")
+    if restored_extra_args:
+        protected_fields.append("agent extra_args")
+    protected_fields.extend(name for name, _ in authority_replays)
+    if not protected_fields:
+        return
+    if not args.trust_state and not args.dry_run:
+        parser.error(
+            "--continue: refusing to replay state-sourced "
+            + ", ".join(protected_fields)
+            + "; pass --trust-state after inspecting state.json, or provide "
+              "fresh CLI overrides for the saved settings"
+        )
+    if args.trust_state:
+        if restored_verify:
+            print(
+                f"[duet] trusting verify_cmd from state.json: {state.get('verify_cmd')}",
+                file=sys.stderr,
+            )
+        for name, extra_args in restored_extra_args:
+            print(
+                f"[duet] trusting extra_args from state.json for {name}: "
+                f"{shlex.join(extra_args)}",
+                file=sys.stderr,
+            )
+        for name, value in authority_replays:
+            print(
+                f"[duet] trusting {name} from state.json: {value!r}",
+                file=sys.stderr,
+            )
+
+
 def _slot_name(backend: str, idx: int) -> str:
     slot = "lead" if idx == 0 else "partner"
     return f"{backend}-{slot}"
@@ -2875,7 +3033,7 @@ def apply_resume_overrides(
 
 
 def load_yaml_or_json(path: pathlib.Path) -> dict:
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     if path.suffix in {".yaml", ".yml"}:
         try:
             import yaml  # type: ignore
@@ -3033,6 +3191,31 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _coerce_pid(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    try:
+        pid = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_file_snapshot(pid_file: pathlib.Path) -> Optional[tuple[Optional[int], dt.datetime]]:
+    """Read a transient pid file; return None if it disappears mid-status."""
+    try:
+        text = pid_file.read_text(encoding="utf-8").strip()
+        stat = pid_file.stat()
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        print(f"[duet] unable to read pid file {pid_file}: {e}", file=sys.stderr)
+        return None
+    return _coerce_pid(text), dt.datetime.fromtimestamp(stat.st_mtime)
+
+
 def _proc_cmdline(pid: int) -> Optional[str]:
     """Best-effort read of a PID's full cmdline. Returns None on any failure.
 
@@ -3048,8 +3231,11 @@ def _proc_cmdline(pid: int) -> Optional[str]:
             return None
     # macOS / BSD: shell out to ps. Cheap, ~5ms.
     try:
-        r = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                           capture_output=True, text=True, timeout=2)
+        r = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=2,
+        )
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except (subprocess.TimeoutExpired, OSError):
@@ -3094,7 +3280,7 @@ def print_run_status(arg: str) -> int:
     state: dict = {}
     if state_path.exists():
         try:
-            state = json.loads(state_path.read_text())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
             print(f"[duet] state.json malformed: {e}", file=sys.stderr)
             return 3
@@ -3113,31 +3299,33 @@ def print_run_status(arg: str) -> int:
     pid_files = sorted(run_dir.glob("turn-*.pid"))
     if pid_files:
         pid_file = pid_files[-1]
-        try:
-            pid = int(pid_file.read_text().strip())
-        except (OSError, ValueError):
-            pid = None
-        # Filename: turn-<label>-<agent>.pid
-        stem = pid_file.stem  # turn-02-claude-planner
-        started_at = dt.datetime.fromtimestamp(pid_file.stat().st_mtime)
-        elapsed = (dt.datetime.now() - started_at).total_seconds()
-        alive = _pid_alive(pid) if pid is not None else False
-        print(f"  in-flight turn: {stem}")
-        print(f"    pid:          {pid}  (alive: {alive})")
-        print(f"    started:      {started_at.isoformat(timespec='seconds')}  "
-              f"({int(elapsed)}s ago)")
-        # Heartbeat from the matching stderr log
-        log = run_dir / f"{stem}.stderr.log"
-        if log.exists():
-            log_age = (dt.datetime.now()
-                       - dt.datetime.fromtimestamp(log.stat().st_mtime)).total_seconds()
-            print(f"    last stderr:  {int(log_age)}s ago "
-                  f"({log.stat().st_size} bytes)")
-        if not alive:
-            print("    ⚠ pid file present but process is gone — turn likely "
-                  "crashed or was killed without cleanup")
-            return 2
-        return 1
+        snapshot = _pid_file_snapshot(pid_file)
+        if snapshot is not None:
+            pid, started_at = snapshot
+            # Filename: turn-<label>-<agent>.pid
+            stem = pid_file.stem  # turn-02-claude-planner
+            elapsed = (dt.datetime.now() - started_at).total_seconds()
+            alive = _pid_alive(pid) if pid is not None else False
+            print(f"  in-flight turn: {stem}")
+            print(f"    pid:          {pid}  (alive: {alive})")
+            print(f"    started:      {started_at.isoformat(timespec='seconds')}  "
+                  f"({int(elapsed)}s ago)")
+            # Heartbeat from the matching stderr log
+            log = run_dir / f"{stem}.stderr.log"
+            try:
+                log_stat = log.stat()
+            except OSError:
+                log_stat = None
+            if log_stat is not None:
+                log_age = (dt.datetime.now()
+                           - dt.datetime.fromtimestamp(log_stat.st_mtime)).total_seconds()
+                print(f"    last stderr:  {int(log_age)}s ago "
+                      f"({log_stat.st_size} bytes)")
+            if not alive:
+                print("    ⚠ pid file present but process is gone — turn likely "
+                      "crashed or was killed without cleanup")
+                return 2
+            return 1
     # No pid files. Either run hasn't started, has finished, or is between
     # turns (in particular, sitting at the post-loop `force>` prompt).
     if finished:
@@ -3148,7 +3336,12 @@ def print_run_status(arg: str) -> int:
     # duet_pid recorded in state.json.
     duet_pid = state.get("duet_pid")
     if duet_pid is not None:
-        if _is_duet_process(int(duet_pid)):
+        pid = _coerce_pid(duet_pid)
+        if pid is None:
+            print(f"  ⚠ invalid duet_pid {duet_pid!r}; no valid liveness "
+                  "proof recorded")
+            return 2
+        if _is_duet_process(pid):
             print(f"  state:           between turns / awaiting force> prompt")
             print(f"  duet pid:        {duet_pid} (alive)")
             history = state.get("history") or []
@@ -3170,6 +3363,18 @@ def print_run_status(arg: str) -> int:
     print("  (state.json predates the duet_pid field; can't auto-distinguish "
           "alive-between-turns from crashed)")
     return 2
+
+
+def print_run_status_safe(arg: str) -> int:
+    try:
+        return print_run_status(arg)
+    except Exception as e:
+        print(
+            f"[duet] status failed ({type(e).__name__}): {e}",
+            file=sys.stderr,
+        )
+        traceback.print_exc(file=sys.stderr)
+        return 3
 
 
 # ---------- run-list (`duet --list [PATH]`) ----------
@@ -3258,7 +3463,7 @@ def _load_run_state(run_dir: pathlib.Path,
     if not state_path.is_file():
         parser.error(f"{option_name}: missing state.json in {run_dir}")
     try:
-        return json.loads(state_path.read_text())
+        return json.loads(state_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         parser.error(f"{option_name}: state.json malformed: {e}")
     except OSError as e:
@@ -3392,6 +3597,28 @@ def build_continue_config(run_arg: str,
         parser.error(f"--continue: no such run dir or id: {run_arg}")
     state = _load_run_state(run_dir, parser, "--continue")
     agents = _agents_from_state(state, parser, "--continue")
+    sentinel = _state_str_or_arg(
+        args.sentinel, state, "sentinel", DEFAULT_SENTINEL, parser, "--continue"
+    )
+    sandbox = _state_str_or_arg(
+        args.sandbox, state, "sandbox", DEFAULT_SANDBOX, parser, "--continue"
+    )
+    permission_mode = _state_str_or_arg(
+        args.permission_mode, state, "permission_mode", DEFAULT_PERMISSION_MODE,
+        parser, "--continue",
+    )
+    add_dirs = _state_list_or_arg(
+        args.add_dirs, state, "add_dirs", parser, "--continue"
+    )
+    _guard_continue_state_replay(
+        state,
+        agents,
+        args,
+        parser,
+        sandbox=sandbox,
+        permission_mode=permission_mode,
+        add_dirs=add_dirs,
+    )
     # Older runs (or runs that crashed before the first state.json roll) may
     # have Codex agents that already spoke but have no saved session_id. Without
     # a marker, run_duet would treat the next turn as a fresh `codex exec` and
@@ -3407,7 +3634,10 @@ def build_continue_config(run_arg: str,
                     and agent.name in codex_speakers):
                 agent.session_id = "codex-current"
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
-    timeout = args.timeout
+    timeout = _state_int_or_arg(
+        args.timeout, state, "per_turn_timeout", DEFAULT_TIMEOUT,
+        parser, "--continue",
+    )
     user_note = _continue_note_from_args(args, cwd, timeout, parser, stdin_cache)
     next_idx = _next_speaker_idx_from_state(agents, state)
 
@@ -3429,11 +3659,11 @@ def build_continue_config(run_arg: str,
         task=state.get("task"),
         kickoff=kickoff,
         max_turns=args.turns,
-        sentinel=args.sentinel,
+        sentinel=sentinel,
         per_turn_timeout=timeout,
         runs_dir=runs_dir,
-        sandbox=args.sandbox,
-        permission_mode=args.permission_mode,
+        sandbox=sandbox,
+        permission_mode=permission_mode,
         dry_run=args.dry_run,
         recap=args.recap or bool(state.get("recap_path")),
         verify_cmd=normalize_verify_cmd(
@@ -3443,9 +3673,15 @@ def build_continue_config(run_arg: str,
         worktree=False,
         worktree_for=worktree_for,
         worktree_path=worktree_path,
-        add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
-        reasoning=args.reasoning,
-        codex_fast=bool(args.codex_fast),
+        add_dirs=[
+            pathlib.Path(d).expanduser().resolve()
+            for d in add_dirs
+        ],
+        reasoning=args.reasoning if args.reasoning is not None else state.get("reasoning"),
+        codex_fast=bool(
+            args.codex_fast
+            if args.codex_fast is not None else state.get("codex_fast", False)
+        ),
         start_speaker_idx=next_idx,
         continue_from=str(run_dir),
     )
@@ -3478,7 +3714,7 @@ def _classify_run(run_dir: pathlib.Path) -> tuple[str, str, dict]:
     if not state_path.is_file():
         return ("❓", "no state.json", {})
     try:
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return ("❓", "malformed state", {})
     finished = state.get("finished_reason")
@@ -3489,9 +3725,12 @@ def _classify_run(run_dir: pathlib.Path) -> tuple[str, str, dict]:
     if list(run_dir.glob("turn-*.pid")):
         return ("🟢", "in-flight", state)
     pid = state.get("duet_pid")
-    if pid is not None and _is_duet_process(int(pid)):
-        return ("🟢", "between turns", state)
     if pid is not None:
+        coerced = _coerce_pid(pid)
+        if coerced is None:
+            return ("⚠", "invalid pid", state)
+        if _is_duet_process(coerced):
+            return ("🟢", "between turns", state)
         return ("⚠", "duet died", state)
     return ("⚠", "stuck (no pid)", state)
 
@@ -3601,18 +3840,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="model name to pass to the partner agent's backend via --model")
     ap.add_argument("--cwd", default=".", help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
-    ap.add_argument("--sentinel", default=DEFAULT_SENTINEL,
+    ap.add_argument("--sentinel", default=None,
                     help="convergence sentinel; requires an LGTM rationale and "
                          "back-to-back proposals from both agents")
-    ap.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="per-turn timeout seconds")
+    ap.add_argument("--timeout", type=int, default=None,
+                    help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT})")
     ap.add_argument("--verify-cmd", metavar="CMD", default=None,
                     help="shell command that must exit 0 before a convergence "
                          "proposal can count. Runs only for valid LGTM+rationale "
                          "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
-    ap.add_argument("--sandbox", default="workspace-write",
+    ap.add_argument("--sandbox", default=None,
                     help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot/opencode.")
-    ap.add_argument("--permission-mode", default="acceptEdits",
+    ap.add_argument("--permission-mode", default=None,
                     help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot/opencode.")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     ap.add_argument("--worktree", action="store_true",
@@ -3630,7 +3870,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "Each run lands at <PATH>/<run_id>/. Default: <runs_dir>/<run_id>/wt/, "
                          "which is durable across reboots and OS temp-dir cleaners. "
                          "Pass /tmp or $TMPDIR to mimic the pre-fix throwaway behavior.")
-    ap.add_argument("--add-dir", action="append", metavar="PATH", default=[],
+    ap.add_argument("--add-dir", action="append", metavar="PATH", default=None,
                     dest="add_dirs",
                     help="extra path claude/gemini/copilot may access outside cwd. "
                          "Repeatable. Claude and Copilot receive --add-dir; "
@@ -3643,14 +3883,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "(minimal → low) and adds high/xhigh/max prompt nudges. "
                          "Copilot: passes `--effort <v>` (minimal → none). "
                          "Gemini: no effort flag; high/xhigh/max are prompt nudges only.")
-    ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
-                    help="Codex-only fast mode: pin codex coder turns to "
-                         "`model_reasoning_effort=low` and "
-                         "`model_reasoning_summary=concise`, regardless of "
-                         "--reasoning / per-agent reasoning_effort. Trades "
-                         "depth for latency on codex coder turns; claude is "
-                         "unaffected, so `--reasoning high --codex-fast` is "
-                         "a real and useful combo. YAML key: `codex_fast: true`.")
+    codex_fast_group = ap.add_mutually_exclusive_group()
+    codex_fast_group.add_argument(
+        "--codex-fast", action="store_true", dest="codex_fast",
+        help="Codex-only fast mode: pin codex coder turns to "
+             "`model_reasoning_effort=low` and "
+             "`model_reasoning_summary=concise`, regardless of --reasoning / "
+             "per-agent reasoning_effort. YAML key: `codex_fast: true`.",
+    )
+    codex_fast_group.add_argument(
+        "--no-codex-fast", action="store_false", dest="codex_fast",
+        help="disable codex fast mode, including a value restored by "
+             "--continue or enabled by a YAML/JSON config",
+    )
+    ap.set_defaults(codex_fast=None)
+    ap.add_argument("--trust-state", action="store_true", dest="trust_state",
+                    help="with --continue, allow state.json-sourced commands "
+                         "and authority-widening sandbox, permission, or "
+                         "add-dir settings after inspecting the run directory")
     ap.add_argument("--status", metavar="RUN_DIR_OR_ID", default=None,
                     help="don't run a duet — instead print a one-shot health "
                          "summary of an existing run and exit. Accepts a path "
@@ -3691,10 +3941,13 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
     flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast)
-    override or OR with their file values; --resume-* still apply on top."""
+    override or combine with file values; --resume-* still apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
     cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
-    cfg_timeout = int(raw.get("per_turn_timeout", DEFAULT_TIMEOUT))
+    cfg_timeout = int(raw.get(
+        "per_turn_timeout",
+        args.timeout if args.timeout is not None else DEFAULT_TIMEOUT,
+    ))
     raw_task = raw.get("task")
     raw_kickoff = raw.get("kickoff")
     raw_task_from_cmd = raw.get("task_from_cmd")
@@ -3725,11 +3978,21 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         task=task,
         kickoff=kickoff,
         max_turns=int(raw.get("max_turns", DEFAULT_TURNS)),
-        sentinel=raw.get("sentinel", DEFAULT_SENTINEL),
+        sentinel=raw.get(
+            "sentinel",
+            args.sentinel if args.sentinel is not None else DEFAULT_SENTINEL,
+        ),
         per_turn_timeout=cfg_timeout,
         runs_dir=choose_runs_dir(raw_runs_dir, cfg_cwd),
-        sandbox=raw.get("sandbox", "workspace-write"),
-        permission_mode=raw.get("permission_mode", "acceptEdits"),
+        sandbox=raw.get(
+            "sandbox",
+            args.sandbox if args.sandbox is not None else DEFAULT_SANDBOX,
+        ),
+        permission_mode=raw.get(
+            "permission_mode",
+            args.permission_mode
+            if args.permission_mode is not None else DEFAULT_PERMISSION_MODE,
+        ),
         dry_run=bool(raw.get("dry_run", False)),
         recap=bool(raw.get("recap", False)) or args.recap,
         verify_cmd=verify_cmd,
@@ -3739,10 +4002,16 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         worktree_root=_resolve_opt_path(args.worktree_root, raw.get("worktree_root")),
         add_dirs=[
             pathlib.Path(d).expanduser().resolve()
-            for d in (args.add_dirs or raw.get("add_dirs", []))
+            for d in (
+                args.add_dirs if args.add_dirs is not None
+                else raw.get("add_dirs", [])
+            )
         ],
         reasoning=args.reasoning or raw.get("reasoning"),
-        codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
+        codex_fast=bool(
+            args.codex_fast
+            if args.codex_fast is not None else raw.get("codex_fast", False)
+        ),
     )
     cfg.agents = apply_resume_overrides(
         cfg.agents,
@@ -3761,12 +4030,13 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     agent in the "wrong" slot still routes its session id correctly.
     """
     cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
+    timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
     task, kickoff = resolve_seed_inputs(
         task=args.task,
         kickoff=args.kickoff,
         task_from_cmd=args.task_from_cmd,
         cwd=cfg_cwd,
-        timeout=args.timeout,
+        timeout=timeout,
         parser=ap,
         stdin_cache=stdin_cache,
     )
@@ -3792,11 +4062,14 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         task=task,
         kickoff=kickoff,
         max_turns=args.turns,
-        sentinel=args.sentinel,
-        per_turn_timeout=args.timeout,
+        sentinel=args.sentinel if args.sentinel is not None else DEFAULT_SENTINEL,
+        per_turn_timeout=timeout,
         runs_dir=choose_runs_dir(args.runs_dir, cfg_cwd),
-        sandbox=args.sandbox,
-        permission_mode=args.permission_mode,
+        sandbox=args.sandbox if args.sandbox is not None else DEFAULT_SANDBOX,
+        permission_mode=(
+            args.permission_mode
+            if args.permission_mode is not None else DEFAULT_PERMISSION_MODE
+        ),
         dry_run=args.dry_run,
         recap=args.recap,
         verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
@@ -3804,7 +4077,10 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         worktree_for=args.worktree_for or "partner",
         worktree_path=_resolve_opt_path(args.worktree_path),
         worktree_root=_resolve_opt_path(args.worktree_root),
-        add_dirs=[pathlib.Path(d).expanduser().resolve() for d in args.add_dirs],
+        add_dirs=[
+            pathlib.Path(d).expanduser().resolve()
+            for d in (args.add_dirs or [])
+        ],
         reasoning=args.reasoning,
         codex_fast=bool(args.codex_fast),
     )
@@ -3848,7 +4124,7 @@ def main() -> int:
 
     # `--status` is read-only: print run health and exit. Skip everything below.
     if args.status:
-        return print_run_status(args.status)
+        return print_run_status_safe(args.status)
 
     # `--list` is read-only: print the run-dir table and exit.
     if args.list_runs is not None:
