@@ -114,6 +114,8 @@ These break easily if you only update one place.
 
 `subprocess.Popen` with `start_new_session=True` so we own a process group (clean SIGTERM/SIGKILL via `os.killpg`). Two reader threads drain stdout/stderr line-by-line; stderr is mirrored to the user's terminal (with `LIVE_PREFIX = "  │ "`) **and** tee'd to a per-turn `*.stderr.log` file. `pid_file_path` is written atomically (temp+rename) on Popen and removed in `finally`. `_terminate_active_processes(SIGKILL)` walks `_ACTIVE_PROCS` (a thread-locked set) on second-Ctrl-C.
 
+Failed-turn transcript blocks must go through `format_agent_error_for_transcript`: it keeps a bounded head/tail excerpt (`AGENT_ERROR_TRANSCRIPT_MAX_CHARS`) and points at the per-turn stderr log, which remains the complete forensic record. Do not inline an unbounded `str(exc)` into `transcript.md`.
+
 `LIVE_STREAM` and `LIVE_PREFIX` are module-level mutable globals. `resolve_task_from_cmd` swaps `LIVE_PREFIX` to `"  $ "` while running the user's task command and restores it via try/finally — this is the only legitimate write to that global; don't add others.
 
 ### `str.replace("{SENTINEL}", ...)`, never `.format(...)`

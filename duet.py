@@ -70,6 +70,7 @@ DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
+AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
 VERIFY_LIVE_PREFIX = "  │ [verify] "
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
 FINISHED_CONVERGED = "converged"
@@ -1828,6 +1829,50 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
     return text
 
 
+def _bounded_agent_error_excerpt(
+    text: str,
+    max_chars: int = AGENT_ERROR_TRANSCRIPT_MAX_CHARS,
+) -> str:
+    """Keep the useful edges of an error without bloating the transcript."""
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+
+    omitted = len(text)
+    while True:
+        marker = (
+            f"\n\n[duet] error text truncated: {omitted} characters omitted; "
+            "full subprocess stderr remains in the log below.\n\n"
+        )
+        excerpt_chars = max_chars - len(marker)
+        if excerpt_chars <= 0:
+            fallback = (
+                f"[duet] error text truncated: {len(text)} characters omitted"
+            )
+            return fallback[:max_chars]
+        head_chars = (excerpt_chars + 1) // 2
+        tail_chars = excerpt_chars // 2
+        new_omitted = len(text) - head_chars - tail_chars
+        if new_omitted == omitted:
+            tail = text[-tail_chars:] if tail_chars else ""
+            return text[:head_chars] + marker + tail
+        omitted = new_omitted
+
+
+def format_agent_error_for_transcript(
+    exc: Exception,
+    stderr_log_path: pathlib.Path,
+    max_chars: int = AGENT_ERROR_TRANSCRIPT_MAX_CHARS,
+) -> str:
+    """Format bounded error context while pointing at the complete stderr."""
+    excerpt = _bounded_agent_error_excerpt(str(exc), max_chars)
+    return "\n".join([
+        f"[duet] error: {excerpt}",
+        f"[duet] stderr log: {stderr_log_path}",
+    ])
+
+
 def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
                          agent: Agent, run_dir: pathlib.Path) -> str:
     kind = "TIMEOUT" if reason == FINISHED_TIMEOUT else "AGENT ERROR"
@@ -1836,8 +1881,7 @@ def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
         f"[duet] {kind}: turn {turn_label} failed for "
         f"{agent.name} ({agent.backend}/{agent.role})",
         f"[duet] finished_reason: {reason}",
-        f"[duet] error: {exc}",
-        f"[duet] stderr log: {log_path}",
+        format_agent_error_for_transcript(exc, log_path),
     ])
 
 # ---------- loop ----------

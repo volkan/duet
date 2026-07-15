@@ -584,10 +584,15 @@ sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 
 def fake_run(cmd, **kwargs):
+    stderr = (
+        "fatal backend stderr head\n"
+        + ("X" * (m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS * 2))
+        + "\nfatal backend stderr tail\n"
+    )
     log_path = kwargs.get("stderr_log_path")
     if log_path is not None:
-        m.write_text_atomic(log_path, "fatal backend stderr\n")
-    return 7, "", "fatal backend stderr"
+        m.write_text_atomic(log_path, stderr)
+    return 7, "", stderr
 
 m._run = fake_run
 cfg = m.DuetConfig(
@@ -606,11 +611,20 @@ last = state["history"][-1]
 assert last["finished_reason"] == "agent_error", last
 assert "codex exited 7" in last["error"], last
 log_path = pathlib.Path(last["stderr_log_path"])
-assert "fatal backend stderr" in log_path.read_text(), log_path
+stderr_log = log_path.read_text()
+assert "fatal backend stderr head" in stderr_log, log_path
+assert "fatal backend stderr tail" in stderr_log, log_path
+assert len(stderr_log) > m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS, len(stderr_log)
 transcript = pathlib.Path(state["transcript_path"]).read_text()
 assert "finished_reason: agent_error" in transcript, transcript
-assert "fatal backend stderr" in transcript, transcript
+assert "fatal backend stderr head" in transcript, transcript
+assert "fatal backend stderr tail" in transcript, transcript
+assert "characters omitted" in transcript, transcript
+assert "X" * m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS not in transcript
+assert len(transcript) < m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS + 4000, len(transcript)
 assert str(log_path) in transcript, transcript
+assert m.print_run_status(str(log_path.parent)) == 0
+assert m.print_runs_list(cfg.runs_dir) == 0
 PY
 
 expect "seed extract timeout finish reason"  0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
