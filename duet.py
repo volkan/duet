@@ -1263,10 +1263,10 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # `["--full-auto"]` or `["--yolo"]`) and config overrides (`-c …`).
     #
     # IMPORTANT: `codex exec resume` accepts a SUBSET of `codex exec`'s
-    # flags. In particular, `--sandbox` and `--cd` are exec-only — they
-    # carry over from the resumed session and codex's clap parser rejects
-    # them on resume with "unexpected argument '--sandbox' found". So we
-    # split: exec_only_opts are passed only on the first call.
+    # flags. In particular, `--sandbox` and `--cd` are exec-only, and codex's
+    # clap parser rejects them on resume with "unexpected argument '--sandbox'
+    # found". Resume does accept config overrides, so reassert the sandbox via
+    # `sandbox_mode` instead of relying on the resumed invocation's defaults.
     shared_opts = ["--skip-git-repo-check"]
     if agent.model:
         shared_opts += ["--model", agent.model]
@@ -1278,9 +1278,16 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         cmd = ["codex", "exec", *options, full_prompt]
     else:
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
-        # directory regardless of how we resume. `--sandbox` and `--cd` are
-        # exec-only; sandbox carries over from the resumed session.
-        options = [*shared_opts, *reasoning_args, *agent.extra_args]
+        # directory regardless of how we resume. Keep the supported config
+        # override before the positional prompt so saved or explicitly narrowed
+        # continuation policies are enforced on the resumed turn.
+        resume_sandbox_opts = ["-c", f"sandbox_mode={json.dumps(sandbox)}"]
+        options = [
+            *shared_opts,
+            *reasoning_args,
+            *agent.extra_args,
+            *resume_sandbox_opts,
+        ]
         if _CODEX_UUID_RE.match(agent.session_id):
             # Pin to the UUID we parsed from a prior turn's stderr. This is
             # robust to parallel codex sessions sharing the cwd because

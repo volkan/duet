@@ -708,6 +708,12 @@ error connecting to api.github.com
 check your internet connection or https://githubstatus.com
 ```
 
+Codex's `exec resume` subcommand does not accept the `--sandbox` flag. On every
+resumed Codex turn, duet therefore reasserts the selected policy with the
+supported `-c sandbox_mode="<mode>"` override. This applies both a sandbox
+restored by `--continue` and a fresh `--sandbox` override instead of silently
+falling back to Codex's invocation or user-config default.
+
 To enable network for a run, pass codex this config override via the codex agent's `extra_args` in your YAML:
 
 ```yaml

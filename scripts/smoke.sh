@@ -985,7 +985,8 @@ PY
 #      run_duet writes a real id (not the "codex-current" sentinel) to
 #      state.json on the first turn.
 #   2. On the next turn, pin to that UUID with `codex exec resume <uuid>`
-#      (no `--last`, no `--sandbox`, no `--cd`).
+#      (no `--last`, no `--sandbox`, no `--cd`) and reassert the configured
+#      sandbox through resume's supported `-c sandbox_mode=...` override.
 #   3. Keep the legacy `codex-current` sentinel routing through `--last`.
 #   4. Treat session_id=None as "no resume info" → fresh `codex exec`.
 #   5. Keep all options BEFORE the positional prompt.
@@ -1044,7 +1045,8 @@ assert "--sandbox" in first, first
 assert "--cd" in first, first
 assert first[-1].startswith("=== ROLE ==="), first  # prompt is last
 
-# 3. With a real UUID stored, resume pins to it and drops --last/--sandbox/--cd.
+# 3. With a real UUID stored, resume pins to it, drops
+#    --last/--sandbox/--cd, and enforces an explicitly narrowed sandbox.
 agent.session_id = UUID
 calls.clear()
 
@@ -1054,7 +1056,7 @@ def fake_run_resume(cmd, **kwargs):
 
 m._run = fake_run_resume
 m.call_codex(
-    agent, "sys", "msg", cwd, "workspace-write", 60,
+    agent, "sys", "msg", cwd, "read-only", 60,
     dry=False, first_turn=False,
 )
 resume = calls[-1]
@@ -1062,6 +1064,7 @@ assert resume[:4] == ["codex", "exec", "resume", UUID], resume
 assert "--last" not in resume, resume
 assert "--sandbox" not in resume, resume
 assert "--cd" not in resume, resume
+assert resume[-3:-1] == ["-c", 'sandbox_mode="read-only"'], resume
 assert resume[-1].startswith("=== ROLE ==="), resume  # options before prompt
 
 # 4. A mismatched later session id must not replace an established UUID pin.
@@ -1083,13 +1086,14 @@ assert poison_resume[:4] == ["codex", "exec", "resume", UUID], poison_resume
 agent.session_id = "codex-current"
 calls.clear()
 m.call_codex(
-    agent, "sys", "msg", cwd, "workspace-write", 60,
+    agent, "sys", "msg", cwd, "read-only", 60,
     dry=False, first_turn=False,
 )
 legacy = calls[-1]
 assert legacy[:4] == ["codex", "exec", "resume", "--last"], legacy
 assert "--sandbox" not in legacy, legacy
 assert "--cd" not in legacy, legacy
+assert legacy[-3:-1] == ["-c", 'sandbox_mode="read-only"'], legacy
 
 # 6. session_id=None plus first_turn=False (anomalous, but possible if state
 #    was hand-edited) takes the safe path: fresh `codex exec` with --sandbox
