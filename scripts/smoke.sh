@@ -160,6 +160,25 @@ JSON
 expect "config task_from_cmd"                0 "$DUET" --config "$TMPD/cfg.json"
 expect "config cli --runs-dir override"      0 "$DUET" --config "$TMPD/cfg.json" --runs-dir "$TMPD/config-runs"
 [[ -d "$TMPD/config-runs" ]] || { echo "FAIL: config-runs not created"; FAIL=$((FAIL+1)); }
+CFG_FALLBACK_RUNS="$TMPD/config-fallback-runs"
+expect "config cli fallback knobs"          0 "$DUET" --config "$TMPD/cfg.json" \
+  --runs-dir "$CFG_FALLBACK_RUNS" --sentinel CLI_DONE --timeout 17 \
+  --sandbox read-only --permission-mode plan --add-dir "$TMPD/config-extra"
+CFG_FALLBACK_RUN=$(ls -1d "$CFG_FALLBACK_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$CFG_FALLBACK_RUN" ]]; then
+  grep -q '"sentinel": "CLI_DONE"' "$CFG_FALLBACK_RUN/state.json" \
+    || { echo "FAIL: config CLI sentinel fallback missing"; FAIL=$((FAIL+1)); }
+  grep -q '"per_turn_timeout": 17' "$CFG_FALLBACK_RUN/state.json" \
+    || { echo "FAIL: config CLI timeout fallback missing"; FAIL=$((FAIL+1)); }
+  grep -q '"sandbox": "read-only"' "$CFG_FALLBACK_RUN/state.json" \
+    || { echo "FAIL: config CLI sandbox fallback missing"; FAIL=$((FAIL+1)); }
+  grep -q '"permission_mode": "plan"' "$CFG_FALLBACK_RUN/state.json" \
+    || { echo "FAIL: config CLI permission fallback missing"; FAIL=$((FAIL+1)); }
+  grep -q 'config-extra' "$CFG_FALLBACK_RUN/state.json" \
+    || { echo "FAIL: config CLI add-dir fallback missing"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: config fallback run not created"; FAIL=$((FAIL+1))
+fi
 
 # `--continue` restores agents/session ids from a prior state.json and
 # starts the next agent after the last completed turn.
@@ -216,6 +235,14 @@ assert cfg.per_turn_timeout == 7, cfg.per_turn_timeout
 assert cfg.add_dirs == [(tmpd / "extra").resolve()], cfg.add_dirs
 assert cfg.reasoning == "high", cfg.reasoning
 assert cfg.codex_fast is True
+
+disabled_args = parser.parse_args([
+    "--continue", str(run_dir), "--dry-run", "--no-codex-fast",
+])
+disabled_cfg = m.build_continue_config(
+    str(run_dir), disabled_args, parser, {}
+)
+assert disabled_cfg.codex_fast is False
 PY
 
 expect "continue blocks untrusted state commands" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
@@ -245,6 +272,9 @@ run_dir.mkdir(parents=True)
     "history": [{"turn": 1, "agent": "claude-lead"}],
     "finished_reason": None,
     "verify_cmd": "echo trusted",
+    "sandbox": "danger-full-access",
+    "permission_mode": "bypassPermissions",
+    "add_dirs": ["/"],
 }), encoding="utf-8")
 
 parser = m._build_arg_parser()
@@ -260,6 +290,9 @@ trusted_args = parser.parse_args(["--continue", str(run_dir), "--trust-state"])
 cfg = m.build_continue_config(str(run_dir), trusted_args, parser, {})
 assert cfg.verify_cmd == "echo trusted", cfg.verify_cmd
 assert cfg.agents[0].extra_args == ["--debug"], cfg.agents[0].extra_args
+assert cfg.sandbox == "danger-full-access", cfg.sandbox
+assert cfg.permission_mode == "bypassPermissions", cfg.permission_mode
+assert cfg.add_dirs == [pathlib.Path("/")], cfg.add_dirs
 PY
 
 # Old crashed worktree runs may have a wt/ directory but no worktree field
@@ -745,6 +778,12 @@ cat > "$TMPD/cfg-fast.json" <<JSON
 {"cwd":"$TMPD","dry_run":true,"task":"x","codex_fast":true,"agents":[{"name":"claude-lead","backend":"claude","role":"planner"},{"name":"codex-partner","backend":"codex","role":"coder"}]}
 JSON
 expect_stdout "codex_fast yaml key"          0 "fast"               "$DUET" --config "$TMPD/cfg-fast.json"
+expect "no-codex-fast overrides yaml"       0 bash -c '
+  out=$("$1" --config "$2" --no-codex-fast)
+  echo "$out" | grep -q "\[dry-run codex/.* fast" \
+    && { echo "codex fast remained enabled"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD/cfg-fast.json"
 
 expect "codex-fast command args"             0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util

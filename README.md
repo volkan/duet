@@ -145,6 +145,8 @@ duet --reasoning high --codex-fast \
     --task "Fix the issue" --cwd ~/workspace/project
 ```
 
+Use `--no-codex-fast` to override a config or continued run that enabled it.
+
 **Verify gate** — a convergence proposal only counts if `make test` exits 0;
 any failure feeds back into the next turn:
 

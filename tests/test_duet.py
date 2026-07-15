@@ -4,8 +4,9 @@ These tests cover the correctness-critical helpers that `scripts/smoke.sh`
 can't observe through exit codes alone: convergence detection, codex/copilot
 session-id parsing, recap header parsing, file-path heuristics, reasoning
 mappings, partner-spec parsing, markdown-fence sizing, age formatting, and
-bounded agent-error transcript formatting. They are pure-function tests — no
-subprocesses, no filesystem writes, no agent CLIs.
+bounded agent-error transcript formatting, continuation-state validation, and
+status fallbacks. They are pure-function tests — no subprocesses, no filesystem
+writes, no agent CLIs.
 
 Run via:
     python3 -m unittest discover -s tests
@@ -1134,6 +1135,18 @@ class TestBuildCfgFromCli(unittest.TestCase):
         self.assertIsNone(cfg.agents[0].model)
         self.assertIsNone(cfg.agents[1].model)
 
+    def test_codex_fast_flags_are_tristate_and_mutually_exclusive(self) -> None:
+        _, omitted = self._parse("--task", "x")
+        _, enabled = self._parse("--task", "x", "--codex-fast")
+        _, disabled = self._parse("--task", "x", "--no-codex-fast")
+
+        self.assertIsNone(omitted.codex_fast)
+        self.assertIs(enabled.codex_fast, True)
+        self.assertIs(disabled.codex_fast, False)
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self._parse("--task", "x", "--codex-fast", "--no-codex-fast")
+
 
 # ---------- apply_resume_overrides ----------
 
@@ -1510,6 +1523,140 @@ class TestFormatByteSize(unittest.TestCase):
     def test_kib_threshold_and_rounding(self) -> None:
         self.assertEqual(duet._format_byte_size(1024), "1.0KB")
         self.assertEqual(duet._format_byte_size(1536), "1.5KB")
+
+
+# ---------- continuation state helpers ----------
+
+
+class TestContinueStateHelpers(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parser = duet.argparse.ArgumentParser()
+
+    def test_state_int_prefers_cli_then_parses_saved_value(self) -> None:
+        self.assertEqual(
+            duet._state_int_or_arg(
+                11, {"timeout": "bad"}, "timeout", 7,
+                self.parser, "--continue",
+            ),
+            11,
+        )
+        self.assertEqual(
+            duet._state_int_or_arg(
+                None, {"timeout": "13"}, "timeout", 7,
+                self.parser, "--continue",
+            ),
+            13,
+        )
+
+    def test_state_int_rejects_malformed_saved_value(self) -> None:
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet._state_int_or_arg(
+                None, {"timeout": "not-an-int"}, "timeout", 7,
+                self.parser, "--continue",
+            )
+
+    def test_state_str_prefers_cli_and_rejects_non_string_state(self) -> None:
+        self.assertEqual(
+            duet._state_str_or_arg(
+                "plan", {"permission_mode": 42}, "permission_mode",
+                duet.DEFAULT_PERMISSION_MODE, self.parser, "--continue",
+            ),
+            "plan",
+        )
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet._state_str_or_arg(
+                None, {"permission_mode": 42}, "permission_mode",
+                duet.DEFAULT_PERMISSION_MODE, self.parser, "--continue",
+            )
+
+    def test_state_list_prefers_cli_and_rejects_non_list_state(self) -> None:
+        self.assertEqual(
+            duet._state_list_or_arg(
+                ["fresh"], {"add_dirs": "not-a-list"}, "add_dirs",
+                self.parser, "--continue",
+            ),
+            ["fresh"],
+        )
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet._state_list_or_arg(
+                None, {"add_dirs": "not-a-list"}, "add_dirs",
+                self.parser, "--continue",
+            )
+
+    def test_authority_widening_state_requires_trust(self) -> None:
+        args = duet.argparse.Namespace(
+            verify_cmd=None,
+            trust_state=False,
+            dry_run=False,
+            sandbox=None,
+            permission_mode=None,
+            add_dirs=None,
+        )
+        with self.assertRaises(SystemExit), \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet._guard_continue_state_replay(
+                {}, [], args, self.parser,
+                sandbox="danger-full-access",
+                permission_mode="bypassPermissions",
+                add_dirs=["/"],
+            )
+
+    def test_safe_or_explicit_authority_values_do_not_require_trust(self) -> None:
+        safe_args = duet.argparse.Namespace(
+            verify_cmd=None,
+            trust_state=False,
+            dry_run=False,
+            sandbox=None,
+            permission_mode=None,
+            add_dirs=None,
+        )
+        duet._guard_continue_state_replay(
+            {}, [], safe_args, self.parser,
+            sandbox="read-only",
+            permission_mode="plan",
+            add_dirs=[],
+        )
+        override_args = duet.argparse.Namespace(
+            verify_cmd=None,
+            trust_state=False,
+            dry_run=False,
+            sandbox="workspace-write",
+            permission_mode="acceptEdits",
+            add_dirs=["fresh"],
+        )
+        duet._guard_continue_state_replay(
+            {}, [], override_args, self.parser,
+            sandbox="workspace-write",
+            permission_mode="acceptEdits",
+            add_dirs=["fresh"],
+        )
+
+
+# ---------- status helpers ----------
+
+
+class TestStatusHelpers(unittest.TestCase):
+    def test_coerce_pid_accepts_positive_integers_only(self) -> None:
+        self.assertEqual(duet._coerce_pid(42), 42)
+        self.assertEqual(duet._coerce_pid("42"), 42)
+        self.assertEqual(duet._coerce_pid(42.0), 42)
+        for value in (None, "bad", True, False, 0, -1, 1.5):
+            with self.subTest(value=value):
+                self.assertIsNone(duet._coerce_pid(value))
+
+    def test_status_safe_reports_traceback_and_returns_three(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch.object(
+                duet, "print_run_status", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(stderr):
+            rc = duet.print_run_status_safe("run")
+
+        self.assertEqual(rc, 3)
+        self.assertIn("status failed (RuntimeError): boom", stderr.getvalue())
+        self.assertIn("Traceback (most recent call last)", stderr.getvalue())
 
 
 # ---------- normalize_verify_cmd ----------

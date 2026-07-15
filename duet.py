@@ -58,6 +58,7 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 from typing import Callable, Optional
 
 # ---------- defaults ----------
@@ -65,6 +66,8 @@ from typing import Callable, Optional
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
+SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
+SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
@@ -2779,13 +2782,6 @@ def normalize_verify_cmd(value, parser: argparse.ArgumentParser) -> Optional[str
     return cmd
 
 
-def _state_or_arg(arg_value: object, state: dict, key: str, default: object) -> object:
-    """For --continue, prefer an explicit CLI value, then saved state, then default."""
-    if arg_value is not None:
-        return arg_value
-    return state.get(key, default)
-
-
 def _state_int_or_arg(arg_value: Optional[int],
                       state: dict,
                       key: str,
@@ -2795,11 +2791,29 @@ def _state_int_or_arg(arg_value: Optional[int],
     if arg_value is not None:
         return arg_value
     value = state.get(key, default)
+    if isinstance(value, bool):
+        parser.error(f"{option_name}: state.json field {key!r} must be an integer")
+    if isinstance(value, float) and not value.is_integer():
+        parser.error(f"{option_name}: state.json field {key!r} must be an integer")
     try:
         return int(value)
     except (TypeError, ValueError):
         parser.error(f"{option_name}: state.json field {key!r} must be an integer")
     raise AssertionError("parser.error should have exited")
+
+
+def _state_str_or_arg(arg_value: Optional[str],
+                      state: dict,
+                      key: str,
+                      default: str,
+                      parser: argparse.ArgumentParser,
+                      option_name: str) -> str:
+    if arg_value is not None:
+        return arg_value
+    value = state.get(key, default)
+    if not isinstance(value, str):
+        parser.error(f"{option_name}: state.json field {key!r} must be a string")
+    return value
 
 
 def _state_list_or_arg(arg_value: Optional[list[str]],
@@ -2819,26 +2833,50 @@ def _state_extra_args(agents: list[Agent]) -> list[tuple[str, list[str]]]:
     return [(a.name, list(a.extra_args)) for a in agents if a.extra_args]
 
 
-def _guard_continue_state_commands(state: dict,
-                                   agents: list[Agent],
-                                   args: argparse.Namespace,
-                                   parser: argparse.ArgumentParser) -> None:
-    """Require explicit trust before replaying executable state.json fields."""
+def _state_authority_replays(args: argparse.Namespace,
+                             sandbox: str,
+                             permission_mode: str,
+                             add_dirs: list[str]) -> list[tuple[str, object]]:
+    """Return state-sourced settings that can widen a continued agent's authority."""
+    restored: list[tuple[str, object]] = []
+    if args.sandbox is None and sandbox not in SAFE_CONTINUE_SANDBOXES:
+        restored.append(("sandbox", sandbox))
+    if (args.permission_mode is None
+            and permission_mode not in SAFE_CONTINUE_PERMISSION_MODES):
+        restored.append(("permission_mode", permission_mode))
+    if args.add_dirs is None and add_dirs:
+        restored.append(("add_dirs", add_dirs))
+    return restored
+
+
+def _guard_continue_state_replay(state: dict,
+                                 agents: list[Agent],
+                                 args: argparse.Namespace,
+                                 parser: argparse.ArgumentParser,
+                                 *,
+                                 sandbox: str,
+                                 permission_mode: str,
+                                 add_dirs: list[str]) -> None:
+    """Require trust for executable or authority-widening state.json fields."""
     restored_verify = args.verify_cmd is None and bool(state.get("verify_cmd"))
     restored_extra_args = _state_extra_args(agents)
-    if not (restored_verify or restored_extra_args):
+    authority_replays = _state_authority_replays(
+        args, sandbox, permission_mode, add_dirs
+    )
+    protected_fields: list[str] = []
+    if restored_verify:
+        protected_fields.append("verify_cmd")
+    if restored_extra_args:
+        protected_fields.append("agent extra_args")
+    protected_fields.extend(name for name, _ in authority_replays)
+    if not protected_fields:
         return
     if not args.trust_state and not args.dry_run:
-        details: list[str] = []
-        if restored_verify:
-            details.append("verify_cmd")
-        if restored_extra_args:
-            details.append("agent extra_args")
         parser.error(
             "--continue: refusing to replay state-sourced "
-            + " and ".join(details)
+            + ", ".join(protected_fields)
             + "; pass --trust-state after inspecting state.json, or provide "
-              "a fresh --verify-cmd when verification is needed"
+              "fresh CLI overrides for the saved settings"
         )
     if args.trust_state:
         if restored_verify:
@@ -2850,6 +2888,11 @@ def _guard_continue_state_commands(state: dict,
             print(
                 f"[duet] trusting extra_args from state.json for {name}: "
                 f"{shlex.join(extra_args)}",
+                file=sys.stderr,
+            )
+        for name, value in authority_replays:
+            print(
+                f"[duet] trusting {name} from state.json: {value!r}",
                 file=sys.stderr,
             )
 
@@ -3142,10 +3185,15 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _coerce_pid(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
     try:
-        return int(value)  # type: ignore[arg-type]
+        pid = int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+    return pid if pid > 0 else None
 
 
 def _pid_file_snapshot(pid_file: pathlib.Path) -> Optional[tuple[Optional[int], dt.datetime]]:
@@ -3245,9 +3293,7 @@ def print_run_status(arg: str) -> int:
     if pid_files:
         pid_file = pid_files[-1]
         snapshot = _pid_file_snapshot(pid_file)
-        if snapshot is None:
-            pid_files = []
-        else:
+        if snapshot is not None:
             pid, started_at = snapshot
             # Filename: turn-<label>-<agent>.pid
             stem = pid_file.stem  # turn-02-claude-planner
@@ -3316,7 +3362,11 @@ def print_run_status_safe(arg: str) -> int:
     try:
         return print_run_status(arg)
     except Exception as e:
-        print(f"[duet] status failed: {e}", file=sys.stderr)
+        print(
+            f"[duet] status failed ({type(e).__name__}): {e}",
+            file=sys.stderr,
+        )
+        traceback.print_exc(file=sys.stderr)
         return 3
 
 
@@ -3540,7 +3590,28 @@ def build_continue_config(run_arg: str,
         parser.error(f"--continue: no such run dir or id: {run_arg}")
     state = _load_run_state(run_dir, parser, "--continue")
     agents = _agents_from_state(state, parser, "--continue")
-    _guard_continue_state_commands(state, agents, args, parser)
+    sentinel = _state_str_or_arg(
+        args.sentinel, state, "sentinel", DEFAULT_SENTINEL, parser, "--continue"
+    )
+    sandbox = _state_str_or_arg(
+        args.sandbox, state, "sandbox", DEFAULT_SANDBOX, parser, "--continue"
+    )
+    permission_mode = _state_str_or_arg(
+        args.permission_mode, state, "permission_mode", DEFAULT_PERMISSION_MODE,
+        parser, "--continue",
+    )
+    add_dirs = _state_list_or_arg(
+        args.add_dirs, state, "add_dirs", parser, "--continue"
+    )
+    _guard_continue_state_replay(
+        state,
+        agents,
+        args,
+        parser,
+        sandbox=sandbox,
+        permission_mode=permission_mode,
+        add_dirs=add_dirs,
+    )
     # Older runs (or runs that crashed before the first state.json roll) may
     # have Codex agents that already spoke but have no saved session_id. Without
     # a marker, run_duet would treat the next turn as a fresh `codex exec` and
@@ -3581,13 +3652,11 @@ def build_continue_config(run_arg: str,
         task=state.get("task"),
         kickoff=kickoff,
         max_turns=args.turns,
-        sentinel=str(_state_or_arg(args.sentinel, state, "sentinel", DEFAULT_SENTINEL)),
+        sentinel=sentinel,
         per_turn_timeout=timeout,
         runs_dir=runs_dir,
-        sandbox=str(_state_or_arg(args.sandbox, state, "sandbox", DEFAULT_SANDBOX)),
-        permission_mode=str(_state_or_arg(
-            args.permission_mode, state, "permission_mode", DEFAULT_PERMISSION_MODE
-        )),
+        sandbox=sandbox,
+        permission_mode=permission_mode,
         dry_run=args.dry_run,
         recap=args.recap or bool(state.get("recap_path")),
         verify_cmd=normalize_verify_cmd(
@@ -3599,10 +3668,13 @@ def build_continue_config(run_arg: str,
         worktree_path=worktree_path,
         add_dirs=[
             pathlib.Path(d).expanduser().resolve()
-            for d in _state_list_or_arg(args.add_dirs, state, "add_dirs", parser, "--continue")
+            for d in add_dirs
         ],
         reasoning=args.reasoning if args.reasoning is not None else state.get("reasoning"),
-        codex_fast=bool(args.codex_fast or state.get("codex_fast", False)),
+        codex_fast=bool(
+            args.codex_fast
+            if args.codex_fast is not None else state.get("codex_fast", False)
+        ),
         start_speaker_idx=next_idx,
         continue_from=str(run_dir),
     )
@@ -3804,18 +3876,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "(minimal → low) and adds high/xhigh/max prompt nudges. "
                          "Copilot: passes `--effort <v>` (minimal → none). "
                          "Gemini: no effort flag; high/xhigh/max are prompt nudges only.")
-    ap.add_argument("--codex-fast", action="store_true", dest="codex_fast",
-                    help="Codex-only fast mode: pin codex coder turns to "
-                         "`model_reasoning_effort=low` and "
-                         "`model_reasoning_summary=concise`, regardless of "
-                         "--reasoning / per-agent reasoning_effort. Trades "
-                         "depth for latency on codex coder turns; claude is "
-                         "unaffected, so `--reasoning high --codex-fast` is "
-                         "a real and useful combo. YAML key: `codex_fast: true`.")
+    codex_fast_group = ap.add_mutually_exclusive_group()
+    codex_fast_group.add_argument(
+        "--codex-fast", action="store_true", dest="codex_fast",
+        help="Codex-only fast mode: pin codex coder turns to "
+             "`model_reasoning_effort=low` and "
+             "`model_reasoning_summary=concise`, regardless of --reasoning / "
+             "per-agent reasoning_effort. YAML key: `codex_fast: true`.",
+    )
+    codex_fast_group.add_argument(
+        "--no-codex-fast", action="store_false", dest="codex_fast",
+        help="disable codex fast mode, including a value restored by "
+             "--continue or enabled by a YAML/JSON config",
+    )
+    ap.set_defaults(codex_fast=None)
     ap.add_argument("--trust-state", action="store_true", dest="trust_state",
-                    help="with --continue, allow state.json-sourced verify_cmd "
-                         "and agent extra_args to be replayed after you inspect "
-                         "and trust that run directory")
+                    help="with --continue, allow state.json-sourced commands "
+                         "and authority-widening sandbox, permission, or "
+                         "add-dir settings after inspecting the run directory")
     ap.add_argument("--status", metavar="RUN_DIR_OR_ID", default=None,
                     help="don't run a duet — instead print a one-shot health "
                          "summary of an existing run and exit. Accepts a path "
@@ -3856,7 +3934,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
     flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast)
-    override or OR with their file values; --resume-* still apply on top."""
+    override or combine with file values; --resume-* still apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
     cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
     cfg_timeout = int(raw.get(
@@ -3923,7 +4001,10 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             )
         ],
         reasoning=args.reasoning or raw.get("reasoning"),
-        codex_fast=bool(args.codex_fast or raw.get("codex_fast", False)),
+        codex_fast=bool(
+            args.codex_fast
+            if args.codex_fast is not None else raw.get("codex_fast", False)
+        ),
     )
     cfg.agents = apply_resume_overrides(
         cfg.agents,
