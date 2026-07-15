@@ -8,6 +8,8 @@ also supported, and you can pair two agents from the same backend. One agent
 plans or reviews while the other implements; each keeps its own session memory
 across turns, and every run leaves a transcript you can inspect.
 
+![duet — how it works, in 40 seconds](./docs/assets/duet-deck.gif?raw=true)
+
 ## Use it four ways
 
 ### 1. Inside Claude Code — `/duet`
