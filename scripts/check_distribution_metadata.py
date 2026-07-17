@@ -231,6 +231,8 @@ def _assert_codex_plugin_metadata(
         "duet --recap --cwd",
         "claude -p /review",
         "--partner codex:coder",
+        "--lead-model",
+        "--partner-model",
     ):
         if required not in skill_text:
             _fail(f"plugins/duet/skills/duet/SKILL.md is missing required text: {required!r}")

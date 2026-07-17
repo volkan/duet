@@ -63,6 +63,28 @@ Keep the defaults (`--partner codex:coder --worktree`) before any user-supplied
 extra flags so explicit flags such as `--partner gemini:coder`, `--turns 8`, or
 `--config foo.yaml` can override them.
 
+## Model Selection
+
+When the user names models, construct the command directly with Duet's
+per-agent model flags. Do not inspect Duet's source or help output just to
+rediscover this syntax:
+
+- The model for the agent selected by `--lead` uses `--lead-model`.
+- The model for the agent selected by `--partner` uses `--partner-model`.
+- Preserve an exact backend model ID supplied by the user. Translate an
+  unambiguous display name when its CLI ID is known; for example, `Opus 4.8`
+  maps to `claude-opus-4-8`, and `GPT Sol` maps to `gpt-5.6-sol`. If the user
+  asks only for the latest Opus without a version, use Claude's `opus` alias.
+- The default `claude -p /review` kickoff is a separate Claude invocation. If
+  the user pins the Claude model, add the same `--model` value inside
+  `--task-from-cmd` so both the kickoff and the Duet lead use it.
+
+For example, "use Duet with Opus 4.8 and GPT Sol" means:
+
+```bash
+duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --lead claude:reviewer --lead-model claude-opus-4-8 --partner codex:coder --partner-model gpt-5.6-sol --worktree --turns 6 --task-from-cmd 'claude -p /review --model claude-opus-4-8'
+```
+
 After spawn, report the run dir and the matching status command once
 `[duet] run: ...` or `[duet] run dir: ...` appears:
 

@@ -85,6 +85,38 @@ duet --recap \
   --task-from-cmd 'claude -p /review'
 ```
 
+### Select models by name
+
+For the default `claude:reviewer` lead and `codex:coder` partner, named models
+map directly to `--lead-model` and `--partner-model`. The `/review` kickoff is
+a separate Claude invocation, so pin its model inside `--task-from-cmd` too.
+
+For example:
+
+```text
+Use Duet with Opus 4.8 and GPT Sol.
+```
+
+The skill translates that request to:
+
+```bash
+duet --recap \
+  --cwd "$(pwd)" \
+  --runs-dir "$(pwd)/.duet/runs" \
+  --lead claude:reviewer \
+  --lead-model claude-opus-4-8 \
+  --partner codex:coder \
+  --partner-model gpt-5.6-sol \
+  --worktree \
+  --turns 6 \
+  --task-from-cmd 'claude -p /review --model claude-opus-4-8'
+```
+
+If the user supplies exact backend model IDs, the skill preserves them. A
+request for the latest Opus without a version uses Claude's stable `opus`
+alias. With custom agents, the model follows the slot: the `--lead` agent uses
+`--lead-model`, and the `--partner` agent uses `--partner-model`.
+
 Custom upstream command:
 
 ```text
