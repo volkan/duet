@@ -20,6 +20,7 @@ STATUS_KEYS = {
     "health", "phase", "exit_code", "turns_used", "finished_reason",
     "active_turn", "last_completed_turn", "artifacts", "error",
 }
+ARTIFACT_KEYS = {"state", "transcript", "recap", "worktree"}
 
 
 def _source_version() -> str:
@@ -68,10 +69,12 @@ def check(dist_dir: pathlib.Path) -> None:
         if version_result.stdout.strip() != f"duet {version}":
             raise RuntimeError(f"unexpected --version output: {version_result.stdout!r}")
 
+        target_cwd = root / "target-project"
+        target_cwd.mkdir()
         info_path = root / "run.json"
         _run([
             str(duet), "--dry-run", "--recap", "--task", "installed wheel smoke",
-            "--cwd", str(root), "--runs-dir", str(root / "runs"),
+            "--cwd", str(target_cwd), "--runs-dir", "relative-runs",
             "--run-info-file", str(info_path),
         ], root)
         launch = json.loads(info_path.read_text(encoding="utf-8"))
@@ -104,6 +107,20 @@ def check(dist_dir: pathlib.Path) -> None:
             raise RuntimeError(f"installed status path mismatch: {status}")
         if status.get("health") != "terminal" or status.get("exit_code") != 0:
             raise RuntimeError(f"installed status not terminal: {status}")
+        artifacts = status.get("artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != ARTIFACT_KEYS:
+            raise RuntimeError(f"bad installed artifact keys: {artifacts}")
+        expected_run = pathlib.Path(launch["run_dir"])
+        expected_paths = {
+            "state": expected_run / "state.json",
+            "transcript": expected_run / "transcript.md",
+            "recap": expected_run / "recap.md",
+        }
+        for key, expected in expected_paths.items():
+            if artifacts.get(key) != str(expected) or not expected.is_file():
+                raise RuntimeError(
+                    f"installed status {key} path mismatch: {artifacts.get(key)!r}"
+                )
 
 
 def main(argv: list[str]) -> int:

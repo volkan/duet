@@ -249,13 +249,13 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(snapshot["phase"], "finished")
             self.assertNotIn(secret, json.dumps(snapshot))
 
-    def test_relative_artifact_paths_resolve_from_saved_cwd(self) -> None:
+    def test_relative_artifact_paths_resolve_from_actual_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw).resolve()
-            cwd = root / "project"
-            run = cwd / "runs" / "20260719-120000"
+            cwd = root / "target-project"
+            run = root / "invocation" / "relative-runs" / "20260719-120000"
             run.mkdir(parents=True)
-            relative_run = pathlib.Path("runs") / run.name
+            relative_run = pathlib.Path("relative-runs") / run.name
             state = {
                 "cwd": str(cwd),
                 "phase": "finished",
@@ -273,6 +273,24 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(artifacts["transcript"], str(run / "transcript.md"))
             self.assertEqual(artifacts["recap"], str(run / "recap.md"))
             self.assertEqual(artifacts["worktree"], str(run / "wt"))
+
+    def test_installed_console_script_is_a_live_duet_process(self) -> None:
+        command = "/tmp/venv/bin/python /tmp/venv/bin/duet --status run --json"
+        with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                mock.patch.object(duet, "_proc_cmdline", return_value=command):
+            self.assertTrue(duet._is_duet_process(1234))
+
+    def test_live_pid_is_accepted_when_sandbox_hides_command_line(self) -> None:
+        with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                mock.patch.object(duet, "_proc_cmdline", return_value=None):
+            self.assertTrue(duet._is_duet_process(1234))
+            self.assertFalse(duet._is_duet_process(1))
+
+    def test_unrelated_python_process_is_not_a_live_duet_process(self) -> None:
+        command = "/tmp/venv/bin/python /tmp/worker.py duet"
+        with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                mock.patch.object(duet, "_proc_cmdline", return_value=command):
+            self.assertFalse(duet._is_duet_process(1234))
 
     def test_saved_live_phase_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

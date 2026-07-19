@@ -2305,14 +2305,14 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "agents": [agent_state(a) for a in cfg.agents],
         "history": history,
         "finished_reason": finished_reason,
-        "transcript_path": str(transcript_path),
+        "transcript_path": str(transcript_path.resolve()),
         "sentinel": cfg.sentinel,
         "sandbox": cfg.sandbox,
         "permission_mode": cfg.permission_mode,
         "per_turn_timeout": cfg.per_turn_timeout,
         "verify_cmd": cfg.verify_cmd,
         "last_verify": last_verify,
-        "worktree": str(wt_path) if wt_path else None,
+        "worktree": str(wt_path.resolve()) if wt_path else None,
         "worktree_branch": wt_branch,
         "worktree_for": cfg.worktree_for,
         "require_worktree": cfg.require_worktree,
@@ -2324,7 +2324,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "error": error,
     }
     if cfg.recap:
-        state["recap_path"] = str(recap_path)
+        state["recap_path"] = str(recap_path.resolve())
     return state
 
 
@@ -3642,14 +3642,25 @@ def _is_duet_process(pid: int) -> bool:
     """True if `pid` is alive AND looks like a duet.py process (avoids stale-PID false positives)."""
     if not _pid_alive(pid):
         return False
-    cmdline = _proc_cmdline(pid) or ""
-    # Match "duet.py" anywhere in the cmdline OR a final path segment
-    # equal to "duet" (when installed via `make install`).
-    if "duet.py" in cmdline:
-        return True
-    # Look for ".../duet" or "duet " (the installed-symlink case).
-    head = cmdline.split() and cmdline.split()[0]
-    if head and pathlib.Path(head).name == "duet":
+    cmdline = _proc_cmdline(pid)
+    if cmdline is None:
+        # Sandboxed macOS callers may be allowed to probe a sibling PID with
+        # signal 0 but denied `ps`. PID 1 is never duet; for other live PIDs,
+        # liveness is the best evidence available when identity is hidden.
+        return pid != 1
+    try:
+        argv = shlex.split(cmdline)
+    except ValueError:
+        argv = cmdline.split()
+    if not argv:
+        return False
+    # A source checkout normally appears as `python .../duet.py`; an installed
+    # wheel's console script appears as `python .../bin/duet`. Direct/symlinked
+    # launches may instead put duet itself in argv[0].
+    executable_names = {
+        pathlib.Path(token).name for token in argv[:2]
+    }
+    if executable_names & {"duet", "duet.py", "duet.exe"}:
         return True
     return False
 
@@ -3685,12 +3696,20 @@ def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
     }
 
 
-def _absolute_status_path(base_dir: pathlib.Path, value: object) -> Optional[str]:
+def _absolute_status_path(run_dir: pathlib.Path, value: object) -> Optional[str]:
     if value is None:
         return None
     path = pathlib.Path(str(value)).expanduser()
     if not path.is_absolute():
-        path = base_dir / path
+        # Older state files stored paths exactly as constructed from run_dir.
+        # For an invocation-relative `--runs-dir`, those paths are not relative
+        # to saved `cwd`. Re-anchor the suffix after the run id to the resolved
+        # run directory so status remains correct from any invocation cwd.
+        matches = [i for i, part in enumerate(path.parts) if part == run_dir.name]
+        if matches:
+            path = run_dir.joinpath(*path.parts[matches[-1] + 1:])
+        else:
+            path = run_dir / path
     return str(path.resolve())
 
 
@@ -3756,24 +3775,18 @@ def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
 
 
 def _status_artifacts(run_dir: pathlib.Path, state: dict) -> dict:
-    raw_cwd = state.get("cwd")
-    saved_cwd = pathlib.Path(str(raw_cwd)).expanduser() if raw_cwd else None
-    artifact_base = (
-        saved_cwd if saved_cwd is not None and saved_cwd.is_absolute()
-        else run_dir
-    )
     recap = state.get("recap_path")
     if recap is None and (run_dir / "recap.md").exists():
         recap = run_dir / "recap.md"
     return {
         "state": str((run_dir / "state.json").resolve()),
         "transcript": _absolute_status_path(
-            artifact_base,
+            run_dir,
             state.get("transcript_path", run_dir / "transcript.md"),
         ),
-        "recap": _absolute_status_path(artifact_base, recap),
+        "recap": _absolute_status_path(run_dir, recap),
         "worktree": _absolute_status_path(
-            artifact_base, state.get("worktree")
+            run_dir, state.get("worktree")
         ),
     }
 
