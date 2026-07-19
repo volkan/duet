@@ -1,0 +1,105 @@
+name: real-loop-canary
+
+# A live upstream-health signal, not a deterministic merge gate. It exercises
+# one bounded scenario so failures stay cheap enough to inspect and rerun.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-loop-canary
+  cancel-in-progress: false
+
+jobs:
+  opencode-s1:
+    name: OpenCode S1 canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CANARY_DIR: runs/canary/${{ github.run_id }}-${{ github.run_attempt }}
+      OPENCODE_MODEL: opencode/big-pickle
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "canary@duet.invalid"
+          git config --global user.name "duet canary"
+
+      # Tracking the latest CLI is deliberate: this canary should expose
+      # upstream CLI/model drift while the deterministic PR suite stays stable.
+      - name: Install OpenCode
+        run: |
+          npm install --global opencode-ai@latest
+          opencode --version
+
+      - name: Run S1 real-loop canary
+        id: canary
+        continue-on-error: true
+        run: |
+          python scripts/duet_loop_e2e.py \
+            --scenario S1 \
+            --lead-backend opencode \
+            --partner-backend opencode \
+            --lead-model "$OPENCODE_MODEL" \
+            --partner-model "$OPENCODE_MODEL" \
+            --timeout 300 \
+            --base-dir "$CANARY_DIR"
+
+      - name: Summarize result
+        if: always()
+        run: |
+          if command -v opencode >/dev/null 2>&1; then
+            opencode_version="$(opencode --version 2>&1 | head -n 1 || true)"
+          else
+            opencode_version="unavailable"
+          fi
+          if [[ -z "$opencode_version" ]]; then
+            opencode_version="unavailable"
+          fi
+          mkdir -p "$CANARY_DIR"
+          {
+            echo "step_outcome=${{ steps.canary.outcome }}"
+            echo "opencode=$opencode_version"
+            echo "model=$OPENCODE_MODEL"
+          } > "$CANARY_DIR/canary-metadata.txt"
+
+          {
+            echo "## OpenCode S1 real-loop canary"
+            echo
+            echo "- Step outcome: \`${{ steps.canary.outcome }}\`"
+            echo "- OpenCode: \`$opencode_version\`"
+            echo "- Model: \`$OPENCODE_MODEL\`"
+            echo "- Artifacts: \`$CANARY_DIR\`"
+            echo
+            if [[ -f "$CANARY_DIR/results.tsv" ]]; then
+              echo '```tsv'
+              cat "$CANARY_DIR/results.tsv"
+              echo '```'
+            else
+              echo "No results.tsv was produced; inspect the uploaded run artifacts and install logs."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload canary artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-loop-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.CANARY_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Propagate canary failure
+        if: always() && steps.canary.outcome != 'success'
+        run: exit 1
