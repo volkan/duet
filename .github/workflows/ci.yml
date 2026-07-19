@@ -1,8 +1,9 @@
 name: ci
 
-# duet has no other CI; this is the merge gate. Every job here should pass
-# before a PR merges (configure them as required status checks in branch
-# protection — see .github/BRANCH_PROTECTION.md). Admins can still force-merge.
+# This is the required merge-gate workflow. Every job here should pass before a
+# PR merges (configure them as required status checks in branch protection — see
+# .github/BRANCH_PROTECTION.md). The schedule/manual real-loop canary is separate
+# and must not become a required PR check. Admins can still force-merge.
 on:
   pull_request:
   push:

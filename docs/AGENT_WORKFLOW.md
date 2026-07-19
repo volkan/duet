@@ -54,6 +54,8 @@ Before merging:
 3. Confirm all six required checks are passing:
    `test (py3.9)`, `test (py3.11)`, `test (py3.13)`,
    `distribution metadata`, `plugin validate`, and `complexity gate`.
+   The schedule/manual `OpenCode S1 canary` is an upstream-health signal, not a
+   required PR check; do not wait for it or add it to branch protection.
 4. For packaging/plugin changes, confirm `make package-check` was run locally
    or passed in CI, and confirm `make plugin-check` too when the Claude Code
    plugin surface changed. PyPI publishing is **merge-triggered**: a `chore:

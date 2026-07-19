@@ -10,6 +10,11 @@ For day-to-day branch, PR, and merge/release-to-main workflow, see
 `docs/AGENT_WORKFLOW.md`. This file documents the repository protection setup
 that enforces that workflow.
 
+The separate `real-loop-canary` workflow runs only on a weekly schedule or by
+manual dispatch. Its `OpenCode S1 canary` job is intentionally **not** a
+required check: it depends on a live, currently-free model and can fail because
+of upstream availability, rate limits, or nondeterministic model behavior.
+
 ## One-time setup (GitHub UI)
 
 Settings → Branches → Branch protection rules → Add rule for `main`:
@@ -22,6 +27,7 @@ Settings → Branches → Branch protection rules → Add rule for `main`:
    - `distribution metadata`
    - `plugin validate`
    - `complexity gate`
+   Do not add `OpenCode S1 canary` to this list.
 3. Leave **"Do not allow bypassing the above settings"** *unchecked* so
    administrators can still force-merge when they choose to.
 
