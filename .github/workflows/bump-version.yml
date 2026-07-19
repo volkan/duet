@@ -1,7 +1,7 @@
 name: bump-version
 
-# Manual helper to start a release: bump the version across the three lockstep
-# manifests and open a `chore: release X.Y.Z` PR. Merging that PR is the whole
+# Manual helper to start a release: bump the runtime version and two lockstep
+# plugin manifests, then open a `chore: release X.Y.Z` PR. Merging is the whole
 # trigger — release.yml (on: push: main) detects the version bump, publishes to
 # PyPI after the `pypi` environment approval, then auto-creates the vX.Y.Z tag +
 # GitHub Release. No manual release creation. See docs/RELEASING.md.
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-      - name: Bump the three lockstep manifests
+      - name: Bump runtime + two plugin manifests
         env:
           VERSION: ${{ inputs.version }} # validated as strict X.Y.Z by the script (exits 1 otherwise)
         run: python scripts/bump_release_version.py "$VERSION"
@@ -46,8 +46,8 @@ jobs:
           git commit -am "chore: release $VERSION"
           git push -u origin "$branch"
           {
-            echo "Automated version bump to $VERSION across the three lockstep manifests"
-            echo "(pyproject.toml + both plugin.json), opened by the bump-version workflow."
+            echo "Automated version bump to $VERSION across the canonical runtime source"
+            echo "(duet.py + both plugin.json), opened by the bump-version workflow."
             echo
             echo "NOTE: opened by Actions (GITHUB_TOKEN), so the required checks start in an"
             echo "approval-required state — click 'Approve workflows to run' in the merge box"

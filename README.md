@@ -26,7 +26,9 @@ Plain `/duet` runs Claude Code's real `/review`, then loops Codex and Claude in
 a worktree until they converge. Pass any upstream command as the kickoff:
 `/duet 'npm test 2>&1' --turns 4`. The plugin shells out to the `duet` CLI, so
 install that first (see below) and make sure `command -v duet` passes in Claude
-Code's shell. Full guide:
+Code's shell. Custom topology flags such as `--no-worktree` and
+`--allow-worktree-fallback` replace the plugin defaults without emitting
+conflicting CLI flags. Full guide:
 [docs/CLAUDE_CODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 If Claude Code disambiguates plugin commands with namespaces, `/duet:duet` is
 the same command.
@@ -88,7 +90,8 @@ non-interactively). Like the other plugins it shells out to the `duet` CLI, so
 install that first and make sure `command -v duet` passes in OpenCode's shell.
 The command runs on OpenCode's `build` agent; plain `/duet` runs the same
 `claude -p /review` kickoff, and `/duet 'npm test 2>&1' --turns 4` seeds from
-any command. Full guide:
+any command. Custom worktree overrides are constructed conditionally, matching
+the Claude and Codex entry points. Full guide:
 [docs/OPENCODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
 (duet can also drive OpenCode as a backend — `--partner opencode:coder` — so
 OpenCode can be one of the two looped agents too.)
@@ -134,9 +137,24 @@ duet --task "Review the latest commit; fix only what the reviewer requests." \
 `/review`, a test run, or any command:
 
 ```bash
-duet --task-from-cmd 'claude -p /review' \
-    --lead claude:reviewer --partner codex:coder \
-    --worktree --recap --cwd ~/workspace/project --turns 6
+duet --recipe review --cwd ~/workspace/project
+```
+
+The review recipe uses recap mode, `claude:reviewer` + `codex:coder`, six
+turns, `claude -p /review`, and strict worktree isolation. Explicit flags
+override recipe values.
+
+**Deterministic automation** — discover the run without parsing terminal prose,
+then poll the curated status schema:
+
+```bash
+control_dir=$(mktemp -d)
+duet --recipe review --run-info-file "$control_dir/run.json" &
+duet_pid=$!
+while [ ! -s "$control_dir/run.json" ]; do sleep 0.1; done
+run_dir=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_dir"])' "$control_dir/run.json")
+duet --status "$run_dir" --json
+wait "$duet_pid"
 ```
 
 **Deep planner, fast coder** — Claude plans at high effort while Codex coder
@@ -186,7 +204,8 @@ stop, duet opens a `force>` prompt so you can push another round.
 
 Every run writes a directory with `transcript.md`, `state.json`, per-turn
 stderr logs, and the `wt/` worktree when `--worktree` is on. Inspect a run with
-`duet --status <run-id>`, list runs with `duet --list`, and start a fresh run
+`duet --status <run-id> --json` (or omit `--json` for the human view), list runs
+with `duet --list`, and start a fresh run
 from saved state with `duet --continue <run> --task "next thing"`.
 
 - **Backends:** `claude`, `codex`, `gemini`, `copilot`, `opencode`

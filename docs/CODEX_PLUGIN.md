@@ -72,24 +72,23 @@ Default review recipe:
 $duet
 ```
 
-The default skill recipe runs:
+The skill creates a private run-info path, then launches the canonical recipe:
 
 ```bash
-duet --recap \
-  --cwd "$(pwd)" \
-  --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer \
-  --partner codex:coder \
-  --worktree \
-  --turns 6 \
-  --task-from-cmd 'claude -p /review'
+DUET_CONTROL_DIR=$(mktemp -d)
+DUET_RUN_INFO="$DUET_CONTROL_DIR/run.json"
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
+
+`--recipe review` expands to the current project, `.duet/runs`, recap mode,
+`claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
+`claude -p /review` kickoff. Explicit flags override recipe values.
 
 ### Select models by name
 
 For the default `claude:reviewer` lead and `codex:coder` partner, named models
-map directly to `--lead-model` and `--partner-model`. The `/review` kickoff is
-a separate Claude invocation, so pin its model inside `--task-from-cmd` too.
+map directly to `--lead-model` and `--partner-model`. The recipe automatically
+pins its separate `/review` kickoff to a Claude lead model too.
 
 For example:
 
@@ -100,21 +99,16 @@ Use Duet with Opus 4.8 and GPT Sol.
 The skill translates that request to:
 
 ```bash
-duet --recap \
-  --cwd "$(pwd)" \
-  --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer \
+duet --recipe review \
+  --run-info-file "$DUET_RUN_INFO" \
   --lead-model claude-opus-4-8 \
-  --partner codex:coder \
-  --partner-model gpt-5.6-sol \
-  --worktree \
-  --turns 6 \
-  --task-from-cmd 'claude -p /review --model claude-opus-4-8'
+  --partner-model gpt-5.6-sol
 ```
 
 If the user supplies exact backend model IDs, the skill preserves them. A
 request for the latest Opus without a version uses Claude's stable `opus`
-alias. With custom agents, the model follows the slot: the `--lead` agent uses
+alias; `Fable 5` maps to `claude-fable-5`. With custom agents, the model follows
+the slot: the `--lead` agent uses
 `--lead-model`, and the `--partner` agent uses `--partner-model`.
 
 Custom upstream command:
@@ -122,6 +116,17 @@ Custom upstream command:
 ```text
 Use Duet to run `npm test 2>&1` with --turns 4.
 ```
+
+For custom commands the skill separates the upstream shell string from the
+remaining duet flags. It adds strict worktree defaults only when those flags do
+not already select `--worktree`, `--no-worktree`, `--worktree-path`,
+`--require-worktree`, or `--allow-worktree-fallback`. This is conditional
+command construction, not argument-order overriding: argparse rejects both
+members of a mutually exclusive pair even when one appears later. For example,
+`--no-worktree` suppresses both defaults, while
+`--allow-worktree-fallback` keeps `--worktree` but suppresses
+`--require-worktree`. The skill also leaves recap unset for custom commands so
+an explicit `--no-recap` cannot conflict with a pre-added `--recap`.
 
 Review a PR diff:
 
@@ -137,24 +142,19 @@ Use Duet to run `cat failing-log.txt` with --partner gemini:coder --turns 2 --pe
 
 ## Runtime Expectations
 
-For the default recipe, the run directory is not created immediately. The
-`--task-from-cmd 'claude -p /review'` kickoff runs before duet allocates
-`<runs-dir>/<run_id>/`, so `.duet/runs/*` may not exist while `/review` is
-still producing the opening message.
-
-Wait for this line in the default recap recipe:
-
-```text
-[duet] run: /path/to/project/.duet/runs/<run_id>
-```
-
-Non-recap runs print `[duet] run dir: ...` instead.
-
-Then monitor from another terminal or Codex shell:
+Duet atomically writes `DUET_RUN_INFO` immediately after allocating the run and
+writing initial `state.json`, before `/review` starts. The skill validates
+`schema_version == 1` and `kind == "duet.run"`, then monitors the absolute
+`run_dir` from that document:
 
 ```bash
-duet --status /path/to/project/.duet/runs/<run_id>
+duet --status /path/to/project/.duet/runs/<run_id> --json
 ```
+
+The status schema reports `health`, `phase`, `finished_reason`, active/last
+turns, and artifact paths without exposing prompts, commands, credentials, or
+backend extra arguments. Status exit codes are 0 terminal, 1 running, 2
+stuck/crashed, and 3 status error.
 
 You can also list recent runs:
 
@@ -180,5 +180,5 @@ end of the run.
 | The Duet skill says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Codex's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
-| No run directory appears right away | This is expected while `claude -p /review` is still running. Wait for `[duet] run: ...` or `[duet] run dir: ...` in the command output. |
+| No run metadata appears | Check the original duet process. A valid launch atomically creates the requested run-info file before `/review`; never scrape banners as a fallback. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |

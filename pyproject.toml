@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "duet-cli"
-version = "0.2.8"
+dynamic = ["version"]
 description = "Two CLI agents in conversation. One Python file. Stdlib only."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -33,3 +33,6 @@ Repository = "https://github.com/volkan/duet"
 
 [tool.setuptools]
 py-modules = ["duet"]
+
+[tool.setuptools.dynamic]
+version = { attr = "duet.__version__" }

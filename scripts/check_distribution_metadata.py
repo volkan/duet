@@ -8,6 +8,7 @@ also inspect the wheel and source distribution that would be uploaded.
 from __future__ import annotations
 
 import argparse
+import ast
 import email.parser
 import json
 import re
@@ -39,6 +40,7 @@ CODEX_PLUGIN_DOC = ROOT / "docs" / "CODEX_PLUGIN.md"
 OPENCODE_COMMAND = ROOT / "plugins" / "duet-opencode" / "command" / "duet.md"
 OPENCODE_PLUGIN_DOC = ROOT / "docs" / "OPENCODE_PLUGIN.md"
 PYPROJECT = ROOT / "pyproject.toml"
+DUET_PY = ROOT / "duet.py"
 FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
 README_ABSOLUTE_LINKS = [
@@ -77,14 +79,29 @@ def _require(mapping: dict[str, Any], key: str, label: str) -> Any:
     return mapping[key]
 
 
-def _project_version(pyproject: dict[str, Any]) -> str:
-    project = _require(pyproject, "project", "pyproject.toml")
-    if not isinstance(project, dict):
-        _fail("pyproject.toml [project] must be a table")
-    version = _require(project, "version", "pyproject.toml [project]")
-    if not isinstance(version, str) or not version:
-        _fail("pyproject.toml [project].version must be a non-empty string")
-    return version
+def _source_version(text: str, label: str) -> str:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        _fail(f"{label} is not valid Python: {exc}")
+    values = []
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(target, ast.Name) and target.id == "__version__"
+                   for target in targets):
+            continue
+        value_node = node.value
+        if isinstance(value_node, ast.Constant) and isinstance(value_node.value, str):
+            values.append(value_node.value)
+    if len(values) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+", values[0]):
+        _fail(f"{label} must define one strict X.Y.Z __version__ string")
+    return values[0]
+
+
+def _runtime_version() -> str:
+    return _source_version(DUET_PY.read_text(encoding="utf-8"), "duet.py")
 
 
 def _tracked_files() -> list[Path]:
@@ -109,14 +126,61 @@ def _assert_no_forbidden_text() -> None:
         _fail(f"forbidden employer email remains in tracked files: {', '.join(matches)}")
 
 
-def _assert_project_metadata(project: dict[str, Any]) -> None:
+def _assert_project_metadata(pyproject: dict[str, Any], project: dict[str, Any]) -> None:
     if project.get("name") != "duet-cli":
         _fail("pyproject.toml project.name must remain 'duet-cli'")
     if project.get("dependencies") != []:
         _fail("pyproject.toml project.dependencies must stay empty")
+    if "version" in project:
+        _fail("pyproject.toml must derive version from duet.__version__, not duplicate it")
+    if project.get("dynamic") != ["version"]:
+        _fail("pyproject.toml project.dynamic must be exactly ['version']")
     scripts = project.get("scripts")
     if not isinstance(scripts, dict) or scripts.get("duet") != "duet:main":
         _fail("pyproject.toml must expose the console script duet = 'duet:main'")
+    tool = pyproject.get("tool")
+    setuptools = tool.get("setuptools") if isinstance(tool, dict) else None
+    dynamic = setuptools.get("dynamic") if isinstance(setuptools, dict) else None
+    version = dynamic.get("version") if isinstance(dynamic, dict) else None
+    if not isinstance(version, dict) or version.get("attr") != "duet.__version__":
+        _fail("pyproject.toml must derive package version from duet.__version__")
+
+
+def _assert_conditional_worktree_defaults(text: str, label: str) -> None:
+    """Keep custom agent launches from pre-adding exclusive CLI flags."""
+    compact = re.sub(r"\s+", " ", text)
+    for required in (
+        "<conditional worktree defaults>",
+        "never pass that placeholder literally",
+        "`--worktree`",
+        "`--no-worktree`",
+        "`--worktree-path=PATH`",
+        "`--require-worktree`",
+        "`--allow-worktree-fallback`",
+        "Do not pre-add `--recap`",
+    ):
+        if required not in compact:
+            _fail(f"{label} is missing conditional-default guidance: {required!r}")
+
+    shell_blocks = re.findall(r"```(?:bash|sh)\s*\n(.*?)```", text, re.DOTALL)
+    custom_blocks = [block for block in shell_blocks if "--task-from-cmd" in block]
+    if not custom_blocks:
+        _fail(f"{label} must include a custom --task-from-cmd launch template")
+    exclusive_defaults = (
+        "--worktree",
+        "--no-worktree",
+        "--require-worktree",
+        "--allow-worktree-fallback",
+        "--recap",
+        "--no-recap",
+    )
+    for block in custom_blocks:
+        present = [flag for flag in exclusive_defaults if flag in block]
+        if present:
+            _fail(
+                f"{label} custom launch must select exclusive defaults "
+                f"conditionally outside the static command block: {', '.join(present)}"
+            )
 
 
 def _assert_claude_plugin_metadata(
@@ -127,7 +191,7 @@ def _assert_claude_plugin_metadata(
     if plugin.get("name") != "duet":
         _fail(".claude-plugin/plugin.json name must be 'duet'")
     if plugin.get("version") != version:
-        _fail(".claude-plugin/plugin.json version must match pyproject.toml project.version")
+        _fail(".claude-plugin/plugin.json version must match duet.__version__")
     author = plugin.get("author")
     if not isinstance(author, dict) or author.get("name") != "Volkan Altan":
         _fail(".claude-plugin/plugin.json author.name must be 'Volkan Altan'")
@@ -148,6 +212,21 @@ def _assert_claude_plugin_metadata(
 
     if not CLAUDE_COMMAND.exists():
         _fail("plugins/duet-claude/commands/duet.md must exist for the Claude Code plugin")
+    command_text = CLAUDE_COMMAND.read_text(encoding="utf-8")
+    _assert_conditional_worktree_defaults(
+        command_text,
+        "plugins/duet-claude/commands/duet.md",
+    )
+    for required in (
+        "command -v duet",
+        "duet --recipe review --run-info-file",
+        "duet --status '<run_dir>' --json",
+        "schema_version == 1",
+        "claude-fable-5",
+        "gpt-5.6-sol",
+    ):
+        if required not in command_text:
+            _fail(f"plugins/duet-claude/commands/duet.md is missing required text: {required!r}")
     if (ROOT / ".claude-plugin" / "plugin.json").exists():
         _fail("root .claude-plugin/plugin.json must be removed; the Claude plugin now lives under plugins/duet-claude/")
     if (ROOT / "commands" / "duet.md").exists():
@@ -162,7 +241,7 @@ def _assert_codex_plugin_metadata(
     if plugin.get("name") != "duet":
         _fail(".codex-plugin/plugin.json name must be 'duet'")
     if plugin.get("version") != version:
-        _fail(".codex-plugin/plugin.json version must match pyproject.toml project.version")
+        _fail(".codex-plugin/plugin.json version must match duet.__version__")
     if plugin.get("skills") != "./skills/":
         _fail(".codex-plugin/plugin.json must expose skills via './skills/'")
 
@@ -224,15 +303,23 @@ def _assert_codex_plugin_metadata(
     if not CODEX_SKILL.exists():
         _fail("plugins/duet/skills/duet/SKILL.md must exist for the Codex plugin")
     skill_text = CODEX_SKILL.read_text(encoding="utf-8")
+    _assert_conditional_worktree_defaults(
+        skill_text,
+        "plugins/duet/skills/duet/SKILL.md",
+    )
     for required in (
         "command -v duet",
         "command -v claude",
         "command -v codex",
-        "duet --recap --cwd",
+        "duet --recipe review --run-info-file",
+        "duet --status '<run_dir>' --json",
+        "schema_version == 1",
         "claude -p /review",
         "--partner codex:coder",
         "--lead-model",
         "--partner-model",
+        "claude-fable-5",
+        "gpt-5.6-sol",
     ):
         if required not in skill_text:
             _fail(f"plugins/duet/skills/duet/SKILL.md is missing required text: {required!r}")
@@ -244,11 +331,15 @@ def _assert_opencode_command_metadata() -> None:
     if not OPENCODE_COMMAND.exists():
         _fail("plugins/duet-opencode/command/duet.md must exist for the OpenCode plugin")
     command_text = OPENCODE_COMMAND.read_text(encoding="utf-8")
+    _assert_conditional_worktree_defaults(
+        command_text,
+        "plugins/duet-opencode/command/duet.md",
+    )
     for required in (
         "command -v duet",
         "command -v claude",
         "command -v codex",
-        "duet --recap --cwd",
+        "duet --recipe review",
         "claude -p /review",
         "--partner codex:coder",
         "$ARGUMENTS",
@@ -263,10 +354,12 @@ def _assert_source_metadata() -> str:
     claude_marketplace = _load_json(CLAUDE_MARKETPLACE_JSON)
     codex_plugin = _load_json(CODEX_PLUGIN_JSON)
     codex_marketplace = _load_json(CODEX_MARKETPLACE_JSON)
-    version = _project_version(pyproject)
+    version = _runtime_version()
 
-    project = pyproject["project"]
-    _assert_project_metadata(project)
+    project = _require(pyproject, "project", "pyproject.toml")
+    if not isinstance(project, dict):
+        _fail("pyproject.toml [project] must be a table")
+    _assert_project_metadata(pyproject, project)
     _assert_claude_plugin_metadata(claude_plugin, claude_marketplace, version)
     _assert_codex_plugin_metadata(codex_plugin, codex_marketplace, version)
     _assert_opencode_command_metadata()
@@ -281,6 +374,17 @@ def _read_wheel_metadata(wheel_path: Path, version: str) -> str:
             return wheel.read(metadata_name).decode("utf-8")
         except KeyError:
             _fail(f"{wheel_path.name} is missing {metadata_name}")
+
+
+def _assert_wheel_runtime_version(wheel_path: Path, version: str) -> None:
+    with zipfile.ZipFile(wheel_path) as wheel:
+        try:
+            source = wheel.read("duet.py").decode("utf-8")
+        except KeyError:
+            _fail(f"{wheel_path.name} is missing duet.py")
+    wheel_version = _source_version(source, f"{wheel_path.name}:duet.py")
+    if wheel_version != version:
+        _fail(f"wheel duet.__version__ must be {version}, got {wheel_version}")
 
 
 def _assert_wheel_metadata(metadata_text: str, version: str) -> None:
@@ -310,6 +414,7 @@ def _assert_sdist_members(sdist_path: Path, version: str) -> None:
         f"{prefix}README.md",
         f"{prefix}duet.py",
         f"{prefix}pyproject.toml",
+        f"{prefix}tests/test_control_plane.py",
         f"{prefix}tests/test_duet.py",
     }
     with tarfile.open(sdist_path, "r:gz") as sdist:
@@ -327,6 +432,7 @@ def _assert_artifacts(dist_dir: Path, version: str) -> None:
     if not sdist_path.exists():
         _fail(f"missing source artifact {sdist_path}")
     _assert_wheel_metadata(_read_wheel_metadata(wheel_path, version), version)
+    _assert_wheel_runtime_version(wheel_path, version)
     _assert_sdist_members(sdist_path, version)
 
 

@@ -63,6 +63,8 @@ from typing import Callable, Optional
 
 # ---------- defaults ----------
 
+__version__ = "0.2.8"
+
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
@@ -83,6 +85,32 @@ FINISHED_MAX_TURNS = "max_turns"
 FINISHED_FORCE_STOP = "force_stop"
 FINISHED_TIMEOUT = "timeout"
 FINISHED_AGENT_ERROR = "agent_error"
+FINISHED_KICKOFF_ERROR = "kickoff_error"
+FINISHED_SETUP_ERROR = "setup_error"
+FINISHED_REASONS = {
+    FINISHED_CONVERGED,
+    FINISHED_CONVERGED_AFTER_FORCE,
+    FINISHED_FORCED_CONTINUATION,
+    FINISHED_MAX_TURNS,
+    FINISHED_FORCE_STOP,
+    FINISHED_TIMEOUT,
+    FINISHED_AGENT_ERROR,
+    FINISHED_KICKOFF_ERROR,
+    FINISHED_SETUP_ERROR,
+    "dry_run",
+}
+
+STATUS_SCHEMA_VERSION = 1
+RUN_INFO_SCHEMA_VERSION = 1
+STATUS_PHASES = {
+    "kickoff_pending",
+    "kickoff_running",
+    "turn_running",
+    "between_turns",
+    "awaiting_force",
+    "finished",
+    "unknown",
+}
 
 
 class AgentRunError(RuntimeError):
@@ -91,6 +119,10 @@ class AgentRunError(RuntimeError):
     def __init__(self, finished_reason: str, message: str) -> None:
         super().__init__(message)
         self.finished_reason = finished_reason
+
+
+class RunSetupError(RuntimeError):
+    """Launch/setup failure that must stop the run instead of degrading."""
 
 RECAP_ADDENDUM = """Format requirement (debug tooling reads these):
 
@@ -319,6 +351,9 @@ class DuetConfig:
     agents: list[Agent]                # exactly 2 for now
     task: Optional[str] = None         # used if no resume seed
     kickoff: Optional[str] = None      # explicit first message to partner
+    task_from_cmd: Optional[str] = None  # executed after the run is observable;
+                                          # deliberately never persisted
+    task_from_cmd_target: str = "task"  # "task" or "kickoff_append" (--continue)
     max_turns: int = DEFAULT_TURNS
     sentinel: str = DEFAULT_SENTINEL
     per_turn_timeout: int = DEFAULT_TIMEOUT
@@ -330,6 +365,7 @@ class DuetConfig:
     verify_cmd: Optional[str] = None          # shell command that must pass before
                                              # a convergence proposal can count
     worktree: bool = False                    # run partner in a throwaway git worktree
+    require_worktree: bool = False            # fail closed instead of same-repo fallback
     worktree_for: str = "partner"             # "partner" (idx 1) or "lead" (idx 0)
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
     worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
@@ -349,6 +385,7 @@ class DuetConfig:
                                               # coder snappy.
     start_speaker_idx: int = 1                # default loop starts with partner replying
     continue_from: Optional[str] = None       # prior run dir/id when created by --continue
+    run_info_file: Optional[pathlib.Path] = None  # atomic machine-readable launch handoff
 
 
 def _resume_never_cwd_keyed(agent: Agent) -> bool:
@@ -390,6 +427,17 @@ def validate_config(cfg: DuetConfig,
         choices = "|".join(sorted(WORKTREE_FOR_CHOICES))
         _config_error(
             f"worktree_for must be one of {choices}, got {cfg.worktree_for!r}",
+            parser,
+        )
+    if cfg.require_worktree and not (cfg.worktree or cfg.worktree_path):
+        _config_error(
+            "require_worktree needs --worktree or --worktree-path",
+            parser,
+        )
+    if cfg.task_from_cmd_target not in {"task", "kickoff_append"}:
+        _config_error(
+            f"task_from_cmd_target must be 'task' or 'kickoff_append', got "
+            f"{cfg.task_from_cmd_target!r}",
             parser,
         )
 
@@ -725,6 +773,25 @@ def write_text_atomic(path: pathlib.Path, text: str) -> None:
             pass
 
 
+def write_text_atomic_new(path: pathlib.Path, text: str) -> None:
+    """Atomically publish a new file and refuse to replace an existing path."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.new.tmp")
+    try:
+        with tmp.open("x", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            raise FileExistsError(f"refusing to overwrite existing file: {path}")
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def append_text_atomic(path: pathlib.Path, text: str) -> None:
     prior = path.read_text(encoding="utf-8") if path.exists() else ""
     write_text_atomic(path, prior + text)
@@ -809,7 +876,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
          live_prefix: Optional[str] = None,
-         mirror_stdout: bool = False) -> tuple[int, str, str]:
+         mirror_stdout: bool = False,
+         redact_command: bool = False) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
@@ -836,9 +904,14 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         try:
             stderr_log_path.parent.mkdir(parents=True, exist_ok=True)
             stderr_file = open(stderr_log_path, "a", encoding="utf-8", buffering=1)
+            command_display = (
+                f"{cmd[0]} <redacted>"
+                if redact_command
+                else f"{' '.join(cmd[:3])}{' …' if len(cmd) > 3 else ''}"
+            )
             stderr_file.write(
                 f"\n# {dt.datetime.now().isoformat(timespec='seconds')} :: "
-                f"{' '.join(cmd[:3])}{' …' if len(cmd) > 3 else ''}\n"
+                f"{command_display}\n"
             )
         except OSError as e:
             print(f"[duet] warn: stderr log open failed ({stderr_log_path}): {e}",
@@ -2135,6 +2208,13 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
                      "--kickoff, or a lead agent session_id")
 
 
+def _worktree_setup_failed(cfg: DuetConfig, message: str) -> None:
+    if cfg.require_worktree:
+        raise RunSetupError(message)
+    print(f"[duet] WARNING: {message} Falling back to same-repo mode.",
+          file=sys.stderr)
+
+
 def _setup_run_worktree(
     cfg: DuetConfig, run_id: str, run_dir: pathlib.Path,
 ) -> tuple[Optional[pathlib.Path], Optional[str]]:
@@ -2143,15 +2223,17 @@ def _setup_run_worktree(
     Honors `--worktree-path` (reuse an existing tree) and `--worktree` (create
     a fresh `duet/<run_id>` branch), points the selected agent's `cwd_override`
     at it as a side effect, and returns (None, ...) when no worktree applies or
-    setup fails — duet then runs same-repo. A failed *create* still reports the
-    intended branch name, matching the pre-extraction behavior.
+    setup fails unless `require_worktree` is set, in which case the run stops
+    with a durable setup failure. A failed *create* still reports the intended
+    branch name, matching the pre-extraction behavior.
     """
     wt_idx = {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
     if cfg.worktree_path:
         existing = pathlib.Path(cfg.worktree_path).expanduser().resolve()
         if not existing.is_dir():
-            print(f"[duet] WARNING: --worktree-path {existing} doesn't exist. "
-                  f"Falling back to same-repo mode.", file=sys.stderr)
+            _worktree_setup_failed(
+                cfg, f"--worktree-path {existing} doesn't exist."
+            )
             return None, None
         # Recover the branch name for logging/state; failure is non-fatal.
         try:
@@ -2163,6 +2245,11 @@ def _setup_run_worktree(
             wt_branch = r.stdout.strip() if r.returncode == 0 else None
         except Exception:
             wt_branch = None
+        if cfg.require_worktree and wt_branch is None:
+            _worktree_setup_failed(
+                cfg, f"--worktree-path {existing} is not a git worktree."
+            )
+            return None, None
         cfg.agents[wt_idx].cwd_override = existing
         print(f"[duet] reusing worktree: {existing} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -2170,8 +2257,9 @@ def _setup_run_worktree(
 
     if cfg.worktree:
         if not is_git_repo(cfg.cwd):
-            print(f"[duet] WARNING: --worktree requested but {cfg.cwd} is not a "
-                  f"git repo. Falling back to same-repo mode.", file=sys.stderr)
+            _worktree_setup_failed(
+                cfg, f"--worktree requested but {cfg.cwd} is not a git repo."
+            )
             return None, None
         wt_branch = f"duet/{run_id}"
         # Default lives next to the transcript/state in run_dir/wt; --worktree-root
@@ -2181,8 +2269,7 @@ def _setup_run_worktree(
         try:
             wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
         except Exception as e:
-            print(f"[duet] WARNING: worktree setup failed: {e}. "
-                  f"Continuing without.", file=sys.stderr)
+            _worktree_setup_failed(cfg, f"worktree setup failed: {e}.")
             return None, wt_branch
         cfg.agents[wt_idx].cwd_override = wt_path
         print(f"[duet] worktree: {wt_path} (branch {wt_branch}, "
@@ -2198,7 +2285,9 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
                      recap_path: pathlib.Path,
                      last_verify: Optional[dict] = None,
                      wt_path: Optional[pathlib.Path] = None,
-                     wt_branch: Optional[str] = None) -> dict:
+                     wt_branch: Optional[str] = None,
+                     phase: Optional[str] = None,
+                     error: Optional[str] = None) -> dict:
     """Assemble the run's state.json payload.
 
     Single source of truth for every state write in `run_duet` — the early
@@ -2207,32 +2296,173 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
     keys (which `--status` and `--continue` depend on surviving a mid-turn
     crash) on every payload; a missing key here would regress both.
     """
+    effective_phase = "finished" if finished_reason else (phase or "between_turns")
     state = {
         "task": cfg.task,
         "cwd": str(cfg.cwd),
+        "phase": effective_phase,
         "turns_used": turns_used,
         "agents": [agent_state(a) for a in cfg.agents],
         "history": history,
         "finished_reason": finished_reason,
-        "transcript_path": str(transcript_path),
+        "transcript_path": str(transcript_path.resolve()),
         "sentinel": cfg.sentinel,
         "sandbox": cfg.sandbox,
         "permission_mode": cfg.permission_mode,
         "per_turn_timeout": cfg.per_turn_timeout,
         "verify_cmd": cfg.verify_cmd,
         "last_verify": last_verify,
-        "worktree": str(wt_path) if wt_path else None,
+        "worktree": str(wt_path.resolve()) if wt_path else None,
         "worktree_branch": wt_branch,
         "worktree_for": cfg.worktree_for,
+        "require_worktree": cfg.require_worktree,
         "add_dirs": [str(d) for d in cfg.add_dirs],
         "reasoning": cfg.reasoning,
         "codex_fast": cfg.codex_fast,
         "continue_from": cfg.continue_from,
         "duet_pid": os.getpid(),
+        "error": error,
     }
     if cfg.recap:
-        state["recap_path"] = str(recap_path)
+        state["recap_path"] = str(recap_path.resolve())
     return state
+
+
+def _write_run_state(path: pathlib.Path, state: dict) -> None:
+    write_text_atomic(path, json.dumps(state, indent=2) + "\n")
+
+
+def _publish_run_info(cfg: DuetConfig, run_dir: pathlib.Path,
+                      state_path: pathlib.Path, run_id: str) -> None:
+    if cfg.run_info_file is None:
+        return
+    payload = {
+        "schema_version": RUN_INFO_SCHEMA_VERSION,
+        "kind": "duet.run",
+        "duet_version": __version__,
+        "run_id": run_id,
+        "run_dir": str(run_dir.resolve()),
+        "state_path": str(state_path.resolve()),
+        "pid": os.getpid(),
+    }
+    write_text_atomic_new(
+        cfg.run_info_file,
+        json.dumps(payload, indent=2) + "\n",
+    )
+
+
+def _launch_failure_state(
+    cfg: DuetConfig,
+    *,
+    reason: str,
+    message: str,
+    history: list,
+    transcript_path: pathlib.Path,
+    recap_path: pathlib.Path,
+    state_path: pathlib.Path,
+    wt_path: Optional[pathlib.Path] = None,
+    wt_branch: Optional[str] = None,
+) -> dict:
+    summary = message.splitlines()[0] if message else reason
+    state = _build_run_state(
+        cfg,
+        turns_used=0,
+        history=history,
+        finished_reason=reason,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        wt_path=wt_path,
+        wt_branch=wt_branch,
+        error=summary,
+    )
+    _write_run_state(state_path, state)
+    print(f"[duet] ERROR: {message}", file=sys.stderr)
+    print(f"[duet] done. reason={reason}. transcript: {transcript_path}")
+    if cfg.recap:
+        print(f"[duet] recap: {recap_path}")
+    return state
+
+
+def _run_kickoff_command(
+    cfg: DuetConfig,
+    *,
+    run_dir: pathlib.Path,
+    transcript_path: pathlib.Path,
+    recap_path: pathlib.Path,
+    state_path: pathlib.Path,
+    history: list,
+    wt_path: Optional[pathlib.Path],
+    wt_branch: Optional[str],
+    log: Callable[..., None],
+) -> Optional[dict]:
+    """Execute deferred task_from_cmd; return terminal state on failure."""
+    if cfg.task_from_cmd is None:
+        return None
+    running = _build_run_state(
+        cfg,
+        turns_used=0,
+        history=history,
+        finished_reason=None,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        wt_path=wt_path,
+        wt_branch=wt_branch,
+        phase="kickoff_running",
+    )
+    _write_run_state(state_path, running)
+    started = time.time()
+    try:
+        output = run_task_from_cmd(
+            cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir
+        )
+    except Exception as exc:
+        message = str(exc)
+        summary = message.splitlines()[0] if message else type(exc).__name__
+        log(
+            "duet",
+            "kickoff",
+            f"[duet kickoff failed]\nfinished_reason: "
+            f"{FINISHED_KICKOFF_ERROR}\n{message}",
+            kind="kickoff_error",
+        )
+        history.append({
+            "turn": 0,
+            "agent": "duet",
+            "kind": "kickoff",
+            "elapsed_s": time.time() - started,
+            "finished_reason": FINISHED_KICKOFF_ERROR,
+            "error": summary,
+            "stderr_log_path": str(run_dir / "turn-00-kickoff.stderr.log"),
+        })
+        return _launch_failure_state(
+            cfg,
+            reason=FINISHED_KICKOFF_ERROR,
+            message=message,
+            history=history,
+            transcript_path=transcript_path,
+            recap_path=recap_path,
+            state_path=state_path,
+            wt_path=wt_path,
+            wt_branch=wt_branch,
+        )
+    if cfg.task_from_cmd_target == "kickoff_append":
+        suffix = f"\n\nHuman continuation instruction:\n{output}"
+        cfg.kickoff = (cfg.kickoff or "") + suffix
+    else:
+        cfg.task = output
+    ready = _build_run_state(
+        cfg,
+        turns_used=0,
+        history=history,
+        finished_reason=None,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        wt_path=wt_path,
+        wt_branch=wt_branch,
+        phase="between_turns",
+    )
+    _write_run_state(state_path, ready)
+    return None
 
 
 @dataclasses.dataclass
@@ -2259,6 +2489,19 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     whether to stop or rotate. Stop-flag and speaker-rotation checks stay in the
     caller — this handles only the mechanics of one turn.
     """
+    running_state = _build_run_state(
+        cfg,
+        turns_used=turn - 1,
+        history=history,
+        finished_reason=None,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        last_verify=last_verify_state,
+        wt_path=wt_path,
+        wt_branch=wt_branch,
+        phase="turn_running",
+    )
+    _write_run_state(state_path, running_state)
     first_turn_for_agent = not seen_first_turn[speaker.name]
     guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
     t0 = time.time()
@@ -2345,7 +2588,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
     )
-    write_text_atomic(state_path, json.dumps(turn_state, indent=2))
+    _write_run_state(state_path, turn_state)
     return _TurnResult(reply, convergence_hit, failure_reason,
                        last_verify_state, recap_block)
 
@@ -2392,7 +2635,9 @@ def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
 
 def _dry_run_recap_state(cfg: DuetConfig, transcript_path: pathlib.Path,
                          recap_path: pathlib.Path, state_path: pathlib.Path,
-                         history: list) -> dict:
+                         history: list,
+                         wt_path: Optional[pathlib.Path] = None,
+                         wt_branch: Optional[str] = None) -> dict:
     """Write the empty-transcript dry-run state for `--dry-run --recap` and
     return it. The non-recap dry run still flows through the normal loop (whose
     agent calls are stubbed); only the recap variant short-circuits here."""
@@ -2403,8 +2648,9 @@ def _dry_run_recap_state(cfg: DuetConfig, transcript_path: pathlib.Path,
     state = _build_run_state(
         cfg, turns_used=0, history=history, finished_reason="dry_run",
         transcript_path=transcript_path, recap_path=recap_path,
+        wt_path=wt_path, wt_branch=wt_branch,
     )
-    write_text_atomic(state_path, json.dumps(state, indent=2))
+    _write_run_state(state_path, state)
     print("[duet] dry-run: agents not called; no recap turn blocks written.")
     print(f"[duet] done. reason=dry_run. transcript: {transcript_path}")
     print(f"[duet] recap: {recap_path}")
@@ -2427,6 +2673,18 @@ def _derive_seed_or_failure(
     seed_t0 = time.time()
     try:
         if not cfg.kickoff and cfg.agents[0].session_id:
+            extracting = _build_run_state(
+                cfg,
+                turns_used=0,
+                history=history,
+                finished_reason=None,
+                transcript_path=transcript_path,
+                recap_path=recap_path,
+                wt_path=wt_path,
+                wt_branch=wt_branch,
+                phase="turn_running",
+            )
+            _write_run_state(state_path, extracting)
             guard_cwd_keyed_resume_before_call(
                 cfg, cfg.agents[0], first_turn_for_agent=False
             )
@@ -2456,7 +2714,7 @@ def _derive_seed_or_failure(
             transcript_path=transcript_path, recap_path=recap_path,
             wt_path=wt_path, wt_branch=wt_branch,
         )
-        write_text_atomic(state_path, json.dumps(state, indent=2))
+        _write_run_state(state_path, state)
         print(reply)
         print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
         if cfg.recap:
@@ -2464,16 +2722,58 @@ def _derive_seed_or_failure(
         return None, state
 
 
-def run_duet(cfg: DuetConfig) -> dict:
-    global RECAP_MODE
-    RECAP_MODE = cfg.recap
-    validate_config(cfg)
+@dataclasses.dataclass
+class _RunContext:
+    run_dir: pathlib.Path
+    run_id: str
+    transcript_path: pathlib.Path
+    recap_path: pathlib.Path
+    state_path: pathlib.Path
+    stop: StopFlag
+    seen_first_turn: dict
+    history: list
+    log: Callable[..., None]
+    wt_path: Optional[pathlib.Path] = None
+    wt_branch: Optional[str] = None
 
+
+def _validate_run_info_target(cfg: DuetConfig) -> None:
+    if cfg.run_info_file is None:
+        return
+    cfg.run_info_file = cfg.run_info_file.expanduser().resolve()
+    if cfg.run_info_file.exists():
+        raise RunSetupError(
+            f"refusing to overwrite existing --run-info-file: {cfg.run_info_file}"
+        )
+    if not cfg.run_info_file.parent.is_dir():
+        raise RunSetupError(
+            f"--run-info-file parent directory does not exist: "
+            f"{cfg.run_info_file.parent}"
+        )
+
+
+def _print_run_banner(cfg: DuetConfig, context: _RunContext) -> None:
+    if cfg.recap:
+        print(f"[duet] run: {context.run_dir}")
+        print("[duet] mode: recap (live)")
+        print(f"[duet] transcript: {context.transcript_path}")
+        print(f"[duet] recap:      {context.recap_path}")
+    else:
+        print(f"[duet] run dir: {context.run_dir}")
+    if cfg.verify_cmd:
+        print(f"[duet] verify cmd: {cfg.verify_cmd}")
+    if cfg.agents[0].session_id:
+        print(f"[duet] {cfg.agents[0].name} resumes session "
+              f"{cfg.agents[0].session_id}")
+
+
+def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
+    """Allocate, publish launch metadata, isolate, and run deferred kickoff."""
+    _validate_run_info_target(cfg)
     run_dir, run_id = _allocate_run_dir(cfg)
     transcript_path = run_dir / "transcript.md"
     recap_path = run_dir / "recap.md"
     state_path = run_dir / "state.json"
-
     if cfg.recap:
         append_text_atomic(
             recap_path,
@@ -2485,10 +2785,6 @@ def run_duet(cfg: DuetConfig) -> dict:
 
     stop = StopFlag()
     _install_sigint(stop)
-
-    # Tracks whether an agent has resume context or has actually been invoked.
-    # A plain task/kickoff seed logged as agent[0] is not a CLI invocation.
-    seen_first_turn = {a.name: bool(a.session_id) for a in cfg.agents}
     history: list[dict] = []
     transcript = ""
 
@@ -2498,23 +2794,88 @@ def run_duet(cfg: DuetConfig) -> dict:
         transcript += head + text + "\n"
         write_text_atomic(transcript_path, transcript)
 
-    if cfg.recap:
-        print(f"[duet] run: {run_dir}")
-        print("[duet] mode: recap (live)")
-        print(f"[duet] transcript: {transcript_path}")
-        print(f"[duet] recap:      {recap_path}")
-    else:
-        print(f"[duet] run dir: {run_dir}")
-    if cfg.verify_cmd:
-        print(f"[duet] verify cmd: {cfg.verify_cmd}")
-    if cfg.agents[0].session_id:
-        print(f"[duet] {cfg.agents[0].name} resumes session {cfg.agents[0].session_id}")
+    context = _RunContext(
+        run_dir=run_dir,
+        run_id=run_id,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        state_path=state_path,
+        stop=stop,
+        seen_first_turn={a.name: bool(a.session_id) for a in cfg.agents},
+        history=history,
+        log=log,
+    )
+    initial_phase = "kickoff_pending" if cfg.task_from_cmd else "between_turns"
+    initial_state = _build_run_state(
+        cfg, turns_used=0, history=history, finished_reason=None,
+        transcript_path=transcript_path, recap_path=recap_path,
+        phase=initial_phase,
+    )
+    _write_run_state(state_path, initial_state)
+    try:
+        _publish_run_info(cfg, run_dir, state_path, run_id)
+    except Exception as exc:
+        state = _launch_failure_state(
+            cfg, reason=FINISHED_SETUP_ERROR,
+            message=f"unable to publish --run-info-file: {exc}",
+            history=history, transcript_path=transcript_path,
+            recap_path=recap_path, state_path=state_path,
+        )
+        return context, state
 
+    _print_run_banner(cfg, context)
+    failure = _run_kickoff_command(
+        cfg, run_dir=run_dir, transcript_path=transcript_path,
+        recap_path=recap_path, state_path=state_path, history=history,
+        wt_path=None, wt_branch=None, log=log,
+    )
+    if failure is not None:
+        return context, failure
     if cfg.dry_run and cfg.recap:
-        return _dry_run_recap_state(
-            cfg, transcript_path, recap_path, state_path, history)
+        state = _dry_run_recap_state(
+            cfg, transcript_path, recap_path, state_path, history,
+        )
+        return context, state
 
-    wt_path, wt_branch = _setup_run_worktree(cfg, run_id, run_dir)
+    try:
+        context.wt_path, context.wt_branch = _setup_run_worktree(
+            cfg, run_id, run_dir
+        )
+    except RunSetupError as exc:
+        state = _launch_failure_state(
+            cfg, reason=FINISHED_SETUP_ERROR, message=str(exc), history=history,
+            transcript_path=transcript_path, recap_path=recap_path,
+            state_path=state_path,
+        )
+        return context, state
+
+    setup_state = _build_run_state(
+        cfg, turns_used=0, history=history, finished_reason=None,
+        transcript_path=transcript_path, recap_path=recap_path,
+        wt_path=context.wt_path, wt_branch=context.wt_branch,
+        phase="between_turns",
+    )
+    _write_run_state(state_path, setup_state)
+    return context, None
+
+
+def run_duet(cfg: DuetConfig) -> dict:
+    global RECAP_MODE
+    RECAP_MODE = cfg.recap
+    validate_config(cfg)
+    context, startup_state = _prepare_run(cfg)
+    if startup_state is not None:
+        return startup_state
+    run_dir = context.run_dir
+    transcript_path = context.transcript_path
+    recap_path = context.recap_path
+    state_path = context.state_path
+    stop = context.stop
+    seen_first_turn = context.seen_first_turn
+    history = context.history
+    log = context.log
+    wt_path = context.wt_path
+    wt_branch = context.wt_branch
 
     if stop.requested:
         state = _build_run_state(
@@ -2523,7 +2884,7 @@ def run_duet(cfg: DuetConfig) -> dict:
             transcript_path=transcript_path, recap_path=recap_path,
             wt_path=wt_path, wt_branch=wt_branch,
         )
-        write_text_atomic(state_path, json.dumps(state, indent=2))
+        _write_run_state(state_path, state)
         return state
 
     seed, seed_failure_state = _derive_seed_or_failure(
@@ -2595,7 +2956,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
     )
-    write_text_atomic(state_path, json.dumps(state, indent=2))
+    _write_run_state(state_path, state)
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
     if cfg.recap:
         print(f"[duet] recap: {recap_path}")
@@ -2720,6 +3081,19 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         return reason, None
     last_verify_state: Optional[dict] = None
     while True:
+        waiting = _build_run_state(
+            cfg,
+            turns_used=len(history),
+            history=history,
+            finished_reason=None,
+            transcript_path=transcript_path,
+            recap_path=transcript_path.parent / "recap.md",
+            last_verify=last_verify_state,
+            wt_path=wt_path,
+            wt_branch=wt_branch,
+            phase="awaiting_force",
+        )
+        _write_run_state(state_path, waiting)
         print(f"\n[duet] loop ended (reason={reason}). "
               f"Press Enter to finish, or type feedback to force another turn "
               f"(your text is appended as a human-feedback message and sent "
@@ -2752,13 +3126,15 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         # lose it (the --status/--continue durability contract). finished_reason
         # stays None mid-loop (duet is alive at the prompt); run_duet writes the
         # final state with the real reason once ask_force returns.
-        write_text_atomic(state_path, json.dumps(_build_run_state(
+        forced_state = _build_run_state(
             cfg, turns_used=len(history), history=history,
             finished_reason=result.failure_reason,
             transcript_path=transcript_path,
             recap_path=transcript_path.parent / "recap.md",
             last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
-        ), indent=2))
+            phase="awaiting_force",
+        )
+        _write_run_state(state_path, forced_state)
         if result.failure_reason is not None:
             return result.failure_reason, last_verify_state
         last_msg = result.reply
@@ -3078,35 +3454,55 @@ def resolve_at_text(value: Optional[str], option_name: str,
     return _check_task_size(text, parser)
 
 
-def resolve_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
-                          parser: argparse.ArgumentParser) -> str:
-    """Run a shell command and use stdout as the task seed."""
+def run_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
+                      run_dir: pathlib.Path) -> str:
+    """Run a kickoff command after allocation and return its stdout seed."""
     global LIVE_PREFIX
     old_prefix = LIVE_PREFIX
     LIVE_PREFIX = LIVE_PREFIX_TASK
     try:
-        rc, out, err = _run(["sh", "-c", cmd_str], cwd=cwd, stdin=None, timeout=timeout)
+        rc, out, err = _run(
+            ["sh", "-c", cmd_str],
+            cwd=cwd,
+            stdin=None,
+            timeout=timeout,
+            stderr_log_path=run_dir / "turn-00-kickoff.stderr.log",
+            pid_file_path=run_dir / "turn-00-kickoff.pid",
+            redact_command=True,
+        )
     finally:
         LIVE_PREFIX = old_prefix
     if rc != 0:
-        parser.error(f"--task-from-cmd exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(
+            FINISHED_KICKOFF_ERROR,
+            f"--task-from-cmd exited {rc}\nstderr:\n{err}",
+        )
     if out == "":
-        parser.error(f"--task-from-cmd produced empty stdout\nstderr:\n{err}")
-    return _check_task_size(out, parser)
+        raise AgentRunError(
+            FINISHED_KICKOFF_ERROR,
+            f"--task-from-cmd produced empty stdout\nstderr:\n{err}",
+        )
+    if len(out) > TASK_MAX_CHARS:
+        raise AgentRunError(
+            FINISHED_KICKOFF_ERROR,
+            f"--task-from-cmd output too large ({len(out)} chars > "
+            f"{TASK_MAX_CHARS})",
+        )
+    return out
 
 
 def resolve_seed_inputs(*, task: Optional[str], kickoff: Optional[str],
                         task_from_cmd: Optional[str], cwd: pathlib.Path,
                         timeout: int, parser: argparse.ArgumentParser,
-                        stdin_cache: dict[str, str]) -> tuple[Optional[str], Optional[str]]:
+                        stdin_cache: dict[str, str]) -> tuple[
+                            Optional[str], Optional[str], Optional[str]
+                        ]:
+    del cwd, timeout  # task commands intentionally execute inside run_duet
     if task is not None and task_from_cmd is not None:
         parser.error("--task and --task-from-cmd are mutually exclusive")
     resolved_kickoff = resolve_at_text(kickoff, "--kickoff", parser, stdin_cache)
-    if task_from_cmd is not None:
-        resolved_task = resolve_task_from_cmd(task_from_cmd, cwd, timeout, parser)
-    else:
-        resolved_task = resolve_at_text(task, "--task", parser, stdin_cache)
-    return resolved_task, resolved_kickoff
+    resolved_task = resolve_at_text(task, "--task", parser, stdin_cache)
+    return resolved_task, resolved_kickoff, task_from_cmd
 
 
 def choose_runs_dir(raw_runs_dir: Optional[str], cwd_resolved: pathlib.Path) -> pathlib.Path:
@@ -3210,8 +3606,7 @@ def _pid_file_snapshot(pid_file: pathlib.Path) -> Optional[tuple[Optional[int], 
         stat = pid_file.stat()
     except FileNotFoundError:
         return None
-    except OSError as e:
-        print(f"[duet] unable to read pid file {pid_file}: {e}", file=sys.stderr)
+    except OSError:
         return None
     return _coerce_pid(text), dt.datetime.fromtimestamp(stat.st_mtime)
 
@@ -3247,133 +3642,313 @@ def _is_duet_process(pid: int) -> bool:
     """True if `pid` is alive AND looks like a duet.py process (avoids stale-PID false positives)."""
     if not _pid_alive(pid):
         return False
-    cmdline = _proc_cmdline(pid) or ""
-    # Match "duet.py" anywhere in the cmdline OR a final path segment
-    # equal to "duet" (when installed via `make install`).
-    if "duet.py" in cmdline:
-        return True
-    # Look for ".../duet" or "duet " (the installed-symlink case).
-    head = cmdline.split() and cmdline.split()[0]
-    if head and pathlib.Path(head).name == "duet":
+    cmdline = _proc_cmdline(pid)
+    if cmdline is None:
+        # Sandboxed macOS callers may be allowed to probe a sibling PID with
+        # signal 0 but denied `ps`. PID 1 is never duet; for other live PIDs,
+        # liveness is the best evidence available when identity is hidden.
+        return pid != 1
+    try:
+        argv = shlex.split(cmdline)
+    except ValueError:
+        argv = cmdline.split()
+    if not argv:
+        return False
+    # A source checkout normally appears as `python .../duet.py`; an installed
+    # wheel's console script appears as `python .../bin/duet`. Direct/symlinked
+    # launches may instead put duet itself in argv[0].
+    executable_names = {
+        pathlib.Path(token).name for token in argv[:2]
+    }
+    if executable_names & {"duet", "duet.py", "duet.exe"}:
         return True
     return False
 
 
-def print_run_status(arg: str) -> int:
-    """Print a one-shot health summary for a duet run. Returns shell exit code:
-    0 = run finished cleanly, 1 = still running, 2 = stuck/crashed, 3 = error.
+def _utc_rfc3339(value: float) -> str:
+    timestamp = dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
+    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
 
-    `arg` may be a path (absolute or relative) OR a bare run id like
-    `20260507-082801` — bare ids get resolved against the same default
-    search paths as `--list` (./runs/, ./.duet/runs/, ~/.duet/runs/*/).
-    """
-    run_dir = _resolve_run_dir(arg)
+
+def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
+    return {
+        "schema_version": STATUS_SCHEMA_VERSION,
+        "kind": "duet.status",
+        "duet_version": __version__,
+        "run_id": run_dir.name if run_dir is not None else (
+            arg if _RUN_ID_RE.match(arg) else None
+        ),
+        "run_dir": str(run_dir.resolve()) if run_dir is not None else None,
+        "health": "error",
+        "phase": "unknown",
+        "exit_code": 3,
+        "turns_used": None,
+        "finished_reason": None,
+        "active_turn": None,
+        "last_completed_turn": None,
+        "artifacts": {
+            "state": str((run_dir / "state.json").resolve()) if run_dir else None,
+            "transcript": None,
+            "recap": None,
+            "worktree": None,
+        },
+        "error": None,
+    }
+
+
+def _absolute_status_path(run_dir: pathlib.Path, value: object) -> Optional[str]:
+    if value is None:
+        return None
+    path = pathlib.Path(str(value)).expanduser()
+    if not path.is_absolute():
+        # Older state files stored paths exactly as constructed from run_dir.
+        # For an invocation-relative `--runs-dir`, those paths are not relative
+        # to saved `cwd`. Re-anchor the suffix after the run id to the resolved
+        # run directory so status remains correct from any invocation cwd.
+        matches = [i for i, part in enumerate(path.parts) if part == run_dir.name]
+        if matches:
+            path = run_dir.joinpath(*path.parts[matches[-1] + 1:])
+        else:
+            path = run_dir / path
+    return str(path.resolve())
+
+
+def _last_completed_turn(state: dict) -> Optional[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        turn = item.get("turn")
+        if not isinstance(turn, int) or isinstance(turn, bool):
+            continue
+        agent = item.get("agent")
+        if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
+            agent = None
+        elapsed = item.get("elapsed_s")
+        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
+            elapsed = None
+        output_chars = item.get("len_chars")
+        if not isinstance(output_chars, int) or isinstance(output_chars, bool):
+            output_chars = None
+        return {
+            "turn": turn,
+            "agent": agent,
+            "elapsed_seconds": elapsed,
+            "output_chars": output_chars,
+        }
+    return None
+
+
+def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
+    pid_files = sorted(run_dir.glob("turn-*.pid"))
+    if not pid_files:
+        return None
+    pid_file = pid_files[-1]
+    snapshot = _pid_file_snapshot(pid_file)
+    if snapshot is None:
+        return None
+    pid, started_at = snapshot
+    started_timestamp = started_at.timestamp()
+    label = pid_file.stem.removeprefix("turn-")
+    if not re.fullmatch(r"[\w.-]{1,160}", label):
+        label = "unknown"
+    active = {
+        "label": label,
+        "pid": pid,
+        "alive": _pid_alive(pid) if pid is not None else False,
+        "started_at": _utc_rfc3339(started_timestamp),
+        "elapsed_seconds": max(0, int(time.time() - started_timestamp)),
+        "stderr_updated_at": None,
+        "stderr_bytes": None,
+    }
+    stderr_path = run_dir / f"{pid_file.stem}.stderr.log"
+    try:
+        stderr_stat = stderr_path.stat()
+    except OSError:
+        pass
+    else:
+        active["stderr_updated_at"] = _utc_rfc3339(stderr_stat.st_mtime)
+        active["stderr_bytes"] = stderr_stat.st_size
+    return active
+
+
+def _status_artifacts(run_dir: pathlib.Path, state: dict) -> dict:
+    recap = state.get("recap_path")
+    if recap is None and (run_dir / "recap.md").exists():
+        recap = run_dir / "recap.md"
+    return {
+        "state": str((run_dir / "state.json").resolve()),
+        "transcript": _absolute_status_path(
+            run_dir,
+            state.get("transcript_path", run_dir / "transcript.md"),
+        ),
+        "recap": _absolute_status_path(run_dir, recap),
+        "worktree": _absolute_status_path(
+            run_dir, state.get("worktree")
+        ),
+    }
+
+
+def build_run_status(arg: str) -> dict:
+    """Build the stable, secret-minimized status snapshot without printing."""
+    run_dir = _resolve_run_dir(arg, warn_ambiguous=False)
+    snapshot = _status_base(arg, run_dir)
+    if run_dir is None:
+        snapshot["error"] = "run directory not found"
+        return snapshot
+    state_path = run_dir / "state.json"
+    if not state_path.is_file():
+        snapshot.update({
+            "health": "stuck",
+            "exit_code": 2,
+            "error": "state.json is missing",
+        })
+        return snapshot
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        snapshot["error"] = f"state.json is unreadable: {type(exc).__name__}"
+        return snapshot
+    if not isinstance(state, dict):
+        snapshot["error"] = "state.json root is not an object"
+        return snapshot
+
+    phase = state.get("phase")
+    snapshot["phase"] = phase if phase in STATUS_PHASES else "unknown"
+    turns_used = state.get("turns_used")
+    snapshot["turns_used"] = (
+        turns_used if isinstance(turns_used, int) and not isinstance(turns_used, bool)
+        else None
+    )
+    raw_finished = state.get("finished_reason")
+    if raw_finished is None:
+        snapshot["finished_reason"] = None
+    elif isinstance(raw_finished, str) and raw_finished in FINISHED_REASONS:
+        snapshot["finished_reason"] = raw_finished
+    else:
+        snapshot["finished_reason"] = "unknown"
+    snapshot["last_completed_turn"] = _last_completed_turn(state)
+    snapshot["artifacts"] = _status_artifacts(run_dir, state)
+
+    active = _active_turn_snapshot(run_dir)
+    if active is not None:
+        snapshot["active_turn"] = active
+        if active["alive"]:
+            snapshot.update({
+                "health": "running",
+                "phase": (
+                    "kickoff_running"
+                    if "kickoff" in active["label"] else "turn_running"
+                ),
+                "exit_code": 1,
+                "error": None,
+            })
+        else:
+            snapshot.update({
+                "health": "stuck",
+                "exit_code": 2,
+                "error": "in-flight process is no longer running",
+            })
+        return snapshot
+
+    if snapshot["finished_reason"]:
+        reason = snapshot["finished_reason"]
+        safe_error = (
+            f"run finished with {reason}; inspect artifacts"
+            if reason in {
+                FINISHED_TIMEOUT,
+                FINISHED_AGENT_ERROR,
+                FINISHED_KICKOFF_ERROR,
+                FINISHED_SETUP_ERROR,
+            }
+            else None
+        )
+        snapshot.update({
+            "health": "terminal",
+            "phase": "finished",
+            "exit_code": 0,
+            "error": safe_error,
+        })
+        return snapshot
+
+    duet_pid = _coerce_pid(state.get("duet_pid"))
+    if duet_pid is not None and _is_duet_process(duet_pid):
+        if snapshot["phase"] not in STATUS_PHASES - {"finished", "unknown"}:
+            snapshot["phase"] = "between_turns"
+        snapshot.update({"health": "running", "exit_code": 1, "error": None})
+        return snapshot
+    snapshot.update({
+        "health": "stuck",
+        "exit_code": 2,
+        "error": (
+            "invalid duet_pid"
+            if state.get("duet_pid") is not None and duet_pid is None
+            else "duet process is no longer running"
+        ),
+    })
+    return snapshot
+
+
+def _print_human_status(snapshot: dict, arg: str) -> None:
+    run_dir = snapshot["run_dir"]
     if run_dir is None:
         print(f"[duet] no such run dir: {arg}", file=sys.stderr)
         if "/" not in arg and "\\" not in arg and _RUN_ID_RE.match(arg):
-            print(f"[duet]   tried bare-id resolution under default paths "
-                  "(./runs/, ./.duet/runs/, ~/.duet/runs/*/). "
-                  "Use `duet --list` to see what's available.",
-                  file=sys.stderr)
-        return 3
-    state_path = run_dir / "state.json"
-    state: dict = {}
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"[duet] state.json malformed: {e}", file=sys.stderr)
-            return 3
-    finished = state.get("finished_reason")
-    transcript_display = state.get("transcript_path", run_dir / "transcript.md")
-    recap_display = state.get("recap_path")
-    if recap_display is None and (run_dir / "recap.md").exists():
-        recap_display = run_dir / "recap.md"
+            print("[duet]   tried bare-id resolution under default paths; "
+                  "use `duet --list` to see available runs.", file=sys.stderr)
+        return
     print(f"[duet] {run_dir}")
-    print(f"  turns_used:      {state.get('turns_used', '?')}")
-    print(f"  finished_reason: {finished!r}")
-    if recap_display is not None:
-        print(f"  recap:           {recap_display}")
-
-    # A turn-*.pid file exists only while that turn's subprocess is alive.
-    pid_files = sorted(run_dir.glob("turn-*.pid"))
-    if pid_files:
-        pid_file = pid_files[-1]
-        snapshot = _pid_file_snapshot(pid_file)
-        if snapshot is not None:
-            pid, started_at = snapshot
-            # Filename: turn-<label>-<agent>.pid
-            stem = pid_file.stem  # turn-02-claude-planner
-            elapsed = (dt.datetime.now() - started_at).total_seconds()
-            alive = _pid_alive(pid) if pid is not None else False
-            print(f"  in-flight turn: {stem}")
-            print(f"    pid:          {pid}  (alive: {alive})")
-            print(f"    started:      {started_at.isoformat(timespec='seconds')}  "
-                  f"({int(elapsed)}s ago)")
-            # Heartbeat from the matching stderr log
-            log = run_dir / f"{stem}.stderr.log"
-            try:
-                log_stat = log.stat()
-            except OSError:
-                log_stat = None
-            if log_stat is not None:
-                log_age = (dt.datetime.now()
-                           - dt.datetime.fromtimestamp(log_stat.st_mtime)).total_seconds()
-                print(f"    last stderr:  {int(log_age)}s ago "
-                      f"({log_stat.st_size} bytes)")
-            if not alive:
-                print("    ⚠ pid file present but process is gone — turn likely "
-                      "crashed or was killed without cleanup")
-                return 2
-            return 1
-    # No pid files. Either run hasn't started, has finished, or is between
-    # turns (in particular, sitting at the post-loop `force>` prompt).
-    if finished:
-        print(f"  done. transcript: {transcript_display}")
-        return 0
-
-    # Disambiguate "between turns" from "actually crashed" using the
-    # duet_pid recorded in state.json.
-    duet_pid = state.get("duet_pid")
-    if duet_pid is not None:
-        pid = _coerce_pid(duet_pid)
-        if pid is None:
-            print(f"  ⚠ invalid duet_pid {duet_pid!r}; no valid liveness "
-                  "proof recorded")
-            return 2
-        if _is_duet_process(pid):
-            print(f"  state:           between turns / awaiting force> prompt")
-            print(f"  duet pid:        {duet_pid} (alive)")
-            history = state.get("history") or []
-            if history:
-                last = history[-1]
-                print(f"  last completed:  turn {last.get('turn')} "
-                      f"({last.get('agent')}) in {last.get('elapsed_s', 0):.1f}s, "
-                      f"{last.get('len_chars', 0)} chars")
-            return 1
-        print(f"  ⚠ duet pid {duet_pid} no longer running (or recycled by an "
-              "unrelated process); no finished_reason recorded — run died "
-              "between turns")
-        return 2
-
-    # state.json predates the duet_pid field — keep the old message and the
-    # old conservative "looks stuck" exit code so callers don't regress.
-    print("  no in-flight turn AND no finished_reason — run may have died "
-          "between turns, or hasn't started yet")
-    print("  (state.json predates the duet_pid field; can't auto-distinguish "
-          "alive-between-turns from crashed)")
-    return 2
+    turns = snapshot["turns_used"]
+    print(f"  turns_used:      {turns if turns is not None else '?'}")
+    print(f"  finished_reason: {snapshot['finished_reason']!r}")
+    recap = snapshot["artifacts"]["recap"]
+    if recap is not None:
+        print(f"  recap:           {recap}")
+    active = snapshot["active_turn"]
+    if active is not None:
+        print(f"  in-flight turn: turn-{active['label']}")
+        print(f"    pid:          {active['pid']}  (alive: {active['alive']})")
+        print(f"    started:      {active['started_at']}  "
+              f"({active['elapsed_seconds']}s ago)")
+        if active["stderr_updated_at"] is not None:
+            print(f"    last stderr:  {active['stderr_updated_at']} "
+                  f"({active['stderr_bytes']} bytes)")
+    if snapshot["health"] == "terminal":
+        print(f"  done. transcript: {snapshot['artifacts']['transcript']}")
+        if snapshot["error"]:
+            print(f"  ⚠ {snapshot['error']}")
+    elif snapshot["health"] == "running" and active is None:
+        print(f"  state:           {snapshot['phase']}")
+    elif snapshot["error"]:
+        print(f"  ⚠ {snapshot['error']}")
 
 
-def print_run_status_safe(arg: str) -> int:
+def print_run_status(arg: str, json_output: bool = False) -> int:
+    """Print a one-shot snapshot; 0=terminal, 1=running, 2=stuck, 3=error."""
+    snapshot = build_run_status(arg)
+    if json_output:
+        print(json.dumps(snapshot, sort_keys=True))
+    else:
+        _print_human_status(snapshot, arg)
+    return snapshot["exit_code"]
+
+
+def print_run_status_safe(arg: str, json_output: bool = False) -> int:
     try:
-        return print_run_status(arg)
+        return print_run_status(arg, json_output=json_output)
     except Exception as e:
-        print(
-            f"[duet] status failed ({type(e).__name__}): {e}",
-            file=sys.stderr,
-        )
-        traceback.print_exc(file=sys.stderr)
+        if json_output:
+            snapshot = _status_base(arg, None)
+            snapshot["error"] = f"status failed: {type(e).__name__}"
+            print(json.dumps(snapshot, sort_keys=True))
+        else:
+            print(
+                f"[duet] status failed ({type(e).__name__}): {e}",
+                file=sys.stderr,
+            )
+            traceback.print_exc(file=sys.stderr)
         return 3
 
 
@@ -3388,6 +3963,8 @@ _LIST_STATUS_FINISHED = {
     FINISHED_TIMEOUT:               ("⏱", "timeout"),
     FINISHED_FORCED_CONTINUATION:   ("🟡", "forced"),
     FINISHED_AGENT_ERROR:           ("⚠", "agent_error"),
+    FINISHED_KICKOFF_ERROR:         ("⚠", "kickoff_error"),
+    FINISHED_SETUP_ERROR:           ("⚠", "setup_error"),
 }
 
 
@@ -3410,7 +3987,7 @@ def _default_list_paths() -> list[pathlib.Path]:
     return paths
 
 
-def _resolve_run_dir(arg: str) -> Optional[pathlib.Path]:
+def _resolve_run_dir(arg: str, *, warn_ambiguous: bool = True) -> Optional[pathlib.Path]:
     """Map a `--status` argument to a real run dir.
 
     Accepts:
@@ -3449,9 +4026,10 @@ def _resolve_run_dir(arg: str) -> Optional[pathlib.Path]:
             # are seconds-precise) but possible. Prefer most-recent and
             # warn so users notice ambiguity.
             unique.sort(key=lambda c: c.stat().st_mtime, reverse=True)
-            print(f"[duet] note: run id {arg!r} found under multiple roots; "
-                  f"using most recent: {unique[0]}",
-                  file=sys.stderr)
+            if warn_ambiguous:
+                print(f"[duet] note: run id {arg!r} found under multiple roots; "
+                      f"using most recent: {unique[0]}",
+                      file=sys.stderr)
             return unique[0].resolve()
     return None
 
@@ -3520,11 +4098,11 @@ def _next_speaker_idx_from_state(agents: list[Agent], state: dict) -> int:
     return 1 if turns_used % 2 == 0 else 0
 
 
-def _continue_note_from_args(args: argparse.Namespace,
-                             cwd: pathlib.Path,
-                             timeout: int,
-                             parser: argparse.ArgumentParser,
-                             stdin_cache: dict[str, str]) -> Optional[str]:
+def _continue_note_from_args(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    stdin_cache: dict[str, str],
+) -> tuple[Optional[str], Optional[str]]:
     sources = [
         args.task is not None,
         args.kickoff is not None,
@@ -3534,12 +4112,12 @@ def _continue_note_from_args(args: argparse.Namespace,
         parser.error("--continue accepts only one extra instruction via "
                      "--task, --kickoff, or --task-from-cmd")
     if args.task_from_cmd is not None:
-        return resolve_task_from_cmd(args.task_from_cmd, cwd, timeout, parser)
+        return None, args.task_from_cmd
     if args.kickoff is not None:
-        return resolve_at_text(args.kickoff, "--kickoff", parser, stdin_cache)
+        return resolve_at_text(args.kickoff, "--kickoff", parser, stdin_cache), None
     if args.task is not None:
-        return resolve_at_text(args.task, "--task", parser, stdin_cache)
-    return None
+        return resolve_at_text(args.task, "--task", parser, stdin_cache), None
+    return None, None
 
 
 def _default_continue_kickoff(run_dir: pathlib.Path,
@@ -3638,7 +4216,9 @@ def build_continue_config(run_arg: str,
         args.timeout, state, "per_turn_timeout", DEFAULT_TIMEOUT,
         parser, "--continue",
     )
-    user_note = _continue_note_from_args(args, cwd, timeout, parser, stdin_cache)
+    user_note, task_from_cmd = _continue_note_from_args(
+        args, parser, stdin_cache
+    )
     next_idx = _next_speaker_idx_from_state(agents, state)
 
     raw_worktree = args.worktree_path or state.get("worktree")
@@ -3658,7 +4238,9 @@ def build_continue_config(run_arg: str,
         agents=agents,
         task=state.get("task"),
         kickoff=kickoff,
-        max_turns=args.turns,
+        task_from_cmd=task_from_cmd,
+        task_from_cmd_target="kickoff_append" if task_from_cmd else "task",
+        max_turns=args.turns if args.turns is not None else DEFAULT_TURNS,
         sentinel=sentinel,
         per_turn_timeout=timeout,
         runs_dir=runs_dir,
@@ -3671,6 +4253,11 @@ def build_continue_config(run_arg: str,
             parser,
         ),
         worktree=False,
+        require_worktree=bool(
+            args.require_worktree
+            if args.require_worktree is not None
+            else state.get("require_worktree", False)
+        ),
         worktree_for=worktree_for,
         worktree_path=worktree_path,
         add_dirs=[
@@ -3684,6 +4271,7 @@ def build_continue_config(run_arg: str,
         ),
         start_speaker_idx=next_idx,
         continue_from=str(run_dir),
+        run_info_file=_resolve_opt_path(args.run_info_file),
     )
 
 
@@ -3814,6 +4402,10 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
+    ap.add_argument("--version", action="version", version=f"duet {__version__}")
+    ap.add_argument("--recipe", choices=["review"], default=None,
+                    help="apply a canonical launch profile; explicit flags override "
+                         "recipe values (currently: review)")
     ap.add_argument("--resume-claude", metavar="SESSION_ID",
                     help="resume an existing Claude session id; harness will pull "
                          "its latest message and feed it to the partner agent.")
@@ -3830,16 +4422,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                                       "to send to the partner agent")
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
-    ap.add_argument("--partner", default="codex:coder",
+    ap.add_argument("--partner", default=None,
                     help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder, opencode:coder (default codex:coder)")
-    ap.add_argument("--lead", default="claude:planner",
+    ap.add_argument("--lead", default=None,
                     help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--lead-model", metavar="MODEL", default=None,
                     help="model name to pass to the lead agent's backend via --model")
     ap.add_argument("--partner-model", metavar="MODEL", default=None,
                     help="model name to pass to the partner agent's backend via --model")
-    ap.add_argument("--cwd", default=".", help="working dir for both agents")
-    ap.add_argument("--turns", type=int, default=DEFAULT_TURNS, help=f"max turns (default {DEFAULT_TURNS})")
+    ap.add_argument("--cwd", default=None, help="working dir for both agents")
+    ap.add_argument("--turns", type=int, default=None,
+                    help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=None,
                     help="convergence sentinel; requires an LGTM rationale and "
                          "back-to-back proposals from both agents")
@@ -3850,14 +4443,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "proposal can count. Runs only for valid LGTM+rationale "
                          "proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
+    ap.add_argument("--run-info-file", metavar="FILE", default=None,
+                    help="atomically write the new run's schema-v1 launch JSON; "
+                         "refuses to overwrite FILE")
     ap.add_argument("--sandbox", default=None,
                     help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot/opencode.")
     ap.add_argument("--permission-mode", default=None,
                     help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot/opencode.")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
-    ap.add_argument("--worktree", action="store_true",
-                    help="run the partner agent in a throwaway git worktree on a fresh branch; "
-                         "the worktree is left intact at the end so you can review/merge/drop it.")
+    worktree_group = ap.add_mutually_exclusive_group()
+    worktree_group.add_argument(
+        "--worktree", action="store_true", dest="worktree",
+        help="run the selected agent in a throwaway git worktree on a fresh branch; "
+             "the worktree is left intact for review/merge/drop",
+    )
+    worktree_group.add_argument(
+        "--no-worktree", action="store_false", dest="worktree",
+        help="disable worktree creation, including a recipe default",
+    )
+    ap.set_defaults(worktree=None)
+    require_worktree_group = ap.add_mutually_exclusive_group()
+    require_worktree_group.add_argument(
+        "--require-worktree", action="store_true", dest="require_worktree",
+        help="fail the run if the requested worktree cannot be reused or created",
+    )
+    require_worktree_group.add_argument(
+        "--allow-worktree-fallback", action="store_false", dest="require_worktree",
+        help="allow same-repo fallback if worktree setup fails",
+    )
+    ap.set_defaults(require_worktree=None)
     ap.add_argument("--worktree-for", choices=["partner", "lead"], default=None,
                     help="which agent runs in the worktree (default: partner)")
     ap.add_argument("--worktree-path", metavar="PATH", default=None,
@@ -3907,8 +4521,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "(absolute or relative) OR a bare run id like "
                          "`20260507-082801` (resolved against the same "
                          "default paths as `--list`: ./runs/, ./.duet/runs/, "
-                         "~/.duet/runs/*/). Exit codes: 0=done, 1=running, "
+                         "~/.duet/runs/*/). Exit codes: 0=terminal, 1=running, "
                          "2=stuck/crashed, 3=error.")
+    ap.add_argument("--json", action="store_true", dest="json_output",
+                    help="with --status, emit the stable schema-v1 JSON snapshot")
     ap.add_argument("--list", metavar="PATH", nargs="?", const="__defaults__",
                     default=None, dest="list_runs",
                     help="don't run a duet — instead list runs found under "
@@ -3920,11 +4536,59 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--quiet", action="store_true",
                     help="don't mirror subprocess stderr to your terminal in real-time. "
                          "By default, duet prints Codex's live progress as it works.")
-    ap.add_argument("--recap", action="store_true",
-                    help="compact per-turn debug view; suppresses live stderr mirror "
-                         "and writes recap.md next to transcript.md")
+    recap_group = ap.add_mutually_exclusive_group()
+    recap_group.add_argument(
+        "--recap", action="store_true", dest="recap",
+        help="compact per-turn debug view; suppresses live stderr mirror and writes "
+             "recap.md next to transcript.md",
+    )
+    recap_group.add_argument(
+        "--no-recap", action="store_false", dest="recap",
+        help="disable recap mode, including a recipe default",
+    )
+    ap.set_defaults(recap=None)
     ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
     return ap
+
+
+def _apply_recipe_args(args: argparse.Namespace) -> None:
+    """Fill omitted CLI values from a named recipe; explicit flags win."""
+    if args.recipe != "review":
+        return
+    if args.cwd is None:
+        args.cwd = str(pathlib.Path.cwd())
+    recipe_cwd = pathlib.Path(args.cwd).expanduser().resolve()
+    if args.runs_dir is None:
+        args.runs_dir = str(recipe_cwd / ".duet" / "runs")
+    if args.lead is None:
+        args.lead = "claude:reviewer"
+    if args.partner is None:
+        args.partner = "codex:coder"
+    if args.turns is None:
+        args.turns = 6
+    if args.recap is None:
+        args.recap = True
+    if args.worktree is None:
+        # An explicit reuse path selects the alternate worktree topology and
+        # must suppress the recipe's fresh-worktree default.
+        args.worktree = args.worktree_path is None
+    if args.require_worktree is None:
+        args.require_worktree = bool(args.worktree or args.worktree_path)
+
+    explicit_seed = any((
+        args.task is not None,
+        args.kickoff is not None,
+        args.task_from_cmd is not None,
+        args.resume_claude is not None,
+        args.resume_codex is not None,
+        args.continue_run is not None,
+    ))
+    if not explicit_seed:
+        command = "claude -p /review"
+        lead_backend = (args.lead or "").partition(":")[0]
+        if args.lead_model and lead_backend == "claude":
+            command += f" --model {shlex.quote(args.lead_model)}"
+        args.task_from_cmd = command
 
 
 def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
@@ -3955,7 +4619,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         raw_task = args.task
         raw_kickoff = args.kickoff
         raw_task_from_cmd = args.task_from_cmd
-    task, kickoff = resolve_seed_inputs(
+    task, kickoff, task_from_cmd = resolve_seed_inputs(
         task=raw_task,
         kickoff=raw_kickoff,
         task_from_cmd=raw_task_from_cmd,
@@ -3977,6 +4641,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         agents=agents,
         task=task,
         kickoff=kickoff,
+        task_from_cmd=task_from_cmd,
         max_turns=int(raw.get("max_turns", DEFAULT_TURNS)),
         sentinel=raw.get(
             "sentinel",
@@ -3994,9 +4659,14 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE,
         ),
         dry_run=bool(raw.get("dry_run", False)),
-        recap=bool(raw.get("recap", False)) or args.recap,
+        recap=bool(raw.get("recap", False)) or bool(args.recap),
         verify_cmd=verify_cmd,
-        worktree=bool(raw.get("worktree", False)) or args.worktree,
+        worktree=bool(raw.get("worktree", False)) or bool(args.worktree),
+        require_worktree=bool(
+            args.require_worktree
+            if args.require_worktree is not None
+            else raw.get("require_worktree", False)
+        ),
         worktree_for=raw.get("worktree_for") or args.worktree_for or "partner",
         worktree_path=_resolve_opt_path(args.worktree_path, raw.get("worktree_path")),
         worktree_root=_resolve_opt_path(args.worktree_root, raw.get("worktree_root")),
@@ -4012,6 +4682,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             args.codex_fast
             if args.codex_fast is not None else raw.get("codex_fast", False)
         ),
+        run_info_file=_resolve_opt_path(args.run_info_file),
     )
     cfg.agents = apply_resume_overrides(
         cfg.agents,
@@ -4029,9 +4700,9 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     backend (rename_slots=True) so an explicit topology that puts a resumed
     agent in the "wrong" slot still routes its session id correctly.
     """
-    cfg_cwd = pathlib.Path(args.cwd).expanduser().resolve()
+    cfg_cwd = pathlib.Path(args.cwd or ".").expanduser().resolve()
     timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
-    task, kickoff = resolve_seed_inputs(
+    task, kickoff, task_from_cmd = resolve_seed_inputs(
         task=args.task,
         kickoff=args.kickoff,
         task_from_cmd=args.task_from_cmd,
@@ -4042,11 +4713,11 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     )
     agents = [
         dataclasses.replace(
-            parse_partner(args.lead, default_role="planner"),
+            parse_partner(args.lead or "claude:planner", default_role="planner"),
             model=args.lead_model or None,
         ),
         dataclasses.replace(
-            parse_partner(args.partner, default_role="coder"),
+            parse_partner(args.partner or "codex:coder", default_role="coder"),
             model=args.partner_model or None,
         ),
     ]
@@ -4061,7 +4732,8 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         agents=agents,
         task=task,
         kickoff=kickoff,
-        max_turns=args.turns,
+        task_from_cmd=task_from_cmd,
+        max_turns=args.turns if args.turns is not None else DEFAULT_TURNS,
         sentinel=args.sentinel if args.sentinel is not None else DEFAULT_SENTINEL,
         per_turn_timeout=timeout,
         runs_dir=choose_runs_dir(args.runs_dir, cfg_cwd),
@@ -4071,9 +4743,10 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE
         ),
         dry_run=args.dry_run,
-        recap=args.recap,
+        recap=bool(args.recap),
         verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
-        worktree=args.worktree,
+        worktree=bool(args.worktree),
+        require_worktree=bool(args.require_worktree),
         worktree_for=args.worktree_for or "partner",
         worktree_path=_resolve_opt_path(args.worktree_path),
         worktree_root=_resolve_opt_path(args.worktree_root),
@@ -4083,6 +4756,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         ],
         reasoning=args.reasoning,
         codex_fast=bool(args.codex_fast),
+        run_info_file=_resolve_opt_path(args.run_info_file),
     )
 
 
@@ -4118,13 +4792,92 @@ def _warn_codex_fast_scope(cfg: DuetConfig) -> None:
         )
 
 
+def _validate_run_arguments(args: argparse.Namespace,
+                            parser: argparse.ArgumentParser) -> None:
+    if args.recipe and args.config:
+        parser.error("--recipe and --config are mutually exclusive")
+    if args.recipe and args.continue_run:
+        parser.error("--recipe and --continue are mutually exclusive")
+    _apply_recipe_args(args)
+    if args.worktree and args.worktree_path:
+        parser.error("--worktree and --worktree-path are mutually exclusive")
+    if args.continue_run and args.config:
+        parser.error("--continue and --config are mutually exclusive")
+    if args.continue_run and (args.resume_claude or args.resume_codex):
+        parser.error(
+            "--continue restores session ids from state.json; "
+            "do not also pass --resume-*"
+        )
+    if args.continue_run and args.worktree:
+        parser.error(
+            "--continue reuses the saved worktree; use --worktree-path "
+            "to override it"
+        )
+    if args.run_info_file:
+        run_info_path = pathlib.Path(args.run_info_file).expanduser().resolve()
+        if run_info_path.exists():
+            parser.error(
+                f"--run-info-file refuses to overwrite existing path: "
+                f"{run_info_path}"
+            )
+        if not run_info_path.parent.is_dir():
+            parser.error(
+                f"--run-info-file parent directory does not exist: "
+                f"{run_info_path.parent}"
+            )
+
+
+def _config_from_args(args: argparse.Namespace,
+                      parser: argparse.ArgumentParser) -> DuetConfig:
+    stdin_cache: dict[str, str] = {}
+    if args.continue_run:
+        cfg = build_continue_config(args.continue_run, args, parser, stdin_cache)
+        print(f"[duet] continuing run {args.continue_run} "
+              f"(next: {cfg.agents[cfg.start_speaker_idx].name})")
+        return cfg
+    if args.config:
+        return _build_cfg_from_yaml(args, parser, stdin_cache)
+    return _build_cfg_from_cli(args, parser, stdin_cache)
+
+
+def _validate_ready_config(cfg: DuetConfig,
+                           parser: argparse.ArgumentParser) -> None:
+    validate_config(cfg, parser)
+    validate_reasoning(cfg.reasoning, "config reasoning")
+    for agent in cfg.agents:
+        validate_reasoning(
+            agent.reasoning_effort,
+            f"agent {agent.name} reasoning_effort",
+        )
+    if cfg.worktree and cfg.worktree_path:
+        raise SystemExit(
+            "--worktree and --worktree-path/worktree_path are mutually exclusive"
+        )
+
+
+def _warn_missing_backends(cfg: DuetConfig) -> None:
+    if cfg.dry_run:
+        return
+    for backend in {a.backend for a in cfg.agents}:
+        binary = backend_adapter(backend).binary
+        if shutil.which(binary) is None:
+            print(
+                f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "
+                f"Install it or use --dry-run.",
+                file=sys.stderr,
+            )
+
+
 def main() -> int:
     ap = _build_arg_parser()
     args = ap.parse_args()
 
     # `--status` is read-only: print run health and exit. Skip everything below.
     if args.status:
-        return print_run_status_safe(args.status)
+        return print_run_status_safe(args.status, json_output=args.json_output)
+
+    if args.json_output:
+        ap.error("--json is only valid with --status")
 
     # `--list` is read-only: print the run-dir table and exit.
     if args.list_runs is not None:
@@ -4132,47 +4885,27 @@ def main() -> int:
                     else pathlib.Path(args.list_runs))
         return print_runs_list(explicit)
 
-    if args.worktree and args.worktree_path:
-        ap.error("--worktree and --worktree-path are mutually exclusive")
-    if args.continue_run and args.config:
-        ap.error("--continue and --config are mutually exclusive")
-    if args.continue_run and (args.resume_claude or args.resume_codex):
-        ap.error("--continue restores session ids from state.json; do not also pass --resume-*")
-    if args.continue_run and args.worktree:
-        ap.error("--continue reuses the saved worktree; use --worktree-path to override it")
+    _validate_run_arguments(args, ap)
 
     # Live-stream subprocess stderr unless --quiet
     global LIVE_STREAM
     LIVE_STREAM = not args.quiet
 
-    stdin_cache: dict[str, str] = {}
-    if args.continue_run:
-        cfg = build_continue_config(args.continue_run, args, ap, stdin_cache)
-        print(f"[duet] continuing run {args.continue_run} "
-              f"(next: {cfg.agents[cfg.start_speaker_idx].name})")
-    elif args.config:
-        cfg = _build_cfg_from_yaml(args, ap, stdin_cache)
-    else:
-        cfg = _build_cfg_from_cli(args, ap, stdin_cache)
-
-    validate_config(cfg, ap)
-    validate_reasoning(cfg.reasoning, "config reasoning")
-    for agent in cfg.agents:
-        validate_reasoning(agent.reasoning_effort, f"agent {agent.name} reasoning_effort")
-    if cfg.worktree and cfg.worktree_path:
-        raise SystemExit("--worktree and --worktree-path/worktree_path are mutually exclusive")
-
+    cfg = _config_from_args(args, ap)
+    _validate_ready_config(cfg, ap)
     _warn_codex_fast_scope(cfg)
+    _warn_missing_backends(cfg)
 
-    # Sanity: are CLIs on PATH?
-    if not cfg.dry_run:
-        for backend in {a.backend for a in cfg.agents}:
-            binary = backend_adapter(backend).binary
-            if shutil.which(binary) is None:
-                print(f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "
-                      f"Install it or use --dry-run.", file=sys.stderr)
-
-    run_duet(cfg)
+    try:
+        state = run_duet(cfg)
+    except RunSetupError as exc:
+        print(f"[duet] setup failed: {exc}", file=sys.stderr)
+        return 1
+    if state.get("finished_reason") in {
+        FINISHED_KICKOFF_ERROR,
+        FINISHED_SETUP_ERROR,
+    }:
+        return 1
     return 0
 
 

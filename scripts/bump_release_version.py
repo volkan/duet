@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bump duet's version across the three lockstep manifests.
+"""Bump duet's runtime version and the two lockstep plugin manifests.
 
 Used by `.github/workflows/bump-version.yml` (a manual ``workflow_dispatch``
 helper) and runnable locally. It only edits the version strings; it never
@@ -7,13 +7,13 @@ creates a tag or a GitHub Release. Merging the resulting ``chore: release X.Y.Z`
 PR to ``main`` triggers ``.github/workflows/release.yml`` (``on: push: main``),
 which detects the bump, publishes to PyPI via OIDC, then auto-creates the
 ``vX.Y.Z`` tag + GitHub Release. This script still only edits the three version
-manifests below.
+sources below.
 
-Stdlib-only and Python 3.9-clean on the write path (no ``tomllib``): the
-``pyproject.toml`` version lives in the ``[project]`` table and is rewritten by
-a small section-aware scanner; the two plugin manifests are JSON. After writing,
-verification is delegated to ``scripts/check_distribution_metadata.py`` (the one
-source of truth for lockstep + metadata), which gates ``tomllib`` itself.
+Stdlib-only and Python 3.9-clean: ``duet.__version__`` is the canonical runtime
+version and setuptools derives package metadata from it; the two plugin
+manifests are JSON. After writing, verification is delegated to
+``scripts/check_distribution_metadata.py`` (the one source of truth for
+lockstep + metadata), which gates ``tomllib`` itself.
 
 Usage: ``python scripts/bump_release_version.py X.Y.Z``
 """
@@ -27,13 +27,12 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PYPROJECT = ROOT / "pyproject.toml"
+DUET_PY = ROOT / "duet.py"
 CLAUDE_PLUGIN_JSON = ROOT / "plugins" / "duet-claude" / ".claude-plugin" / "plugin.json"
 CODEX_PLUGIN_JSON = ROOT / "plugins" / "duet" / ".codex-plugin" / "plugin.json"
 
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
-_VERSION_LINE = re.compile(r'^(\s*version\s*=\s*")[^"]*(".*)$')
-_TABLE_HEADER = re.compile(r"^\[[^\]]+\]\s*$")
+_VERSION_LINE = re.compile(r'^(\s*__version__\s*=\s*")[^"]*(".*)$')
 
 
 class BumpError(Exception):
@@ -52,32 +51,25 @@ def parse_strict_semver(value: str) -> tuple:
     return tuple(int(part) for part in match.groups())
 
 
-def _pyproject_version_line_index(lines: list) -> int:
-    """Index of the single ``version = "..."`` line inside ``[project]``."""
-    in_project = False
-    found = []
-    for i, line in enumerate(lines):
-        if _TABLE_HEADER.match(line.strip()):
-            in_project = line.strip() == "[project]"
-            continue
-        if in_project and _VERSION_LINE.match(line):
-            found.append(i)
+def _source_version_line_index(lines: list) -> int:
+    """Index of the single module-level ``__version__ = "..."`` line."""
+    found = [i for i, line in enumerate(lines) if _VERSION_LINE.match(line)]
     if len(found) != 1:
         raise BumpError(
-            f"expected exactly one version line in pyproject.toml [project], found {len(found)}"
+            f"expected exactly one __version__ line in duet.py, found {len(found)}"
         )
     return found[0]
 
 
-def read_current_version(pyproject_text: str) -> str:
-    lines = pyproject_text.splitlines(keepends=True)
-    line = lines[_pyproject_version_line_index(lines)]
+def read_current_version(source_text: str) -> str:
+    lines = source_text.splitlines(keepends=True)
+    line = lines[_source_version_line_index(lines)]
     return _VERSION_LINE.match(line).group(0).split('"')[1]
 
 
-def _rewrite_pyproject(pyproject_text: str, new_version: str) -> str:
-    lines = pyproject_text.splitlines(keepends=True)
-    idx = _pyproject_version_line_index(lines)
+def _rewrite_source(source_text: str, new_version: str) -> str:
+    lines = source_text.splitlines(keepends=True)
+    idx = _source_version_line_index(lines)
     lines[idx] = _VERSION_LINE.sub(r"\g<1>" + new_version + r"\g<2>", lines[idx])
     return "".join(lines)
 
@@ -91,20 +83,20 @@ def _rewrite_json(path: Path, new_version: str) -> str:
 
 
 def bump(root: Path, new_version: str) -> str:
-    """Bump all three manifests under ``root``. Validates everything and computes
+    """Bump runtime plus two manifests under ``root``. Validates and computes
     every rewritten file before writing any, so a failure leaves no partial state.
     Returns the previous version."""
     parse_strict_semver(new_version)
-    pyproject = root / "pyproject.toml"
+    duet_py = root / "duet.py"
     claude = root / "plugins" / "duet-claude" / ".claude-plugin" / "plugin.json"
     codex = root / "plugins" / "duet" / ".codex-plugin" / "plugin.json"
 
-    current = read_current_version(pyproject.read_text(encoding="utf-8"))
+    current = read_current_version(duet_py.read_text(encoding="utf-8"))
     if parse_strict_semver(new_version) <= parse_strict_semver(current):
         raise BumpError(f"{new_version} is not greater than the current version {current}")
 
     rewritten = {
-        pyproject: _rewrite_pyproject(pyproject.read_text(encoding="utf-8"), new_version),
+        duet_py: _rewrite_source(duet_py.read_text(encoding="utf-8"), new_version),
         claude: _rewrite_json(claude, new_version),
         codex: _rewrite_json(codex, new_version),
     }
@@ -114,7 +106,7 @@ def bump(root: Path, new_version: str) -> str:
 
 
 def main(argv: list) -> int:
-    parser = argparse.ArgumentParser(description="Bump duet's version across the three lockstep manifests.")
+    parser = argparse.ArgumentParser(description="Bump duet runtime and plugin versions.")
     parser.add_argument("version", help="new version, exactly X.Y.Z (no leading 'v')")
     parser.add_argument("--skip-verify", action="store_true",
                         help="skip the check_distribution_metadata.py lockstep check (tests use this)")

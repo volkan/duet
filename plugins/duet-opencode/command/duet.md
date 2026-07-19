@@ -50,27 +50,51 @@ If `codex` is missing, stop and tell the user:
 If `$ARGUMENTS` is empty, run exactly:
 
 ```bash
-duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --lead claude:reviewer --partner codex:coder --worktree --turns 6 --task-from-cmd 'claude -p /review'
+duet --recipe review
 ```
 
 Otherwise run exactly:
 
 ```bash
-duet --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --partner codex:coder --worktree --task-from-cmd $ARGUMENTS
+duet --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
+  --partner codex:coder <conditional worktree defaults> \
+  --task-from-cmd '<upstream shell command>' <remaining duet flags>
 ```
 
-The defaults (`--partner codex:coder --worktree`) appear before `$ARGUMENTS`
-on purpose. Any explicit flags the user passes after the first quoted shell
-command, such as `--partner opencode:coder`, `--turns 8`, or `--config foo.yaml`,
-must win.
+Replace `<conditional worktree defaults>` before executing; never pass that
+placeholder literally. Split the first quoted value in `$ARGUMENTS` from the
+remaining duet flags and examine only those remaining flags, not text inside
+the upstream command:
+
+1. Add `--worktree` only when the remaining flags contain none of
+   `--worktree`, `--no-worktree`, `--worktree-path PATH`, or
+   `--worktree-path=PATH`.
+2. Add `--require-worktree` only when worktree use is effective and the
+   remaining flags contain neither
+   `--require-worktree` nor `--allow-worktree-fallback`.
+3. If the user supplied conflicting flags (`--worktree` with
+   `--no-worktree` or `--worktree-path`, or `--require-worktree` with
+   `--allow-worktree-fallback`), stop and report the conflict instead of
+   reordering or rewriting their flags.
+
+Worktree use is effective when the flags select `--worktree` or
+`--worktree-path`, or when step 1 adds `--worktree`. A lone `--no-worktree`
+disables it. If `--no-worktree` and `--require-worktree` appear together
+without `--worktree-path`, report that invalid combination too.
+
+No topology/strictness override therefore synthesizes
+`--worktree --require-worktree`; `--no-worktree` synthesizes nothing;
+`--allow-worktree-fallback` synthesizes only `--worktree`; and
+`--worktree-path PATH` synthesizes only `--require-worktree`. Do not pre-add
+`--recap`, because it would conflict with an explicit `--no-recap`. Keep
+`--partner codex:coder` before the remaining flags so an explicit partner can
+replace that non-exclusive default.
 
 After spawn, print the run dir + the `duet --status <run_dir>` hint once the
 `[duet] run: ...` or `[duet] run dir: ...` line appears.
 
-Important: with the empty-argument default, `claude -p /review` runs as
-`--task-from-cmd` before duet allocates a run directory. During that kickoff
-phase, `.duet/runs/*` may not exist yet. Do not report that no run was created
-until the command exits or prints an error.
+The review recipe allocates its run directory and writes initial `state.json`
+before starting `claude -p /review`, so the run is observable during kickoff.
 
 Notes:
 

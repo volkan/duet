@@ -1,9 +1,9 @@
 # Releasing duet
 
-duet ships from one repo three ways, all pinned to the same version string: the
+duet ships from one repo three ways, all pinned to the same runtime version: the
 **`duet-cli` PyPI package** and the **Claude Code** + **Codex** plugins (which
 install from this GitHub repo). A release is a `chore: release X.Y.Z` commit that
-bumps the three lockstep manifests, merged to `main`. Merging it is the whole
+bumps the runtime source and two plugin manifests, merged to `main`. Merging it is the whole
 trigger: `.github/workflows/release.yml` (`on: push: main`) detects the version
 bump, builds, publishes to PyPI, then **auto-creates** the `vX.Y.Z` tag + GitHub
 Release with the built distributions attached. There is no manual "create a
@@ -18,7 +18,7 @@ event, so a `GITHUB_TOKEN`-created Release here is fine and intentional.
 ## How publishing works
 
 `release.yml` triggers `on: push: main` and runs a `detect` job first: it
-releases only when the `pyproject.toml` version **changed** in that push **and**
+releases only when `duet.__version__` **changed** in that push **and**
 no `vX.Y.Z` tag exists yet. Routine pushes (docs, code) and the merge of this
 rework itself are no-ops. When a push is release-worthy the jobs run in order:
 
@@ -46,12 +46,13 @@ OIDC.
 to `main`, not on pull requests, so it never gates a PR and is not part of branch
 protection.
 
-## The three lockstep version locations
+## The canonical version and two lockstep manifests
 
 The release bump edits exactly these (the `marketplace.json` files carry no
-version). `scripts/check_distribution_metadata.py` fails if they disagree:
+version). Setuptools derives wheel/sdist metadata from the first item, and
+`scripts/check_distribution_metadata.py` fails if they disagree:
 
-- `pyproject.toml` — `version = "..."`
+- `duet.py` — `__version__ = "..."` (canonical runtime/package source)
 - `plugins/duet-claude/.claude-plugin/plugin.json` — `"version": "..."`
 - `plugins/duet/.codex-plugin/plugin.json` — `"version": "..."`
 
@@ -92,7 +93,7 @@ gh run list --branch main --limit 3        # confirm the latest main run is gree
 
 # 2. Bump the version. Preferred: run the bump-version workflow
 #    (GitHub -> Actions -> bump-version -> Run workflow -> enter X.Y.Z). It bumps
-#    the three lockstep manifests and opens a "chore: release X.Y.Z" PR.
+#    the runtime source and two plugin manifests and opens a release PR.
 #    Local equivalent: python scripts/bump_release_version.py X.Y.Z
 #    The bot-opened PR's required checks start in an approval-required state
 #    (it was opened by GITHUB_TOKEN) — click "Approve workflows to run" in the

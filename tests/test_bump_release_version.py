@@ -10,15 +10,14 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 import bump_release_version as brv  # noqa: E402
 
-PYPROJECT = """\
-[build-system]
-requires = ["setuptools>=77"]
-build-backend = "setuptools.build_meta"
+DUET_SOURCE = """\
+#!/usr/bin/env python3
+from __future__ import annotations
 
-[project]
-name = "duet-cli"
-version = "0.2.1"
-description = "x"
+__version__ = "0.2.1"
+
+def main():
+    return 0
 """
 
 CLAUDE_PLUGIN = {"name": "duet", "version": "0.2.1", "author": {"name": "Volkan Altan"}}
@@ -26,7 +25,7 @@ CODEX_PLUGIN = {"name": "duet", "version": "0.2.1", "skills": "./skills/"}
 
 
 def _make_repo(tmp: Path) -> None:
-    (tmp / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+    (tmp / "duet.py").write_text(DUET_SOURCE, encoding="utf-8")
     claude = tmp / "plugins" / "duet-claude" / ".claude-plugin"
     codex = tmp / "plugins" / "duet" / ".codex-plugin"
     claude.mkdir(parents=True)
@@ -56,29 +55,27 @@ class TestBump(unittest.TestCase):
         self._tmp.cleanup()
 
     def _versions(self):
-        py = brv.read_current_version((self.root / "pyproject.toml").read_text())
+        runtime = brv.read_current_version((self.root / "duet.py").read_text())
         cl = json.loads((self.root / "plugins/duet-claude/.claude-plugin/plugin.json").read_text())
         cx = json.loads((self.root / "plugins/duet/.codex-plugin/plugin.json").read_text())
-        return py, cl["version"], cx["version"]
+        return runtime, cl["version"], cx["version"]
 
     def test_read_current_version(self):
-        self.assertEqual(brv.read_current_version(PYPROJECT), "0.2.1")
+        self.assertEqual(brv.read_current_version(DUET_SOURCE), "0.2.1")
 
     def test_bump_updates_all_three(self):
         prev = brv.bump(self.root, "0.3.0")
         self.assertEqual(prev, "0.2.1")
         self.assertEqual(self._versions(), ("0.3.0", "0.3.0", "0.3.0"))
 
-    def test_bump_preserves_json_structure(self):
+    def test_bump_preserves_source_and_json_structure(self):
         brv.bump(self.root, "0.2.2")
         cl = json.loads((self.root / "plugins/duet-claude/.claude-plugin/plugin.json").read_text())
         self.assertEqual(cl["name"], "duet")
         self.assertEqual(cl["author"], {"name": "Volkan Altan"})
-        # only the build-system version-like string and [project] survive; the bump
-        # must not touch the [build-system] requires line.
-        py = (self.root / "pyproject.toml").read_text()
-        self.assertIn('requires = ["setuptools>=77"]', py)
-        self.assertIn('version = "0.2.2"', py)
+        source = (self.root / "duet.py").read_text()
+        self.assertIn('from __future__ import annotations', source)
+        self.assertIn('__version__ = "0.2.2"', source)
 
     def test_reject_downgrade(self):
         with self.assertRaises(brv.BumpError):
@@ -94,10 +91,8 @@ class TestBump(unittest.TestCase):
             brv.bump(self.root, "v0.3.0")
         self.assertEqual(self._versions(), ("0.2.1", "0.2.1", "0.2.1"))  # no partial write
 
-    def test_missing_project_version_raises(self):
-        (self.root / "pyproject.toml").write_text(
-            "[build-system]\nrequires = []\n", encoding="utf-8"
-        )
+    def test_missing_runtime_version_raises(self):
+        (self.root / "duet.py").write_text("def main():\n    return 0\n", encoding="utf-8")
         with self.assertRaises(brv.BumpError):
             brv.bump(self.root, "0.3.0")
 

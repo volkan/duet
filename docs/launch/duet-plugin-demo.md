@@ -108,11 +108,10 @@ If the local install exposes the namespaced command, use:
 Do not pass custom flags in the main launch cast. The point is that a Claude
 Code user can run the default review recipe with one command.
 
-### Beat 4 - `/review` kickoff and run directory
+### Beat 4 - observable run and `/review` kickoff
 
-Plain `/duet` runs `claude -p /review` as the upstream kickoff before duet
-allocates the run directory. Keep a brief wait, then keep the first line that
-looks like:
+Plain `/duet` allocates the run, writes initial state/run-info, then starts
+`claude -p /review`. Keep the first human-facing line that looks like:
 
 ```text
 [duet] run: /path/to/project/.duet/runs/<run_id>

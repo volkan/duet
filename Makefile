@@ -26,6 +26,7 @@ distribution-check: ## validate pyproject/plugin manifests and source metadata
 package-check: ## build artifacts and validate wheel/sdist metadata
 	@if command -v uv >/dev/null 2>&1; then uv build; else python3 -m build; fi
 	@python3 scripts/check_distribution_metadata.py --artifacts dist
+	@python3 scripts/check_installed_wheel.py dist
 plugin-check: ## validate the Claude Code plugin (root marketplace + narrowed plugin root)
 	@claude plugin validate .
 	@claude plugin validate plugins/duet-claude
