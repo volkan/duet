@@ -1,6 +1,6 @@
 name: release
 
-# Release-on-merge. When a bump-version PR merges to main (the pyproject version
+# Release-on-merge. When a bump-version PR merges to main (duet.__version__
 # changes to an untagged X.Y.Z), this builds, publishes duet-cli to PyPI via OIDC
 # Trusted Publishing (no stored secret, gated by the protected `pypi` environment
 # approval), then creates the vX.Y.Z tag + GitHub Release with generated notes —
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   detect:
-    # Release only when the pyproject version CHANGED in this push AND no vX.Y.Z tag
+    # Release only when duet.__version__ CHANGED in this push AND no vX.Y.Z tag
     # exists yet. So merging this rework is a no-op (version unchanged), and routine
     # main pushes (docs, etc.) never publish.
     runs-on: ubuntu-latest
@@ -41,9 +41,9 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          read_version() { # $1 = git ref; prints the [project] version, if any
-            git show "$1:pyproject.toml" 2>/dev/null \
-              | sed -n '/^\[project\]/,/^\[/{ s/^version = "\([^"]*\)"$/\1/p; }' | head -1
+          read_version() { # $1 = git ref; prints duet.__version__, if any
+            git show "$1:duet.py" 2>/dev/null \
+              | sed -n 's/^__version__ = "\([^"]*\)"$/\1/p' | head -1
           }
           NEW="$(read_version "$GITHUB_SHA")"
           echo "current version: ${NEW:-<none>}"
@@ -102,7 +102,9 @@ jobs:
           python -m pip install --upgrade build
           python -m build
       - name: Validate artifacts match the manifest version
-        run: python scripts/check_distribution_metadata.py --artifacts dist
+        run: |
+          python scripts/check_distribution_metadata.py --artifacts dist
+          python scripts/check_installed_wheel.py dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist

@@ -42,6 +42,7 @@ expect_stdout() {  # name, want_rc, grep_pattern, cmd...
 }
 
 # C1 - task input variants
+expect_stdout "runtime version"                  0 "duet " "$DUET" --version
 printf "fix typo\n" > "$TMPD/stdin-task.txt"
 expect "task @-"                            0 "$DUET" --task @- --dry-run --cwd "$TMPD" < "$TMPD/stdin-task.txt"
 echo "from file" > "$TMPD/t.txt"
@@ -49,6 +50,35 @@ expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --d
 expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
 expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
+CONTROL_DIR="$TMPD/control"
+mkdir -p "$CONTROL_DIR"
+RECIPE_INFO="$CONTROL_DIR/recipe-run.json"
+expect "review recipe launch"                 0 "$DUET" --recipe review --task "x" \
+  --no-worktree --dry-run --run-info-file "$RECIPE_INFO"
+expect "run-info + status JSON contract"      0 python3 - "$DUET_ABS" "$RECIPE_INFO" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+
+duet, info_path = sys.argv[1:]
+info = json.loads(pathlib.Path(info_path).read_text())
+assert set(info) == {
+    "schema_version", "kind", "duet_version", "run_id",
+    "run_dir", "state_path", "pid",
+}, info
+assert info["schema_version"] == 1 and info["kind"] == "duet.run", info
+assert pathlib.Path(info["run_dir"]).is_absolute(), info
+result = subprocess.run(
+    [duet, "--status", info["run_dir"], "--json"],
+    text=True, capture_output=True,
+)
+assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+status = json.loads(result.stdout)
+assert status["schema_version"] == 1 and status["kind"] == "duet.status", status
+assert status["health"] == "terminal" and status["phase"] == "finished", status
+assert status["exit_code"] == 0, status
+PY
 expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util
 import pathlib
@@ -142,8 +172,39 @@ printf '\xff' > "$TMPD/binary.txt"
 expect "@binary -> error"                    2 "$DUET" --task @"$TMPD/binary.txt" --dry-run --cwd "$TMPD"
 head -c 524289 /dev/zero > "$TMPD/large.txt"
 expect "task too large -> error"             2 "$DUET" --task @"$TMPD/large.txt" --dry-run --cwd "$TMPD"
-expect "from-cmd nonzero -> error"           2 "$DUET" --task-from-cmd 'false' --dry-run --cwd "$TMPD"
-expect "from-cmd empty stdout -> error"      2 "$DUET" --task-from-cmd 'true' --dry-run --cwd "$TMPD"
+KICKOFF_INFO="$CONTROL_DIR/kickoff-failure.json"
+expect "from-cmd nonzero -> durable error"   1 "$DUET" --task-from-cmd 'false' \
+  --dry-run --cwd "$TMPD" --run-info-file "$KICKOFF_INFO"
+expect "from-cmd failure persisted"          0 python3 - "$KICKOFF_INFO" <<'PY'
+import json
+import pathlib
+import sys
+
+info = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state = json.loads(pathlib.Path(info["state_path"]).read_text())
+assert state["finished_reason"] == "kickoff_error", state
+assert state["phase"] == "finished", state
+PY
+expect "from-cmd empty stdout -> error"      1 "$DUET" --task-from-cmd 'true' --dry-run --cwd "$TMPD"
+echo keep > "$CONTROL_DIR/existing.json"
+expect "run-info refuses overwrite"          2 "$DUET" --task "x" --dry-run \
+  --cwd "$TMPD" --run-info-file "$CONTROL_DIR/existing.json"
+STRICT_ROOT="$TMPD/not-a-repo"
+mkdir -p "$STRICT_ROOT"
+STRICT_INFO="$CONTROL_DIR/strict-failure.json"
+expect "strict worktree fails closed"        1 "$DUET" --task "x" --dry-run \
+  --cwd "$STRICT_ROOT" --worktree --require-worktree \
+  --run-info-file "$STRICT_INFO"
+expect "strict worktree failure persisted"   0 python3 - "$STRICT_INFO" <<'PY'
+import json
+import pathlib
+import sys
+
+info = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state = json.loads(pathlib.Path(info["state_path"]).read_text())
+assert state["finished_reason"] == "setup_error", state
+assert state["phase"] == "finished", state
+PY
 cat > "$TMPD/cfg-dupe-agents.json" <<EOF
 {"cwd":"$TMPD","dry_run":true,"task":"x","agents":[{"name":"same","backend":"codex","role":"planner"},{"name":"same","backend":"codex","role":"coder"}]}
 EOF

@@ -93,14 +93,7 @@ opencode run --command duet "'npm test 2>&1' --turns 4"
 Plain `/duet` runs the default review recipe:
 
 ```bash
-duet --recap \
-  --cwd "$(pwd)" \
-  --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer \
-  --partner codex:coder \
-  --worktree \
-  --turns 6 \
-  --task-from-cmd 'claude -p /review'
+duet --recipe review
 ```
 
 Pass an upstream command (and optional duet flags) as arguments — the first
@@ -113,6 +106,17 @@ to duet:
 /duet 'cat failing-log.txt' --partner opencode:coder --turns 2
 ```
 
+For a custom command, the OpenCode prompt separates the first quoted shell
+string from the remaining duet flags and constructs worktree defaults
+conditionally. With no topology override it adds
+`--worktree --require-worktree`; `--no-worktree` suppresses both defaults;
+`--allow-worktree-fallback` suppresses `--require-worktree`; and
+`--worktree-path` suppresses fresh-worktree creation. It examines only the
+remaining duet flags, so a similarly named option inside the upstream shell
+command cannot change duet topology. This is not based on argument order:
+argparse rejects mutually exclusive flags even when the override is later.
+Custom commands do not pre-add `--recap`, keeping `--no-recap` valid.
+
 The command runs on OpenCode's `build` agent (full tool access) so it can
 shell out to `duet`. Make sure your OpenCode permissions allow the `build`
 agent to run shell commands, or run with `--dangerously-skip-permissions` for
@@ -120,10 +124,8 @@ the non-interactive form.
 
 ## Runtime Expectations
 
-For the default recipe, the run directory is not created immediately. The
-`--task-from-cmd 'claude -p /review'` kickoff runs before duet allocates
-`<runs-dir>/<run_id>/`, so `.duet/runs/*` may not exist while `/review` is
-still producing the opening message.
+The recipe allocates its run directory and writes initial `state.json` before
+starting the `/review` kickoff, so the run is observable immediately.
 
 Wait for this line in the default recap recipe:
 
@@ -136,7 +138,7 @@ Non-recap runs print `[duet] run dir: ...` instead.
 Then monitor from another terminal or OpenCode shell:
 
 ```bash
-duet --status /path/to/project/.duet/runs/<run_id>
+duet --status /path/to/project/.duet/runs/<run_id> --json
 ```
 
 You can also list recent runs:
@@ -163,5 +165,5 @@ end of the run.
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
 | The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --dangerously-skip-permissions "..."`. |
-| No run directory appears right away | This is expected while `claude -p /review` is still running. Wait for `[duet] run: ...` or `[duet] run dir: ...` in the command output. |
+| No run directory appears | Check the original duet process. The recipe writes initial state before `/review`; use `duet --list` or a custom `--run-info-file` launch to discover it deterministically. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |

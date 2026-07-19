@@ -77,7 +77,7 @@ The expected payload includes `"enforcement":"active"`,
 | check | guards |
 |---|---|
 | `test (py3.x)` | unit tests, the reasoning-mapping check, and the dry-run smoke suite on the floor/mid/recent Python | 
-| `distribution metadata` | `pyproject.toml`, Claude/Codex plugin manifests and marketplace entries, version lockstep, package build, wheel/sdist metadata, absolute README links, and installed-wheel smoke |
+| `distribution metadata` | dynamic package version from `duet.__version__`, plugin version lockstep, package build, wheel/sdist metadata, absolute README links, and installed-wheel run-info/status smoke |
 | `plugin validate` | `claude plugin validate .` against the Claude Code plugin manifest |
 | `complexity gate` | no function over the cyclomatic-complexity (25) / length (160) budget — run locally with `make complexity` |
 

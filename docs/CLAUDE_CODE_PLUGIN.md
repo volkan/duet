@@ -114,18 +114,16 @@ or:
 /duet:duet
 ```
 
-The default command runs:
+The command creates a private run-info path and runs:
 
 ```bash
-duet --recap \
-  --cwd "$(pwd)" \
-  --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer \
-  --partner codex:coder \
-  --worktree \
-  --turns 6 \
-  --task-from-cmd 'claude -p /review'
+DUET_CONTROL_DIR=$(mktemp -d)
+DUET_RUN_INFO="$DUET_CONTROL_DIR/run.json"
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
+
+The recipe supplies recap mode, `claude:reviewer`, `codex:coder`, six turns,
+strict worktree isolation, and `claude -p /review`. Explicit flags override it.
 
 Custom upstream command:
 
@@ -146,29 +144,29 @@ Use Gemini instead of the default Codex partner:
 ```
 
 The first quoted argument is the shell command used to create the kickoff text.
-Flags after that are forwarded to `duet`; explicit flags override the plugin
-defaults.
+Flags after that are forwarded to `duet`. For custom commands the plugin
+examines only those remaining duet flags (not text inside the shell command)
+and inserts `--worktree` / `--require-worktree` only when neither side of the
+corresponding override is already present. `--no-worktree` suppresses both
+defaults, `--allow-worktree-fallback` suppresses the strictness default, and
+`--worktree-path` suppresses fresh-worktree creation. This conditional
+construction is required because argparse rejects mutually exclusive flags;
+putting an override later is not sufficient. Custom commands also do not
+pre-add `--recap`, so `--no-recap` remains valid.
 
 ## Runtime Expectations
 
-For plain `/duet`, the run directory is not created immediately. The
-`--task-from-cmd 'claude -p /review'` kickoff runs before duet allocates
-`<runs-dir>/<run_id>/`, so `.duet/runs/*` may not exist while `/review` is
-still producing the opening message.
-
-Wait for this line in the default recap recipe:
-
-```text
-[duet] run: /path/to/project/.duet/runs/<run_id>
-```
-
-Non-recap runs print `[duet] run dir: ...` instead.
-
-Then monitor from another terminal or Claude Code shell:
+Duet writes the requested run-info JSON immediately after allocation and the
+initial state write, before `/review` starts. The command validates schema 1,
+reads its absolute `run_dir`, and monitors with:
 
 ```bash
-duet --status /path/to/project/.duet/runs/<run_id>
+duet --status /path/to/project/.duet/runs/<run_id> --json
 ```
+
+The curated status document omits prompts, commands, credentials, and backend
+extra arguments. Its exit codes are 0 terminal, 1 running, 2 stuck/crashed,
+and 3 status error.
 
 You can also list recent runs:
 
@@ -194,7 +192,7 @@ end of the run.
 | `/duet` says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Claude Code's shell can resolve `command -v duet`. |
 | Plain `/duet` says `claude` is not on PATH | Install/authenticate Claude Code before using the default `/review` recipe. |
 | Plain `/duet` says `codex` is not on PATH | Install Codex, or pass a custom partner/config that does not use Codex. |
-| No run directory appears right away | This is expected while `claude -p /review` is still running. Wait for `[duet] run: ...` or `[duet] run dir: ...` in the command output. |
+| No run metadata appears | Check the original duet process. A valid launch writes the requested run-info file before `/review`; do not scrape banners as a fallback. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
 
 ## Manual Fallback
@@ -226,19 +224,37 @@ command -v claude
 command -v codex
 ```
 
+Create a private control path:
+
+```bash
+DUET_CONTROL_DIR=$(mktemp -d)
+DUET_RUN_INFO="$DUET_CONTROL_DIR/run.json"
+```
+
 If `$ARGUMENTS` is empty, run:
 
 ```bash
-duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --lead claude:reviewer --partner codex:coder --worktree --turns 6 --task-from-cmd 'claude -p /review'
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
 Otherwise run:
 
 ```bash
-duet --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --partner codex:coder --worktree --task-from-cmd $ARGUMENTS
+duet --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
+  --partner codex:coder <conditional worktree defaults> \
+  --run-info-file "$DUET_RUN_INFO" \
+  --task-from-cmd '<upstream shell command>' <remaining duet flags>
 ```
 
-After `[duet] run: ...` or `[duet] run dir: ...` appears, print the run dir
-and the matching `duet --status <run_dir>` command.
+Replace `<conditional worktree defaults>` before executing; never pass it
+literally. Examine only the remaining duet flags. Add `--worktree` only when
+none of `--worktree`, `--no-worktree`, or `--worktree-path` is present. Add
+`--require-worktree` only when worktree use is not disabled and neither
+`--require-worktree` nor `--allow-worktree-fallback` is present. Report
+user-supplied conflicting pairs instead of rewriting them. Do not pre-add
+`--recap`.
+
+Validate schema 1 in `$DUET_RUN_INFO`, then poll the discovered run with
+`duet --status <run_dir> --json`. Do not scrape banners.
 EOF
 ````

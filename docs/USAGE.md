@@ -100,9 +100,7 @@ Canonical recipes:
 duet --task @review-notes.md --cwd ~/workspace/project
 
 # Call Claude Code's real /review skill and let duet manage the loop.
-duet --recap --task-from-cmd 'claude -p /review' \
-     --lead claude:reviewer --partner codex:coder \
-     --worktree --cwd ~/workspace/project --turns 6
+duet --recipe review --cwd ~/workspace/project
 
 # Let duet run the upstream tool itself from inside the target project.
 duet --task-from-cmd 'npm test 2>&1' --cwd ~/workspace/project
@@ -197,7 +195,7 @@ To adapt:
 - Need network for `gh`/`curl` inside codex's sandbox: codex's `workspace-write` blocks outbound network by default. The default `--partner codex:coder` doesn't pass the override. For configs that need it, prefer YAML (`extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`); see [Codex sandbox and network access](#codex-sandbox-and-network-access).
 - Default `--turns` is 2 (one codex pass + one claude review). Bump to 6–10 for multi-step fixes; the `force>` prompt at the end of the loop lets you push more rounds without restarting.
 
-### Edge cases (all fail loud at argparse-time)
+### Edge cases
 
 | situation | result |
 |---|---|
@@ -205,8 +203,8 @@ To adapt:
 | `--task @nonexistent` | `SystemExit("--task: file not found: <path>")` |
 | `--task @binary.bin` (non-UTF-8) | `SystemExit("--task: file not UTF-8 text: <path>")` |
 | resolved task > 512 KB | `SystemExit("task too large (N > 524288); pipe a shorter summary")` |
-| `--task-from-cmd` non-zero rc | `SystemExit(2)` with captured stderr |
-| `--task-from-cmd` empty stdout | `SystemExit(2)` (silent-empty is worse than fail-loud) |
+| `--task-from-cmd` non-zero rc | runtime exit 1; run-info/state remain available with `finished_reason: kickoff_error` and the stderr log |
+| `--task-from-cmd` empty stdout | runtime exit 1 with the same durable kickoff-failure record |
 
 Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invocation.
 
@@ -236,19 +234,15 @@ equivalent persistent installs (the PyPI package is `duet-cli`; the command it
 installs is `duet`). The default recipe also needs `claude` and `codex` on
 PATH.
 
-The plugin command uses an explicit run root:
+The plugin creates a private run-info path and launches:
 
 ```bash
-duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer --partner codex:coder \
-  --worktree --turns 6 \
-  --task-from-cmd 'claude -p /review'
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
-Important: `--task-from-cmd` runs before duet allocates a run directory. For
-plain `/duet`, Claude Code may spend time in `claude -p /review` before
-`.duet/runs/<id>/` exists. Wait for `[duet] run: ...` in recap mode, or
-`[duet] run dir: ...` without recap, then use `duet --status <run_dir>`.
+It validates schema 1 in that file and polls `duet --status <run_dir> --json`;
+it does not scrape the human banner. The run-info and initial state exist before
+`claude -p /review` starts.
 
 Full install checklist, custom examples, troubleshooting, and the manual skill
 fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
@@ -275,13 +269,10 @@ codex plugin add duet@volkan-duet
 ```
 
 Start a new Codex thread after installing so the bundled skill is loaded. The
-default skill recipe runs the same Claude `/review` kickoff:
+default skill recipe uses the same schema-checked launch:
 
 ```bash
-duet --recap --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
-  --lead claude:reviewer --partner codex:coder \
-  --worktree --turns 6 \
-  --task-from-cmd 'claude -p /review'
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
 Full install checklist, examples, and troubleshooting live in
@@ -306,6 +297,14 @@ needs `claude` and `codex`. Plain `/duet` runs the same `claude -p /review`
 kickoff; pass `'<shell cmd>' <duet flags>` to seed from any other command. Note
 that duet can also run OpenCode as a *backend* (`--partner opencode:coder`), so
 OpenCode can be one of the two looped agents, not just the host.
+
+Across the Claude, Codex, and OpenCode entry points, custom-command worktree
+defaults are conditional. `--no-worktree`, `--worktree-path`, and
+`--allow-worktree-fallback` suppress the incompatible default instead of being
+appended after it; argparse treats the paired flags as mutually exclusive, so
+ordering cannot implement an override. The entry points inspect only duet flags
+after the quoted upstream command and do not pre-add `--recap`, keeping
+`--no-recap` valid.
 
 Full install checklist, examples, and troubleshooting live in
 [OpenCode Plugin](OPENCODE_PLUGIN.md).
@@ -480,12 +479,14 @@ worktree gated by `verify_cmd`.
 
 | flag | purpose |
 |---|---|
+| `--version` | print the canonical runtime/package version and exit |
+| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, and `claude -p /review`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` also pins the kickoff |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
-| `--task-from-cmd "CMD"` | run `CMD` with `cwd=--cwd` and use stdout as the task |
+| `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
 | `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared lead into the other slot, the model follows that agent |
@@ -498,8 +499,12 @@ worktree gated by `verify_cmd`.
 | `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot and OpenCode |
 | `--timeout SEC` | per-turn timeout (default 900) |
 | `--runs-dir DIR` | where to save transcripts; default is `runs/` from the invocation directory, or `<cwd>/.duet/runs/` for a foreign `--cwd` |
+| `--run-info-file FILE` | atomically publish schema-v1 launch JSON immediately after allocation; refuses an existing path. Contains only version/run ids, absolute run/state paths, and PID |
 | `--config PATH` | YAML/JSON config (overrides most flags) |
 | `--worktree` | run the partner agent in a throwaway git worktree on a fresh `duet/<run_id>` branch; the worktree is left intact at the end |
+| `--no-worktree` | disable worktree creation, including the review recipe default |
+| `--require-worktree` | fail closed with a durable `setup_error` instead of silently falling back to same-repo mode if reuse/creation fails |
+| `--allow-worktree-fallback` | allow the legacy same-repo fallback; overrides the review recipe's strict setting |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
 | `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes `-c model_reasoning_effort=<v>` except for `medium`, Codex's default; `xhigh` passes through and `max` maps to `xhigh` because Codex does not document a separate `max` value. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** passes `run --variant <v>` with the level unchanged; OpenCode variants are provider-specific, but it silently ignores a variant a model doesn't define, so duet passes the level through for forward-compatibility. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
@@ -507,10 +512,12 @@ worktree gated by `verify_cmd`.
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
+| `--json` | with `--status`, emit the stable schema-v1 `duet.status` document instead of the human view |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--recap` | compact per-turn debug view; suppresses the live `│`-mirror and writes `recap.md` next to `transcript.md` |
+| `--no-recap` | disable recap mode, including the review recipe default |
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
 
 ---
@@ -525,7 +532,7 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     transcript.md                            # full conversation, human-readable
     recap.md                                 # compact per-turn debug view, if --recap
     state.json                               # task, agents, session_ids, history,
-                                             # finished_reason, duet_pid,
+                                             # phase, finished_reason, duet_pid,
                                              # sentinel/sandbox/permissions/reasoning,
                                              # worktree/worktree_for if present,
                                              # verify_cmd/last_verify if present,
@@ -539,6 +546,11 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     …
     wt/                                      # the git worktree (if --worktree)
 ```
+
+When `--task-from-cmd` is used, `turn-00-kickoff.pid` exists while it runs and
+`turn-00-kickoff.stderr.log` preserves diagnostics. If `--run-info-file` is
+set, that separate caller-owned JSON file points to this run before kickoff.
+The raw shell command is never written to launch metadata or `state.json`.
 
 The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn. If an agent timeout or command error ends the run, duet writes a bounded error block to `transcript.md`, records the failing turn in `state.json["history"]`, and links the matching stderr log. The block keeps the beginning and end of the exception text, caps that excerpt at 12,000 characters, and reports how many characters were omitted; the complete subprocess stderr remains in the per-turn log.
 
@@ -602,6 +614,28 @@ A one-shot health probe of any run. Read-only, suitable for cron / external poll
 - a **path** (absolute or relative): `duet --status runs/20260506-194122/`
 - a **bare run id** like `20260507-082801` — auto-resolved against the same default search paths as `--list` (`./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). The natural pairing: `duet --list` to scan, copy the id, `duet --status <id>` to drill in.
 
+For automation, always add `--json`. Schema version 1 has these top-level keys:
+
+```text
+schema_version, kind, duet_version, run_id, run_dir, health, phase,
+exit_code, turns_used, finished_reason, active_turn, last_completed_turn,
+artifacts, error
+```
+
+`kind` is `duet.status`; paths are absolute, timestamps are UTC RFC 3339, and
+unavailable values are `null`. Phases are `kickoff_pending`,
+`kickoff_running`, `turn_running`, `between_turns`, `awaiting_force`,
+`finished`, or `unknown`. The document is curated: it never includes task
+prompts, kickoff/verify shell commands, credentials, agent `extra_args`, or raw
+state/history errors. Treat `schema_version`, not an exact `duet_version`, as
+the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
+`error`; `artifacts` contains `state`, `transcript`, `recap`, and `worktree`.
+
+The matching launch handoff is written by `--run-info-file FILE` with
+`schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
+`run_dir`, absolute `state_path`, and `pid`. It is written atomically and FILE
+must not already exist.
+
 ```bash
 $ duet --status 20260506-194122
 [duet] /Users/.../runs/20260506-194122
@@ -610,15 +644,15 @@ $ duet --status 20260506-194122
   recap:           /Users/.../runs/20260506-194122/recap.md
   in-flight turn:  turn-04-claude-planner
     pid:           44967  (alive: True)
-    started:       2026-05-07T08:40:43  (171s ago)
-    last stderr:   2s ago (15909 bytes)
+    started:       2026-05-07T06:40:43Z  (171s ago)
+    last stderr:   2026-05-07T06:43:32Z (15909 bytes)
 ```
 
 Exit codes:
 
 | exit | meaning |
 |---|---|
-| `0` | run finished (`finished_reason` set, e.g. `converged` / `max_turns` / `force_stop` / `timeout` / `agent_error`) |
+| `0` | terminal run (`finished_reason` set, including convergence, limits, timeout, agent/kickoff/setup failures) |
 | `1` | running — either an in-flight turn (`.pid` file present) or between turns / awaiting `force>` (verified via `state["duet_pid"]` matching a live duet process) |
 | `2` | stuck/crashed — no `.pid` file, no `finished_reason`, AND duet's recorded PID is gone or the PID has been recycled by an unrelated process |
 | `3` | `--status` itself errored (bad path, malformed `state.json`) |
@@ -774,6 +808,11 @@ Skip it when the codex side is the one doing the careful reasoning (e.g. `codex:
 ## Worktree mode
 
 `--worktree` creates a git worktree on a fresh `duet/<run_id>` branch and runs the partner there. The lead keeps editing the original repo (or, with `--worktree-for lead`, you flip it). After every worktree-agent turn duet appends a handoff block and diff to that agent's reply, so the other agent sees what actually changed — not just what the worktree agent claims changed.
+
+By itself, `--worktree` preserves the legacy warning + same-repo fallback when
+setup fails. Add `--require-worktree` to fail closed with a durable
+`setup_error`; the `review` recipe enables this strict mode. Use
+`--allow-worktree-fallback` only when same-repo edits are acceptable.
 
 The handoff block names the exact worktree path and branch, warns that the receiving agent's current cwd may be a clean checkout, and gives project-agnostic review commands:
 
