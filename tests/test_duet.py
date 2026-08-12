@@ -1780,6 +1780,12 @@ class TestContinueStateHelpers(unittest.TestCase):
 
 
 class TestStatusHelpers(unittest.TestCase):
+    def test_positive_int_or_none_is_strict(self) -> None:
+        self.assertEqual(duet._positive_int_or_none(42), 42)
+        for value in (None, "42", True, False, 0, -1, 1.0):
+            with self.subTest(value=value):
+                self.assertIsNone(duet._positive_int_or_none(value))
+
     def test_coerce_pid_accepts_positive_integers_only(self) -> None:
         self.assertEqual(duet._coerce_pid(42), 42)
         self.assertEqual(duet._coerce_pid("42"), 42)

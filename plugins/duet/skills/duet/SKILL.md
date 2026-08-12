@@ -116,6 +116,12 @@ During a live run, report the run dir and phase from JSON. On exit, collect the
 original duet process result and the final status snapshot; surface
 `finished_reason`, `error`, and artifact paths.
 
+For an active turn, also surface `budget_seconds` and `remaining_seconds`.
+Warn the user when a non-null remaining value is 60 seconds or less. If the
+terminal reason is `timeout`, use `last_completed_turn` to identify the turn
+and agent. The review recipe continues past one non-final coder timeout so the
+partner can inspect its failure block and worktree handoff.
+
 Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and
 backend extra arguments.

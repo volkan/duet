@@ -255,12 +255,74 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(set(snapshot), {
                 "schema_version", "kind", "duet_version", "run_id", "run_dir",
                 "health", "phase", "exit_code", "turns_used", "finished_reason",
-                "active_turn", "last_completed_turn", "artifacts", "error",
+                "per_turn_timeout", "active_turn", "last_completed_turn",
+                "artifacts", "error",
             })
             self.assertEqual(snapshot["kind"], "duet.status")
             self.assertEqual(snapshot["health"], "terminal")
             self.assertEqual(snapshot["phase"], "finished")
+            self.assertIsNone(snapshot["per_turn_timeout"])
             self.assertNotIn(secret, json.dumps(snapshot))
+
+    def test_live_turn_reports_budget_and_remaining_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            secret = "live-status-secret"
+            run = self._write_state(root, {
+                "task": secret,
+                "phase": "turn_running",
+                "turns_used": 0,
+                "finished_reason": None,
+                "history": [],
+                "per_turn_timeout": 60,
+            })
+            (run / "turn-01-codex-coder.pid").write_text("123", encoding="utf-8")
+            started = duet.dt.datetime.fromtimestamp(1_000)
+            with mock.patch.object(
+                    duet, "_pid_file_snapshot", return_value=(123, started)), \
+                    mock.patch.object(duet, "_pid_alive", return_value=True), \
+                    mock.patch.object(duet.time, "time", return_value=1_042):
+                snapshot = duet.build_run_status(str(run))
+
+            self.assertEqual(snapshot["health"], "running")
+            self.assertEqual(snapshot["exit_code"], 1)
+            self.assertEqual(snapshot["per_turn_timeout"], 60)
+            self.assertEqual(set(snapshot["active_turn"]), {
+                "label", "pid", "alive", "started_at", "elapsed_seconds",
+                "budget_seconds", "remaining_seconds", "stderr_updated_at",
+                "stderr_bytes",
+            })
+            self.assertEqual(snapshot["active_turn"]["elapsed_seconds"], 42)
+            self.assertEqual(snapshot["active_turn"]["budget_seconds"], 60)
+            self.assertEqual(snapshot["active_turn"]["remaining_seconds"], 18)
+            self.assertNotIn(secret, json.dumps(snapshot))
+
+    def test_invalid_budget_values_are_null_for_a_live_turn(self) -> None:
+        for invalid in ("untrusted-budget-secret", True, -3):
+            with self.subTest(value=invalid), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw)
+                run = self._write_state(root, {
+                    "phase": "turn_running",
+                    "turns_used": 0,
+                    "finished_reason": None,
+                    "history": [],
+                    "per_turn_timeout": invalid,
+                })
+                (run / "turn-01-coder.pid").write_text("123", encoding="utf-8")
+                started = duet.dt.datetime.fromtimestamp(1_000)
+                with mock.patch.object(
+                        duet, "_pid_file_snapshot", return_value=(123, started)), \
+                        mock.patch.object(duet, "_pid_alive", return_value=True), \
+                        mock.patch.object(duet.time, "time", return_value=1_010):
+                    snapshot = duet.build_run_status(str(run))
+
+                self.assertEqual(snapshot["health"], "running")
+                self.assertEqual(snapshot["exit_code"], 1)
+                self.assertIsNone(snapshot["per_turn_timeout"])
+                self.assertIsNone(snapshot["active_turn"]["budget_seconds"])
+                self.assertIsNone(snapshot["active_turn"]["remaining_seconds"])
+                if isinstance(invalid, str):
+                    self.assertNotIn(invalid, json.dumps(snapshot))
 
     def test_relative_artifact_paths_resolve_from_actual_run_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

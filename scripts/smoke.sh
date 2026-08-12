@@ -78,6 +78,10 @@ status = json.loads(result.stdout)
 assert status["schema_version"] == 1 and status["kind"] == "duet.status", status
 assert status["health"] == "terminal" and status["phase"] == "finished", status
 assert status["exit_code"] == 0, status
+assert status["per_turn_timeout"] == 900, status
+if status["active_turn"] is not None:
+    assert "budget_seconds" in status["active_turn"], status
+    assert "remaining_seconds" in status["active_turn"], status
 PY
 expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util

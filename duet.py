@@ -3733,6 +3733,13 @@ def _coerce_pid(value: object) -> Optional[int]:
     return pid if pid > 0 else None
 
 
+def _positive_int_or_none(value: object) -> Optional[int]:
+    """Return only positive, non-bool integers from untrusted state."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def _pid_file_snapshot(pid_file: pathlib.Path) -> Optional[tuple[Optional[int], dt.datetime]]:
     """Read a transient pid file; return None if it disappears mid-status."""
     try:
@@ -3818,6 +3825,7 @@ def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
         "exit_code": 3,
         "turns_used": None,
         "finished_reason": None,
+        "per_turn_timeout": None,
         "active_turn": None,
         "last_completed_turn": None,
         "artifacts": {
@@ -3875,7 +3883,10 @@ def _last_completed_turn(state: dict) -> Optional[dict]:
     return None
 
 
-def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
+def _active_turn_snapshot(
+    run_dir: pathlib.Path,
+    budget_seconds: Optional[int],
+) -> Optional[dict]:
     pid_files = sorted(run_dir.glob("turn-*.pid"))
     if not pid_files:
         return None
@@ -3888,12 +3899,18 @@ def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
     label = pid_file.stem.removeprefix("turn-")
     if not re.fullmatch(r"[\w.-]{1,160}", label):
         label = "unknown"
+    elapsed_seconds = max(0, int(time.time() - started_timestamp))
     active = {
         "label": label,
         "pid": pid,
         "alive": _pid_alive(pid) if pid is not None else False,
         "started_at": _utc_rfc3339(started_timestamp),
-        "elapsed_seconds": max(0, int(time.time() - started_timestamp)),
+        "elapsed_seconds": elapsed_seconds,
+        "budget_seconds": budget_seconds,
+        "remaining_seconds": (
+            max(0, budget_seconds - elapsed_seconds)
+            if budget_seconds is not None else None
+        ),
         "stderr_updated_at": None,
         "stderr_bytes": None,
     }
@@ -3965,8 +3982,10 @@ def build_run_status(arg: str) -> dict:
         snapshot["finished_reason"] = "unknown"
     snapshot["last_completed_turn"] = _last_completed_turn(state)
     snapshot["artifacts"] = _status_artifacts(run_dir, state)
+    per_turn_timeout = _positive_int_or_none(state.get("per_turn_timeout"))
+    snapshot["per_turn_timeout"] = per_turn_timeout
 
-    active = _active_turn_snapshot(run_dir)
+    active = _active_turn_snapshot(run_dir, per_turn_timeout)
     if active is not None:
         snapshot["active_turn"] = active
         if active["alive"]:

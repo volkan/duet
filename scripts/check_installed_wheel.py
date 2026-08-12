@@ -18,7 +18,7 @@ RUN_INFO_KEYS = {
 STATUS_KEYS = {
     "schema_version", "kind", "duet_version", "run_id", "run_dir",
     "health", "phase", "exit_code", "turns_used", "finished_reason",
-    "active_turn", "last_completed_turn", "artifacts", "error",
+    "per_turn_timeout", "active_turn", "last_completed_turn", "artifacts", "error",
 }
 ARTIFACT_KEYS = {"state", "transcript", "recap", "worktree"}
 

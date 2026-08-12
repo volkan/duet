@@ -157,6 +157,13 @@ turns, and artifact paths without exposing prompts, commands, credentials, or
 backend extra arguments. Status exit codes are 0 terminal, 1 running, 2
 stuck/crashed, and 3 status error.
 
+For a live turn, `active_turn.budget_seconds` reports the saved budget and
+`active_turn.remaining_seconds` reports the zero-clamped time left. Warn the
+user when a non-null remaining value is 60 seconds or less. If the terminal
+reason is `timeout`, report the turn and agent from `last_completed_turn`.
+The review recipe continues after one non-final coder timeout so the partner
+can inspect its failure block and worktree handoff.
+
 You can also list recent runs:
 
 ```bash

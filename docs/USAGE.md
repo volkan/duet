@@ -619,8 +619,8 @@ For automation, always add `--json`. Schema version 1 has these top-level keys:
 
 ```text
 schema_version, kind, duet_version, run_id, run_dir, health, phase,
-exit_code, turns_used, finished_reason, active_turn, last_completed_turn,
-artifacts, error
+exit_code, turns_used, finished_reason, per_turn_timeout, active_turn,
+last_completed_turn, artifacts, error
 ```
 
 `kind` is `duet.status`; paths are absolute, timestamps are UTC RFC 3339, and
@@ -631,6 +631,11 @@ prompts, kickoff/verify shell commands, credentials, agent `extra_args`, or raw
 state/history errors. Treat `schema_version`, not an exact `duet_version`, as
 the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 `error`; `artifacts` contains `state`, `transcript`, `recap`, and `worktree`.
+`per_turn_timeout` is the sanitized positive-integer budget saved for the run.
+During a live turn, `active_turn.budget_seconds` repeats that budget and
+`active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
+at zero. All three fields are `null` when saved state contains a missing or
+invalid budget; status never performs arithmetic on the raw state value.
 
 The matching launch handoff is written by `--run-info-file FILE` with
 `schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
