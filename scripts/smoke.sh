@@ -83,6 +83,41 @@ if status["active_turn"] is not None:
     assert "budget_seconds" in status["active_turn"], status
     assert "remaining_seconds" in status["active_turn"], status
 PY
+expect "live status budget JSON contract"   0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+from unittest import mock
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+run = tmpd / "live-budget-status" / "20260812-120000"
+run.mkdir(parents=True)
+(run / "state.json").write_text(json.dumps({
+    "phase": "turn_running",
+    "turns_used": 0,
+    "finished_reason": None,
+    "history": [],
+    "per_turn_timeout": 60,
+}), encoding="utf-8")
+(run / "turn-01-coder.pid").write_text("123", encoding="utf-8")
+started = m.dt.datetime.fromtimestamp(1_000)
+with mock.patch.object(m, "_pid_file_snapshot", return_value=(123, started)), \
+        mock.patch.object(m, "_pid_alive", return_value=True), \
+        mock.patch.object(m.time, "time", return_value=1_042):
+    status = m.build_run_status(str(run))
+assert status["exit_code"] == 1, status
+assert status["per_turn_timeout"] == 60, status
+assert status["active_turn"]["budget_seconds"] == 60, status
+assert status["active_turn"]["remaining_seconds"] == 18, status
+PY
 expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util
 import pathlib

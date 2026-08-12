@@ -218,6 +218,14 @@ from saved state with `duet --continue <run> --task "next thing"`.
 - **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
 - **Reasoning:** `--reasoning minimal|low|medium|high|xhigh|max`
 
+## Limits / future
+
+Timeout continuation applies only to automatic loop turns. Seed extraction
+and forced turns still stop on timeout. A final-turn timeout also stops because
+no partner turn remains, and two consecutive timeouts stop the run. Poll
+`duet --status <run-id> --json` to watch the current budget instead of assuming
+a deep-reasoning turn is stuck.
+
 ## Documentation
 
 [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) is the
