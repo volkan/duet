@@ -512,7 +512,8 @@ class TestTimeoutContinueLoop(unittest.TestCase):
             def side_effect(n, agent, call):
                 if n == 1:
                     raise duet.AgentRunError(
-                        duet.FINISHED_TIMEOUT, "codex exited 124\nslow turn"
+                        duet.FINISHED_TIMEOUT,
+                        "codex exited 124\nslow turn\n" + "x" * 100_000,
                     )
                 if n == 2:
                     state_path = call["run_dir"] / "state.json"
@@ -524,6 +525,11 @@ class TestTimeoutContinueLoop(unittest.TestCase):
         self.assertEqual(state["finished_reason"], "max_turns")
         self.assertEqual(len(calls), 3)
         self.assertEqual(state["history"][0]["finished_reason"], "timeout")
+        # state.json keeps a bounded excerpt, never the raw 100KB stderr dump.
+        self.assertLessEqual(
+            len(state["history"][0]["error"]),
+            duet.AGENT_ERROR_TRANSCRIPT_MAX_CHARS,
+        )
         # Handoff contract: the partner's message is the turn-1 failure block,
         # not a bare "previous turn failed" note.
         self.assertIn("[duet] TIMEOUT: turn 01", calls[1]["message"])

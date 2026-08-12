@@ -76,6 +76,8 @@ TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
+AGENT_ERROR_STDOUT_TAIL_CHARS = 2000
+ERROR_SUMMARY_MAX_CHARS = 400
 VERIFY_LIVE_PREFIX = "  │ [verify] "
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
 ON_TURN_TIMEOUT_CHOICES = ("stop", "continue")
@@ -125,6 +127,35 @@ class AgentRunError(RuntimeError):
     def __init__(self, finished_reason: str, message: str) -> None:
         super().__init__(message)
         self.finished_reason = finished_reason
+
+
+def _stream_tail(text: str,
+                 limit: int = AGENT_ERROR_STDOUT_TAIL_CHARS) -> str:
+    tail = (text or "").strip()
+    if len(tail) > limit:
+        tail = "…" + tail[-limit:]
+    return tail or "(empty)"
+
+
+def _agent_exit_error(label: str, rc: object, out: str, err: str,
+                      extra: str = "") -> str:
+    """Uniform nonzero-exit message for the backend adapters.
+
+    stderr is the primary evidence; when it is blank, a bounded stdout tail is
+    appended so an exit with a silent stderr (seen in the wild with
+    `claude -p --resume`) still leaves something to diagnose.
+    """
+    message = f"{label} exited {rc}\nstderr:\n{err}"
+    if not err.strip() and out.strip():
+        message += f"\nstdout (tail):\n{_stream_tail(out)}"
+    return message + extra
+
+
+def _error_summary(message: str, fallback: str) -> str:
+    """First line of an error, capped — splitlines()[0] alone is unbounded
+    when the message has no newline (a 400KB one-line error was observed)."""
+    summary = message.splitlines()[0] if message else fallback
+    return summary[:ERROR_SUMMARY_MAX_CHARS]
 
 
 class RunSetupError(RuntimeError):
@@ -648,19 +679,27 @@ def setup_worktree(repo_path: pathlib.Path, branch_name: str,
     _register_proc(proc)
     try:
         try:
-            _, err = proc.communicate(timeout=30)
+            out, err = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
             _signal_proc_tree(proc, signal.SIGTERM)
             try:
-                _, err = proc.communicate(timeout=2)
+                out, err = proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 _signal_proc_tree(proc, signal.SIGKILL)
-                _, err = proc.communicate()
-            raise RuntimeError(f"git worktree add timed out: {err.strip()}")
+                out, err = proc.communicate()
+            raise RuntimeError(
+                "git worktree add timed out: "
+                f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+            )
     finally:
         _unregister_proc(proc)
     if proc.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {err.strip()}")
+        # Always both streams: git's stderr can hold only the "Preparing
+        # worktree…" progress line while the real failure detail is elsewhere.
+        raise RuntimeError(
+            f"git worktree add failed (rc={proc.returncode}): "
+            f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+        )
     return dest
 
 
@@ -1273,7 +1312,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"claude exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("claude", rc, out, err))
     try:
         payload = json.loads(out)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
@@ -1432,7 +1471,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
         raise AgentRunError(
             reason,
-            f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…",
+            _agent_exit_error("codex", rc, out, err,
+                              extra=f"\ncmd: {' '.join(cmd[:8])}…"),
         )
     # Prefer a freshly-parsed UUID from stderr; fall back to whatever id we
     # were already carrying; finally fall back to the "codex-current"
@@ -1509,7 +1549,7 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"gemini exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("gemini", rc, out, err))
     try:
         payload = json.loads(out)
     except json.JSONDecodeError:
@@ -1640,7 +1680,7 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"copilot exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("copilot", rc, out, err))
     try:
         text, new_sid, result_exit_code = _parse_copilot_jsonl(out)
     except ValueError as e:
@@ -1787,7 +1827,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"opencode exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("opencode", rc, out, err))
     text, new_sid, error_message = _parse_opencode_jsonl(out)
     # `opencode run` exits 0 even when the model/tool errored; the failure is an
     # error event in the JSONL stream. Surface it as agent_error rather than
@@ -2408,7 +2448,7 @@ def _launch_failure_state(
     wt_path: Optional[pathlib.Path] = None,
     wt_branch: Optional[str] = None,
 ) -> dict:
-    summary = message.splitlines()[0] if message else reason
+    summary = _error_summary(message, reason)
     state = _build_run_state(
         cfg,
         turns_used=0,
@@ -2462,7 +2502,7 @@ def _run_kickoff_command(
         )
     except Exception as exc:
         message = str(exc)
-        summary = message.splitlines()[0] if message else type(exc).__name__
+        summary = _error_summary(message, type(exc).__name__)
         log(
             "duet",
             "kickoff",
@@ -2647,7 +2687,9 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                      "len_chars": len(reply), "session_id": speaker.session_id}
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = failure_message
+        # Bounded like the transcript block — a raw xhigh-codex stderr dump
+        # once ballooned state.json to 437KB. The stderr log stays complete.
+        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
         history_entry["stderr_log_path"] = str(
             run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
     if verify_state is not None:
@@ -2780,7 +2822,7 @@ def _derive_seed_or_failure(
             "len_chars": len(reply),
             "session_id": seed_agent.session_id,
             "finished_reason": failure_reason,
-            "error": str(e),
+            "error": _bounded_agent_error_excerpt(str(e)),
             "stderr_log_path": str(
                 run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
             ),
@@ -3151,7 +3193,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
                      **({"verify": verify_state} if verify_state is not None else {})}
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = failure_message
+        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
         history_entry["stderr_log_path"] = str(
             run_dir / f"turn-{label}-{next_speaker.name}.stderr.log")
     history.append(history_entry)

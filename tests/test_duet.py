@@ -1033,6 +1033,55 @@ class TestReasoningHelpers(unittest.TestCase):
         self.assertEqual(duet.CODEX_REASONING_MAP["max"], "xhigh")
 
 
+class TestAgentExitError(unittest.TestCase):
+    def test_stderr_is_the_primary_evidence(self) -> None:
+        msg = duet._agent_exit_error("claude", 1, "ignored stdout", "real error")
+        self.assertEqual(msg, "claude exited 1\nstderr:\nreal error")
+        self.assertNotIn("stdout", msg)
+
+    def test_blank_stderr_falls_back_to_stdout_tail(self) -> None:
+        msg = duet._agent_exit_error("claude", 1, '{"error":"boom"}', "")
+        self.assertIn("stdout (tail):", msg)
+        self.assertIn('{"error":"boom"}', msg)
+
+    def test_stdout_tail_is_bounded(self) -> None:
+        msg = duet._agent_exit_error("codex", 1, "x" * 100_000, "  \n")
+        self.assertLess(
+            len(msg), duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 200
+        )
+        self.assertIn("stdout (tail):", msg)
+
+    def test_extra_suffix_survives(self) -> None:
+        msg = duet._agent_exit_error("codex", 2, "", "bad flag",
+                                     extra="\ncmd: codex exec …")
+        self.assertTrue(msg.endswith("\ncmd: codex exec …"))
+
+    def test_both_streams_blank(self) -> None:
+        msg = duet._agent_exit_error("gemini", 55, "", "")
+        self.assertEqual(msg, "gemini exited 55\nstderr:\n")
+
+
+class TestErrorSummaryBounds(unittest.TestCase):
+    def test_first_line_is_kept(self) -> None:
+        self.assertEqual(
+            duet._error_summary("first\nsecond", "fb"), "first"
+        )
+
+    def test_empty_message_uses_fallback(self) -> None:
+        self.assertEqual(duet._error_summary("", "fallback"), "fallback")
+
+    def test_single_line_monster_is_capped(self) -> None:
+        summary = duet._error_summary("y" * 400_000, "fb")
+        self.assertEqual(len(summary), duet.ERROR_SUMMARY_MAX_CHARS)
+
+    def test_stream_tail_bounds_and_labels_empty(self) -> None:
+        self.assertEqual(duet._stream_tail(""), "(empty)")
+        self.assertEqual(duet._stream_tail("  \n"), "(empty)")
+        bounded = duet._stream_tail("z" * 10_000)
+        self.assertEqual(len(bounded), duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 1)
+        self.assertTrue(bounded.startswith("…"))
+
+
 class TestTimeoutScaling(unittest.TestCase):
     def test_no_levels_keeps_default(self) -> None:
         self.assertEqual(
