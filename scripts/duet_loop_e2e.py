@@ -81,6 +81,14 @@ doc. On a later turn, if the reviewer accepts it, you may converge normally.
 """
 
 
+TIMEOUT_CODER_PROMPT = GENERIC_CODER_PROMPT + """\
+
+Scenario rule: your first action must be to run
+`python3 -c 'import time; time.sleep(30)'`. Wait for it to finish before you
+inspect or edit files. This deliberate delay tests Duet's turn-timeout handoff.
+"""
+
+
 @dataclasses.dataclass
 class Scenario:
     sid: str
@@ -90,8 +98,11 @@ class Scenario:
     hidden_validator: Callable[[pathlib.Path], tuple[bool, str]]
     max_turns: int = 6
     expected_reasons: tuple[str, ...] = ("converged",)
+    per_turn_timeout: Optional[int] = None
+    on_turn_timeout: Optional[str] = None
     coder_prompt: str = GENERIC_CODER_PROMPT
     reviewer_prompt: str = GENERIC_REVIEWER_PROMPT
+    history_validator: Optional[Callable[[dict], tuple[bool, str]]] = None
     require_reviewer_rejection: bool = False
     require_empty_diff: bool = False
     require_fenced_nonconvergence: bool = False
@@ -358,6 +369,37 @@ def validate_add_docstring(worktree: pathlib.Path) -> tuple[bool, str]:
     return p.returncode == 0, (p.stderr or p.stdout).strip()
 
 
+def validate_timeout_continue_history(state: dict) -> tuple[bool, str]:
+    history = state.get("history")
+    if not isinstance(history, list) or len(history) != 2:
+        return False, f"expected exactly two history entries, got {history!r}"
+    agents = state.get("agents")
+    if not isinstance(agents, list):
+        return False, "state agents missing"
+    roles = {
+        item.get("name"): item.get("role")
+        for item in agents
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and isinstance(item.get("role"), str)
+    }
+    first, second = history
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False, "history entries must be objects"
+    if first.get("turn") != 1 or roles.get(first.get("agent")) != "coder":
+        return False, "history[0] is not coder turn 1"
+    if first.get("finished_reason") != "timeout":
+        return False, "history[0] did not time out"
+    if second.get("turn") != 2 or roles.get(second.get("agent")) != "reviewer":
+        return False, "history[1] is not reviewer turn 2"
+    reason = state.get("finished_reason")
+    if reason == "max_turns" and second.get("finished_reason") is not None:
+        return False, "max_turns requires a successful reviewer turn"
+    if reason == "timeout" and second.get("finished_reason") != "timeout":
+        return False, "terminal timeout requires the reviewer to time out too"
+    return True, ""
+
+
 def scenarios() -> list[Scenario]:
     return [
         Scenario(
@@ -442,6 +484,23 @@ def scenarios() -> list[Scenario]:
                 "Add a one-line docstring to greet(name) in app.py explaining "
                 "that it returns a greeting. Do not change runtime behavior. "
                 "Run `python3 -m unittest -q`."
+            ),
+        ),
+        Scenario(
+            sid="S7",
+            name="timeout-continue",
+            setup=setup_noop,
+            hidden_validator=validate_noop,
+            history_validator=validate_timeout_continue_history,
+            max_turns=2,
+            expected_reasons=("max_turns", "timeout"),
+            per_turn_timeout=5,
+            on_turn_timeout="continue",
+            coder_prompt=TIMEOUT_CODER_PROMPT,
+            task=(
+                "Inspect normalize_name(name). Confirm that it trims outer "
+                "space, collapses repeated internal whitespace, and title-cases "
+                "the result. Do not edit files when the behavior is correct."
             ),
         ),
     ]
@@ -557,7 +616,10 @@ def build_config(
         "cwd": str(repo),
         "max_turns": scenario.max_turns,
         "sentinel": SENTINEL,
-        "per_turn_timeout": timeout,
+        "per_turn_timeout": (
+            scenario.per_turn_timeout
+            if scenario.per_turn_timeout is not None else timeout
+        ),
         "runs_dir": str(runs_dir),
         "sandbox": "workspace-write",
         "permission_mode": "acceptEdits",
@@ -569,6 +631,8 @@ def build_config(
     }
     if reasoning:
         cfg["reasoning"] = reasoning
+    if scenario.on_turn_timeout is not None:
+        cfg["on_turn_timeout"] = scenario.on_turn_timeout
     return cfg
 
 
@@ -722,6 +786,11 @@ def score_run(
     metrics["turns"] = turns_used
     if reason not in scenario.expected_reasons:
         failures.append(f"finished_reason={reason!r}, expected {scenario.expected_reasons}")
+    if scenario.history_validator is not None:
+        history_ok, history_detail = scenario.history_validator(state)
+        metrics["history_validator"] = "pass" if history_ok else "fail"
+        if not history_ok:
+            failures.append(f"history validator failed: {history_detail}")
 
     transcript_path = pathlib.Path(state.get("transcript_path") or run_dir / "transcript.md")
     if not transcript_path.is_file():
@@ -978,7 +1047,10 @@ def main() -> int:
             write_text(config_path, json.dumps(cfg, indent=2) + "\n")
 
             timeout = scenario_timeout(
-                args.timeout,
+                (
+                    scenario.per_turn_timeout
+                    if scenario.per_turn_timeout is not None else args.timeout
+                ),
                 scenario.max_turns,
                 forced=scenario.force_feedback is not None,
             )
