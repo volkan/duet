@@ -109,6 +109,30 @@ expect_stdout "copilot dry-run accepted"     0 "dry-run copilot/copilot-partner"
 expect_stdout "copilot reasoning accepted"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1 --reasoning max
 expect_stdout "opencode dry-run accepted"    0 "dry-run opencode/opencode-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1
 expect_stdout "opencode reasoning accepted"  0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1 --reasoning max
+# --on-turn-timeout is a choices flag: bad values must die in argparse (rc=2).
+expect "on-turn-timeout bad value"           2 "$DUET" --task "x" --dry-run --cwd "$TMPD" --on-turn-timeout sometimes
+# Reasoning-scaled default per-turn timeout: without --timeout, max reasoning
+# derives 1800s into state.json; an explicit --timeout beats derivation.
+SCALED_RUNS="$TMPD/scaled-timeout-runs"
+expect "reasoning-scaled timeout dry-run"    0 "$DUET" --dry-run --task "x" --cwd "$TMPD" --runs-dir "$SCALED_RUNS" --reasoning max
+SCALED_RUN=$(ls -1d "$SCALED_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$SCALED_RUN" ]]; then
+  grep -q '"per_turn_timeout": 1800' "$SCALED_RUN/state.json" \
+      || { echo "FAIL: reasoning max did not derive per_turn_timeout 1800"; FAIL=$((FAIL+1)); }
+  grep -q '"on_turn_timeout": "stop"' "$SCALED_RUN/state.json" \
+      || { echo "FAIL: on_turn_timeout default missing from state.json"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: reasoning-scaled dry-run dir not created"; FAIL=$((FAIL+1))
+fi
+EXPLICIT_TIMEOUT_RUNS="$TMPD/explicit-timeout-runs"
+expect "explicit timeout beats scaling"      0 "$DUET" --dry-run --task "x" --cwd "$TMPD" --runs-dir "$EXPLICIT_TIMEOUT_RUNS" --reasoning max --timeout 901
+EXPLICIT_TIMEOUT_RUN=$(ls -1d "$EXPLICIT_TIMEOUT_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$EXPLICIT_TIMEOUT_RUN" ]]; then
+  grep -q '"per_turn_timeout": 901' "$EXPLICIT_TIMEOUT_RUN/state.json" \
+      || { echo "FAIL: explicit --timeout was overridden by reasoning scaling"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: explicit-timeout dry-run dir not created"; FAIL=$((FAIL+1))
+fi
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)

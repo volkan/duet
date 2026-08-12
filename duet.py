@@ -59,7 +59,7 @@ import textwrap
 import threading
 import time
 import traceback
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 # ---------- defaults ----------
 
@@ -78,6 +78,12 @@ VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
 VERIFY_LIVE_PREFIX = "  │ [verify] "
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
+ON_TURN_TIMEOUT_CHOICES = ("stop", "continue")
+# Derived default per-turn timeouts when the user gives no explicit timeout:
+# deep-reasoning turns routinely outlive the 900s default (a real xhigh codex
+# turn was killed at exactly 900s), so the *default* scales with the effective
+# reasoning level. An explicit --timeout / per_turn_timeout always wins.
+REASONING_TIMEOUT_DEFAULTS = {"high": 1200, "xhigh": 1800, "max": 1800}
 FINISHED_CONVERGED = "converged"
 FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
 FINISHED_FORCED_CONTINUATION = "forced_continuation"
@@ -297,6 +303,33 @@ def validate_reasoning(value: Optional[str], context: str) -> None:
 def effective_reasoning(agent: Agent, cfg_reasoning: Optional[str]) -> Optional[str]:
     return agent.reasoning_effort or cfg_reasoning
 
+
+def resolve_default_per_turn_timeout(
+    levels: Iterable[Optional[str]],
+) -> tuple[int, Optional[str]]:
+    """Derived default per-turn timeout for a run's effective reasoning levels.
+
+    Returns (seconds, triggering_level); triggering_level is None when nothing
+    scaled past DEFAULT_TIMEOUT. Callers apply this only when no explicit
+    timeout was given (CLI --timeout, YAML per_turn_timeout, saved state).
+    Non-string levels are ignored so untrusted state values cannot crash it.
+    """
+    best_seconds, best_level = DEFAULT_TIMEOUT, None
+    for level in levels:
+        if not isinstance(level, str):
+            continue
+        seconds = REASONING_TIMEOUT_DEFAULTS.get(level, DEFAULT_TIMEOUT)
+        if seconds > best_seconds:
+            best_seconds, best_level = seconds, level
+    return best_seconds, best_level
+
+
+def _note_scaled_timeout(level: Optional[str], seconds: int) -> None:
+    if level is None:
+        return
+    print(f"[duet] note: reasoning {level} — per-turn timeout defaulting to "
+          f"{seconds}s (pass --timeout to override)", file=sys.stderr)
+
 # ---------- data classes ----------
 
 @dataclasses.dataclass
@@ -357,6 +390,10 @@ class DuetConfig:
     max_turns: int = DEFAULT_TURNS
     sentinel: str = DEFAULT_SENTINEL
     per_turn_timeout: int = DEFAULT_TIMEOUT
+    on_turn_timeout: str = "stop"             # "continue" hands a timed-out loop
+                                              # turn's failure block to the partner
+                                              # instead of ending the run; a second
+                                              # consecutive timeout still stops
     runs_dir: pathlib.Path = pathlib.Path("runs")
     sandbox: str = DEFAULT_SANDBOX            # codex
     permission_mode: str = DEFAULT_PERMISSION_MODE  # claude/gemini
@@ -438,6 +475,13 @@ def validate_config(cfg: DuetConfig,
         _config_error(
             f"task_from_cmd_target must be 'task' or 'kickoff_append', got "
             f"{cfg.task_from_cmd_target!r}",
+            parser,
+        )
+    if cfg.on_turn_timeout not in ON_TURN_TIMEOUT_CHOICES:
+        choices = "|".join(ON_TURN_TIMEOUT_CHOICES)
+        _config_error(
+            f"on_turn_timeout must be one of {choices}, got "
+            f"{cfg.on_turn_timeout!r}",
             parser,
         )
 
@@ -2310,6 +2354,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "sandbox": cfg.sandbox,
         "permission_mode": cfg.permission_mode,
         "per_turn_timeout": cfg.per_turn_timeout,
+        "on_turn_timeout": cfg.on_turn_timeout,
         "verify_cmd": cfg.verify_cmd,
         "last_verify": last_verify,
         "worktree": str(wt_path.resolve()) if wt_path else None,
@@ -2475,12 +2520,35 @@ class _TurnResult:
     recap_block: Optional[str]
 
 
+def _timeout_may_continue(cfg: DuetConfig, previous_turn_timed_out: bool,
+                          turn: int) -> bool:
+    """Pre-call eligibility: may a timeout on this turn hand off to the partner?
+
+    False on a second consecutive timeout and on the final turn (no partner
+    turn left to react). Evaluated before the call so `_execute_turn` can keep
+    an eligible timeout out of the persisted finished_reason.
+    """
+    return (cfg.on_turn_timeout == "continue"
+            and not previous_turn_timed_out
+            and turn < cfg.max_turns)
+
+
+def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
+                            stop) -> bool:
+    """Post-call decision: re-checks the stop flag so a Ctrl-C that landed
+    during the call beats continuation (the pre-call flag would be stale)."""
+    return (result.failure_reason == FINISHED_TIMEOUT
+            and timeout_may_continue
+            and not stop.requested)
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
                   history: list, seen_first_turn: dict,
                   wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                   last_verify_state: Optional[dict],
+                  timeout_may_continue: bool = False,
                   log: Callable[..., None]) -> _TurnResult:
     """Run a single agent turn: invoke, verify, recap, persist transcript+state.
 
@@ -2538,7 +2606,9 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         _stop_recap_inflight(*inflight)
     if call_succeeded:
         guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn_for_agent)
-    seen_first_turn[speaker.name] = True
+        # Seen only on success: a timed-out/errored first turn must count as a
+        # first turn again on retry, so the same-cwd codex guards keep applying.
+        seen_first_turn[speaker.name] = True
     elapsed = time.time() - t0
     raw_reply = reply
     convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
@@ -2583,8 +2653,14 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     if verify_state is not None:
         history_entry["verify"] = verify_state
     history.append(history_entry)
+    # A timeout the loop may continue past must not be persisted as the run's
+    # finished_reason — that would flip the phase to "finished" and make
+    # --status report a still-running run as terminal.
+    persisted_reason = failure_reason
+    if failure_reason == FINISHED_TIMEOUT and timeout_may_continue:
+        persisted_reason = None
     turn_state = _build_run_state(
-        cfg, turns_used=turn, history=history, finished_reason=failure_reason,
+        cfg, turns_used=turn, history=history, finished_reason=persisted_reason,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
     )
@@ -2903,6 +2979,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
     previous_convergence_proposal = False
+    previous_turn_timed_out = False
     last_verify_state: Optional[dict] = None
 
     for turn in range(1, cfg.max_turns + 1):
@@ -2910,13 +2987,15 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = FINISHED_FORCE_STOP
             break
         speaker = cfg.agents[speaker_idx]
+        may_continue = _timeout_may_continue(cfg, previous_turn_timed_out, turn)
         result = _execute_turn(
             cfg, turn=turn, speaker=speaker, last_msg=last_msg,
             run_dir=run_dir, transcript_path=transcript_path,
             recap_path=recap_path, state_path=state_path,
             history=history, seen_first_turn=seen_first_turn,
             wt_path=wt_path, wt_branch=wt_branch,
-            last_verify_state=last_verify_state, log=log,
+            last_verify_state=last_verify_state,
+            timeout_may_continue=may_continue, log=log,
         )
         last_verify_state = result.last_verify_state
         if cfg.recap:
@@ -2925,8 +3004,19 @@ def run_duet(cfg: DuetConfig) -> dict:
             print(result.reply)
 
         if result.failure_reason is not None:
+            if _continue_after_timeout(result, may_continue, stop):
+                print(f"[duet] turn {turn:02d} ({speaker.name}) timed out after "
+                      f"{cfg.per_turn_timeout}s — handing the timeout block to "
+                      f"the partner (--on-turn-timeout continue)",
+                      file=sys.stderr)
+                last_msg = result.reply
+                previous_convergence_proposal = False
+                previous_turn_timed_out = True
+                speaker_idx = 1 - speaker_idx
+                continue
             finished_reason = result.failure_reason
             break
+        previous_turn_timed_out = False
         if result.convergence_hit and previous_convergence_proposal:
             finished_reason = FINISHED_CONVERGED
             break
@@ -3015,8 +3105,10 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         _stop_recap_inflight(*inflight)
     if call_succeeded:
         guard_cwd_keyed_resume_after_call(cfg, next_speaker, first_turn_for_agent)
+        # Seen only on success — mirrors _execute_turn so a failed forced turn
+        # keeps the agent's first-turn guards intact on the next attempt.
+        seen_first_turn[next_speaker.name] = True
     elapsed = time.time() - t0
-    seen_first_turn[next_speaker.name] = True
     raw_reply = reply
     convergence_hit = convergence_proposed(reply, cfg.sentinel)
     verify_state: Optional[dict] = None
@@ -4166,6 +4258,21 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
     return "\n".join(lines)
 
 
+def _continue_default_timeout(args: argparse.Namespace, state: dict,
+                              agents: list[Agent]) -> int:
+    """Reasoning-scaled fallback for legacy states missing per_turn_timeout."""
+    restored = (args.reasoning if args.reasoning is not None
+                else state.get("reasoning"))
+    if not isinstance(restored, str):
+        restored = None
+    seconds, level = resolve_default_per_turn_timeout(
+        [effective_reasoning(a, restored) for a in agents]
+    )
+    if args.timeout is None and state.get("per_turn_timeout") is None:
+        _note_scaled_timeout(level, seconds)
+    return seconds
+
+
 def build_continue_config(run_arg: str,
                           args: argparse.Namespace,
                           parser: argparse.ArgumentParser,
@@ -4213,7 +4320,12 @@ def build_continue_config(run_arg: str,
                 agent.session_id = "codex-current"
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
     timeout = _state_int_or_arg(
-        args.timeout, state, "per_turn_timeout", DEFAULT_TIMEOUT,
+        args.timeout, state, "per_turn_timeout",
+        _continue_default_timeout(args, state, agents),
+        parser, "--continue",
+    )
+    on_turn_timeout = _state_str_or_arg(
+        args.on_turn_timeout, state, "on_turn_timeout", "stop",
         parser, "--continue",
     )
     user_note, task_from_cmd = _continue_note_from_args(
@@ -4269,6 +4381,7 @@ def build_continue_config(run_arg: str,
             args.codex_fast
             if args.codex_fast is not None else state.get("codex_fast", False)
         ),
+        on_turn_timeout=on_turn_timeout,
         start_speaker_idx=next_idx,
         continue_from=str(run_dir),
         run_info_file=_resolve_opt_path(args.run_info_file),
@@ -4437,7 +4550,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="convergence sentinel; requires an LGTM rationale and "
                          "back-to-back proposals from both agents")
     ap.add_argument("--timeout", type=int, default=None,
-                    help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT})")
+                    help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT}; "
+                         "without this flag the default scales with the "
+                         "effective reasoning level: high=1200, xhigh/max=1800)")
+    ap.add_argument("--on-turn-timeout", choices=list(ON_TURN_TIMEOUT_CHOICES),
+                    default=None,
+                    help="what a per-turn timeout does to the loop: 'stop' ends "
+                         "the run (default); 'continue' hands the timeout block "
+                         "to the partner and keeps looping (a second consecutive "
+                         "timeout still stops; seed extraction and forced turns "
+                         "always stop on timeout). The review recipe defaults to "
+                         "'continue'.")
     ap.add_argument("--verify-cmd", metavar="CMD", default=None,
                     help="shell command that must exit 0 before a convergence "
                          "proposal can count. Runs only for valid LGTM+rationale "
@@ -4574,6 +4697,10 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.worktree = args.worktree_path is None
     if args.require_worktree is None:
         args.require_worktree = bool(args.worktree or args.worktree_path)
+    if args.on_turn_timeout is None:
+        # A review pairing should still get its review: when the coder turn
+        # times out, hand the timeout block to the reviewer instead of dying.
+        args.on_turn_timeout = "continue"
 
     explicit_seed = any((
         args.task is not None,
@@ -4600,18 +4727,41 @@ def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
     return None
 
 
+def _yaml_per_turn_timeout(raw: dict, args: argparse.Namespace) -> int:
+    """Effective per-turn timeout for a --config run.
+
+    The file value beats CLI --timeout (per_turn_timeout follows the file-wins
+    convention of sentinel/sandbox/permission_mode); the reasoning-scaled
+    default applies only when neither gives a value, computed over each
+    agent's *effective* level (per-agent override, else the resolved global).
+    """
+    if "per_turn_timeout" in raw:
+        return int(raw["per_turn_timeout"])
+    if args.timeout is not None:
+        return args.timeout
+    resolved_global = args.reasoning or raw.get("reasoning")
+    raw_agents = raw.get("agents", [])
+    agent_dicts = raw_agents if isinstance(raw_agents, list) else []
+    levels = [
+        (a.get("reasoning_effort") or resolved_global) if isinstance(a, dict)
+        else resolved_global
+        for a in agent_dicts
+    ] or [resolved_global]
+    seconds, level = resolve_default_per_turn_timeout(levels)
+    _note_scaled_timeout(level, seconds)
+    return seconds
+
+
 def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
                          stdin_cache: dict) -> DuetConfig:
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
-    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast)
-    override or combine with file values; --resume-* still apply on top."""
+    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
+    on_turn_timeout) override or combine with file values; --resume-* still
+    apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
     cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
-    cfg_timeout = int(raw.get(
-        "per_turn_timeout",
-        args.timeout if args.timeout is not None else DEFAULT_TIMEOUT,
-    ))
+    cfg_timeout = _yaml_per_turn_timeout(raw, args)
     raw_task = raw.get("task")
     raw_kickoff = raw.get("kickoff")
     raw_task_from_cmd = raw.get("task_from_cmd")
@@ -4682,6 +4832,11 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             args.codex_fast
             if args.codex_fast is not None else raw.get("codex_fast", False)
         ),
+        on_turn_timeout=(
+            args.on_turn_timeout
+            if args.on_turn_timeout is not None
+            else raw.get("on_turn_timeout", "stop")
+        ),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
     cfg.agents = apply_resume_overrides(
@@ -4701,7 +4856,13 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     agent in the "wrong" slot still routes its session id correctly.
     """
     cfg_cwd = pathlib.Path(args.cwd or ".").expanduser().resolve()
-    timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
+    if args.timeout is not None:
+        timeout = args.timeout
+    else:
+        # CLI-built agents carry no per-agent reasoning override, so the run
+        # level alone is the effective level for both agents.
+        timeout, scaled_level = resolve_default_per_turn_timeout([args.reasoning])
+        _note_scaled_timeout(scaled_level, timeout)
     task, kickoff, task_from_cmd = resolve_seed_inputs(
         task=args.task,
         kickoff=args.kickoff,
@@ -4756,6 +4917,9 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         ],
         reasoning=args.reasoning,
         codex_fast=bool(args.codex_fast),
+        on_turn_timeout=(
+            args.on_turn_timeout if args.on_turn_timeout is not None else "stop"
+        ),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
 

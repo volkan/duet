@@ -1032,6 +1032,54 @@ class TestReasoningHelpers(unittest.TestCase):
         # backend-normalized alias for the highest Codex effort.
         self.assertEqual(duet.CODEX_REASONING_MAP["max"], "xhigh")
 
+
+class TestTimeoutScaling(unittest.TestCase):
+    def test_no_levels_keeps_default(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([None, "medium", "low"]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+
+    def test_high_and_deeper_levels_scale(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["high"]), (1200, "high")
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["xhigh"]), (1800, "xhigh")
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["max"]), (1800, "max")
+        )
+
+    def test_highest_effective_level_wins(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["high", "max"]),
+            (1800, "max"),
+        )
+
+    def test_overrides_can_mask_a_deep_global(self) -> None:
+        # Callers pass per-agent *effective* levels: a global `max` that every
+        # agent overrides to `low` must derive the plain default, while one
+        # inheriting agent keeps the deep budget.
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["low", "low"]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["low", "max"]),
+            (1800, "max"),
+        )
+
+    def test_untrusted_non_string_levels_are_ignored(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([True, 1800, {"x": 1}]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+
     def test_xhigh_maps_to_xhigh_for_both_backends(self) -> None:
         self.assertEqual(duet.CLAUDE_REASONING_MAP["xhigh"], "xhigh")
         self.assertEqual(duet.CODEX_REASONING_MAP["xhigh"], "xhigh")

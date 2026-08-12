@@ -141,8 +141,10 @@ duet --recipe review --cwd ~/workspace/project
 ```
 
 The review recipe uses recap mode, `claude:reviewer` + `codex:coder`, six
-turns, `claude -p /review`, and strict worktree isolation. Explicit flags
-override recipe values.
+turns, `claude -p /review`, and strict worktree isolation. It also sets
+`--on-turn-timeout continue`, so when the coder turn times out the reviewer
+still gets the timeout block plus the worktree diff to review instead of the
+run dying reviewless. Explicit flags override recipe values.
 
 **Deterministic automation** — discover the run without parsing terminal prose,
 then poll the curated status schema:
@@ -199,7 +201,11 @@ other.
 To converge, an agent must include an `LGTM rationale:` explaining why the work
 is done, followed by the sentinel `<<<LGTM>>>` on its own line — a bare
 sentinel is ignored, and **both** agents must agree in back-to-back turns. The
-loop also stops on `--turns`, a per-turn timeout, or Ctrl-C. After a normal
+loop also stops on `--turns`, a per-turn timeout, or Ctrl-C. With
+`--on-turn-timeout continue` (the review recipe's default) a single turn
+timeout is handed to the partner instead of ending the run; two consecutive
+timeouts still stop. Without `--timeout`, the per-turn budget scales with the
+reasoning level (900s → 1800s at `xhigh`/`max`). After a normal
 stop, duet opens a `force>` prompt so you can push another round.
 
 Every run writes a directory with `transcript.md`, `state.json`, per-turn

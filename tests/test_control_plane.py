@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -62,6 +63,18 @@ class TestReviewRecipe(unittest.TestCase):
         _, args = self._args("--recipe", "review", "--task", "inspect this")
         self.assertIsNone(args.task_from_cmd)
         self.assertEqual(args.task, "inspect this")
+
+    def test_review_recipe_defaults_to_timeout_continue(self) -> None:
+        parser, args = self._args("--recipe", "review", "--task", "x")
+        cfg = duet._build_cfg_from_cli(args, parser, {})
+        self.assertEqual(cfg.on_turn_timeout, "continue")
+
+    def test_explicit_on_turn_timeout_stop_overrides_recipe(self) -> None:
+        parser, args = self._args(
+            "--recipe", "review", "--task", "x", "--on-turn-timeout", "stop"
+        )
+        cfg = duet._build_cfg_from_cli(args, parser, {})
+        self.assertEqual(cfg.on_turn_timeout, "stop")
 
     def test_explicit_worktree_path_replaces_recipe_creation_but_stays_strict(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -382,6 +395,276 @@ class TestContinueWorktreeOverrides(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 result = duet._setup_run_worktree(cfg, "new-run", root)
             self.assertEqual(result, (None, None))
+
+
+class TestContinueTimeoutKnobs(unittest.TestCase):
+    def _write_prior_run(self, root: pathlib.Path, state_extra: dict) -> pathlib.Path:
+        run = root / "prior" / "20260719-120000"
+        run.mkdir(parents=True)
+        state = {
+            "cwd": str(root),
+            "task": "prior task",
+            "agents": [duet.agent_state(agent) for agent in _agents()],
+            "history": [],
+            "turns_used": 0,
+            "finished_reason": "max_turns",
+            **state_extra,
+        }
+        (run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        return run
+
+    def _build_cfg(self, run: pathlib.Path, *extra: str) -> duet.DuetConfig:
+        parser = duet._build_arg_parser()
+        args = parser.parse_args(["--continue", str(run), *extra])
+        with contextlib.redirect_stderr(io.StringIO()):
+            return duet.build_continue_config(str(run), args, parser, {})
+
+    def test_on_turn_timeout_round_trips_through_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(root, {"on_turn_timeout": "continue"})
+            self.assertEqual(self._build_cfg(run).on_turn_timeout, "continue")
+
+    def test_explicit_stop_overrides_restored_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(root, {"on_turn_timeout": "continue"})
+            cfg = self._build_cfg(run, "--on-turn-timeout", "stop")
+            self.assertEqual(cfg.on_turn_timeout, "stop")
+
+    def test_legacy_state_defaults_to_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(root, {})
+            self.assertEqual(self._build_cfg(run).on_turn_timeout, "stop")
+
+    def test_legacy_state_derives_timeout_from_restored_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(root, {"reasoning": "max"})
+            self.assertEqual(self._build_cfg(run).per_turn_timeout, 1800)
+
+    def test_saved_timeout_beats_derivation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(
+                root, {"reasoning": "max", "per_turn_timeout": 900}
+            )
+            self.assertEqual(self._build_cfg(run).per_turn_timeout, 900)
+
+    def test_explicit_timeout_beats_everything(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            run = self._write_prior_run(
+                root, {"reasoning": "max", "per_turn_timeout": 900}
+            )
+            cfg = self._build_cfg(run, "--timeout", "700")
+            self.assertEqual(cfg.per_turn_timeout, 700)
+
+
+class TestTimeoutContinueLoop(unittest.TestCase):
+    """Loop semantics for --on-turn-timeout, with call_agent mocked out."""
+
+    def _cfg(self, root: pathlib.Path, **kwargs) -> duet.DuetConfig:
+        defaults = dict(
+            cwd=root,
+            agents=_agents(),
+            task="probe the timeout flow",
+            runs_dir=root / "runs",
+            max_turns=3,
+            on_turn_timeout="continue",
+        )
+        defaults.update(kwargs)
+        return duet.DuetConfig(**defaults)
+
+    def _run(self, cfg: duet.DuetConfig, side_effect):
+        calls: list[dict] = []
+
+        def fake_call_agent(agent, message, cfg_, first_turn_for_agent,
+                            *, run_dir=None, turn_label=None):
+            calls.append({
+                "agent": agent.name,
+                "message": message,
+                "first_turn": first_turn_for_agent,
+                "run_dir": run_dir,
+            })
+            return side_effect(len(calls), agent, calls[-1])
+
+        err = io.StringIO()
+        with mock.patch.object(duet, "call_agent", fake_call_agent), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet, "ask_force",
+                                  lambda *a, **k: (a[7], None)), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            state = duet.run_duet(cfg)
+        return state, calls, err.getvalue()
+
+    @staticmethod
+    def _ok_reply() -> str:
+        return "RECAP: ok\nFILES: none\nSTATUS: reviewing\n\nlooks fine"
+
+    def test_timeout_continue_hands_block_to_partner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            observed: dict = {}
+
+            def side_effect(n, agent, call):
+                if n == 1:
+                    raise duet.AgentRunError(
+                        duet.FINISHED_TIMEOUT, "codex exited 124\nslow turn"
+                    )
+                if n == 2:
+                    state_path = call["run_dir"] / "state.json"
+                    observed["mid_run"] = json.loads(state_path.read_text())
+                return self._ok_reply()
+
+            state, calls, err = self._run(self._cfg(root), side_effect)
+
+        self.assertEqual(state["finished_reason"], "max_turns")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(state["history"][0]["finished_reason"], "timeout")
+        # Handoff contract: the partner's message is the turn-1 failure block,
+        # not a bare "previous turn failed" note.
+        self.assertIn("[duet] TIMEOUT: turn 01", calls[1]["message"])
+        self.assertIn("codex exited 124", calls[1]["message"])
+        # The provisional state write never reads as finished mid-run.
+        self.assertEqual(observed["mid_run"]["phase"], "turn_running")
+        self.assertIsNone(observed["mid_run"]["finished_reason"])
+        self.assertIn("handing the timeout block", err)
+
+    def test_consecutive_timeouts_stop_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+
+            def side_effect(n, agent, call):
+                raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+
+            state, calls, _ = self._run(self._cfg(root), side_effect)
+
+        self.assertEqual(state["finished_reason"], "timeout")
+        self.assertEqual(state["phase"], "finished")
+        self.assertEqual(len(calls), 2)
+
+    def test_default_stop_keeps_timeout_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._cfg(root, on_turn_timeout="stop")
+
+            def side_effect(n, agent, call):
+                raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+
+            state, calls, err = self._run(cfg, side_effect)
+
+        self.assertEqual(duet.DuetConfig(cwd=root, agents=_agents()).on_turn_timeout,
+                         "stop")
+        self.assertEqual(state["finished_reason"], "timeout")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("handing the timeout block", err)
+
+    def test_final_turn_timeout_is_terminal_even_in_continue_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._cfg(root, max_turns=1)
+
+            def side_effect(n, agent, call):
+                raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+
+            state, calls, _ = self._run(cfg, side_effect)
+
+        self.assertEqual(state["finished_reason"], "timeout")
+        self.assertEqual(len(calls), 1)
+
+    def test_sigint_during_timed_out_call_beats_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            holder: dict = {}
+            orig_prepare = duet._prepare_run
+
+            def capture(cfg):
+                context, startup = orig_prepare(cfg)
+                holder["stop"] = context.stop
+                return context, startup
+
+            def side_effect(n, agent, call):
+                holder["stop"].requested = True
+                raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+
+            with mock.patch.object(duet, "_prepare_run", capture):
+                state, calls, err = self._run(self._cfg(root), side_effect)
+
+        self.assertEqual(state["finished_reason"], "timeout")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("handing the timeout block", err)
+
+    def test_same_cwd_codex_retry_counts_as_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            agents = [
+                duet.Agent(name="codex-a", backend="codex", role="planner"),
+                duet.Agent(name="codex-b", backend="codex", role="coder"),
+            ]
+            cfg = self._cfg(root, agents=agents, max_turns=4)
+
+            def side_effect(n, agent, call):
+                if n == 1:
+                    raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+                return self._ok_reply()
+
+            state, calls, _ = self._run(cfg, side_effect)
+
+        self.assertEqual([c["agent"] for c in calls],
+                         ["codex-b", "codex-a", "codex-b", "codex-a"])
+        # The timed-out first turn didn't mark codex-b seen, so its retry runs
+        # under first-turn rules and the same-cwd guards keep applying.
+        self.assertTrue(calls[2]["first_turn"])
+        self.assertFalse(calls[3]["first_turn"])
+
+    def test_same_cwd_codex_retry_without_uuid_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            agents = [
+                duet.Agent(name="codex-a", backend="codex", role="planner"),
+                duet.Agent(name="codex-b", backend="codex", role="coder"),
+            ]
+            cfg = self._cfg(root, agents=agents, max_turns=4)
+
+            def side_effect(n, agent, call):
+                if n == 1:
+                    raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+                if n == 3:
+                    # The retry "succeeds" but pins only the cwd-keyed legacy
+                    # marker — the after-guard must re-validate it because the
+                    # retry still counts as a first turn.
+                    agent.session_id = "codex-current"
+                return self._ok_reply()
+
+            with self.assertRaises(SystemExit):
+                self._run(cfg, side_effect)
+
+    def test_worktree_timeout_handoff_includes_diff_block(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
+            subprocess.run([*git[:1], "init", "-q"], cwd=root, check=True)
+            (root / "seed.txt").write_text("seed\n", encoding="utf-8")
+            subprocess.run([*git[:1], "add", "seed.txt"], cwd=root, check=True)
+            subprocess.run([*git, "commit", "-qm", "seed"], cwd=root, check=True)
+            cfg = self._cfg(root, max_turns=2, worktree=True,
+                            require_worktree=True)
+
+            def side_effect(n, agent, call):
+                if n == 1:
+                    raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+                return self._ok_reply()
+
+            state, calls, _ = self._run(cfg, side_effect)
+
+        self.assertEqual(state["finished_reason"], "max_turns")
+        # The reviewer received the failure block plus the worktree handoff,
+        # so it can review the on-disk work the coder never got to summarize.
+        self.assertIn("[duet] TIMEOUT: turn 01", calls[1]["message"])
+        self.assertIn("#### worktree changes", calls[1]["message"])
 
 
 if __name__ == "__main__":

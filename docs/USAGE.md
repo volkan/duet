@@ -497,7 +497,8 @@ worktree gated by `verify_cmd`.
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | Codex sandbox: `read-only`, `workspace-write`, `danger-full-access`. No-op for Claude, Gemini, Copilot, and OpenCode |
 | `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot and OpenCode |
-| `--timeout SEC` | per-turn timeout (default 900) |
+| `--timeout SEC` | per-turn timeout. Without this flag the default scales with the run's effective reasoning levels: 900 normally, 1200 when any agent runs at `high`, 1800 at `xhigh`/`max` (a stderr note says when scaling applied). Precedence per config path: plain CLI — `--timeout` beats the derived default; `--config` — the file's `per_turn_timeout:` beats `--timeout`, which beats the derived default (file-wins matches `sentinel`/`sandbox`/`permission_mode`); `--continue` — `--timeout` beats the saved state value, and the derived default only lands for legacy states missing the key. `--codex-fast` never affects derivation (it only lowers one role's effort; the single per-run budget must still cover the slowest agent) |
+| `--on-turn-timeout stop\|continue` | what a per-turn timeout does to the loop. `stop` (default) ends the run with `reason=timeout`. `continue` records the timeout block as that agent's reply and hands it to the partner — plus the worktree handoff/diff when the timed-out agent ran in a worktree — so the pair can still react (the review recipe defaults to `continue` so the reviewer reviews the coder's on-disk work). A second **consecutive** timeout still stops, a timeout on the final turn is terminal, and Ctrl-C beats continuation. Applies to automatic loop turns only: seed extraction and forced turns always stop on timeout. YAML key: `on_turn_timeout:` |
 | `--runs-dir DIR` | where to save transcripts; default is `runs/` from the invocation directory, or `<cwd>/.duet/runs/` for a foreign `--cwd` |
 | `--run-info-file FILE` | atomically publish schema-v1 launch JSON immediately after allocation; refuses an existing path. Contains only version/run ids, absolute run/state paths, and PID |
 | `--config PATH` | YAML/JSON config (overrides most flags) |
@@ -703,7 +704,8 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
-| per-turn agent timeout | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
+| per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
+| per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
 
 `force_stop` is reserved for intentional human interruption: Ctrl-C or a
