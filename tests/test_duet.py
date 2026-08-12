@@ -21,6 +21,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -1034,10 +1035,23 @@ class TestReasoningHelpers(unittest.TestCase):
 
 
 class TestAgentExitError(unittest.TestCase):
-    def test_stderr_is_the_primary_evidence(self) -> None:
-        msg = duet._agent_exit_error("claude", 1, "ignored stdout", "real error")
-        self.assertEqual(msg, "claude exited 1\nstderr:\nreal error")
-        self.assertNotIn("stdout", msg)
+    def test_stderr_is_primary_across_all_adapter_exit_shapes(self) -> None:
+        cases = (
+            ("claude", 1, ""),
+            ("codex", 2, "\ncmd: codex exec …"),
+            ("gemini", 55, ""),
+            ("copilot", 1, ""),
+            ("opencode", 9, ""),
+        )
+        for label, rc, extra in cases:
+            with self.subTest(adapter=label):
+                msg = duet._agent_exit_error(
+                    label, rc, "ignored stdout", "real error", extra=extra
+                )
+                self.assertEqual(
+                    msg, f"{label} exited {rc}\nstderr:\nreal error{extra}"
+                )
+                self.assertNotIn("ignored stdout", msg)
 
     def test_blank_stderr_falls_back_to_stdout_tail(self) -> None:
         msg = duet._agent_exit_error("claude", 1, '{"error":"boom"}', "")
@@ -1080,6 +1094,36 @@ class TestErrorSummaryBounds(unittest.TestCase):
         bounded = duet._stream_tail("z" * 10_000)
         self.assertEqual(len(bounded), duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 1)
         self.assertTrue(bounded.startswith("…"))
+
+
+class TestWorktreeDiagnostics(unittest.TestCase):
+    def test_timeout_reports_exit_code_and_both_stream_tails(self) -> None:
+        class TimedOutProcess:
+            returncode = -15
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired("git worktree add", timeout)
+                return "stdout detail", "Preparing worktree"
+
+        proc = TimedOutProcess()
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(duet.subprocess, "Popen", return_value=proc), \
+                mock.patch.object(duet, "_register_proc"), \
+                mock.patch.object(duet, "_unregister_proc"), \
+                mock.patch.object(duet, "_signal_proc_tree"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"timed out \(rc=-15\): stderr: Preparing worktree "
+                r"\| stdout: stdout detail",
+            ):
+                duet.setup_worktree(
+                    pathlib.Path(raw), "duet/test", pathlib.Path(raw) / "wt"
+                )
 
 
 class TestTimeoutScaling(unittest.TestCase):

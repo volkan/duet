@@ -688,7 +688,7 @@ def setup_worktree(repo_path: pathlib.Path, branch_name: str,
                 _signal_proc_tree(proc, signal.SIGKILL)
                 out, err = proc.communicate()
             raise RuntimeError(
-                "git worktree add timed out: "
+                f"git worktree add timed out (rc={proc.returncode}): "
                 f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
             )
     finally:

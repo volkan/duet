@@ -82,7 +82,8 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 `--recipe review` expands to the current project, `.duet/runs`, recap mode,
 `claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
-`claude -p /review` kickoff. Explicit flags override recipe values.
+`claude -p /review` kickoff. It continues past one non-final automatic-turn
+timeout. Explicit flags override recipe values.
 
 ### Select models by name
 

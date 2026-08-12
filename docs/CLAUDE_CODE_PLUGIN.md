@@ -123,7 +123,8 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
 The recipe supplies recap mode, `claude:reviewer`, `codex:coder`, six turns,
-strict worktree isolation, and `claude -p /review`. Explicit flags override it.
+strict worktree isolation, `claude -p /review`, and continuation past one
+non-final automatic-turn timeout. Explicit flags override it.
 
 Custom upstream command:
 

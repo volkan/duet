@@ -490,11 +490,15 @@ class TestTimeoutContinueLoop(unittest.TestCase):
             })
             return side_effect(len(calls), agent, calls[-1])
 
+        def skip_force(_cfg, _history, _transcript_path, _state_path,
+                       _last_msg, _speaker_idx, _seen_first_turn, reason,
+                       _wt_path=None, _wt_branch=None):
+            return reason, None
+
         err = io.StringIO()
         with mock.patch.object(duet, "call_agent", fake_call_agent), \
                 mock.patch.object(duet, "_register_run_in_home_index"), \
-                mock.patch.object(duet, "ask_force",
-                                  lambda *a, **k: (a[7], None)), \
+                mock.patch.object(duet, "ask_force", skip_force), \
                 contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(err):
             state = duet.run_duet(cfg)
@@ -507,7 +511,12 @@ class TestTimeoutContinueLoop(unittest.TestCase):
     def test_timeout_continue_hands_block_to_partner(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw).resolve()
-            observed: dict = {}
+            persisted_states: list[dict] = []
+            real_write_run_state = duet._write_run_state
+
+            def capture_write(state_path, state):
+                persisted_states.append(json.loads(json.dumps(state)))
+                real_write_run_state(state_path, state)
 
             def side_effect(n, agent, call):
                 if n == 1:
@@ -515,12 +524,10 @@ class TestTimeoutContinueLoop(unittest.TestCase):
                         duet.FINISHED_TIMEOUT,
                         "codex exited 124\nslow turn\n" + "x" * 100_000,
                     )
-                if n == 2:
-                    state_path = call["run_dir"] / "state.json"
-                    observed["mid_run"] = json.loads(state_path.read_text())
                 return self._ok_reply()
 
-            state, calls, err = self._run(self._cfg(root), side_effect)
+            with mock.patch.object(duet, "_write_run_state", capture_write):
+                state, calls, err = self._run(self._cfg(root), side_effect)
 
         self.assertEqual(state["finished_reason"], "max_turns")
         self.assertEqual(len(calls), 3)
@@ -534,9 +541,18 @@ class TestTimeoutContinueLoop(unittest.TestCase):
         # not a bare "previous turn failed" note.
         self.assertIn("[duet] TIMEOUT: turn 01", calls[1]["message"])
         self.assertIn("codex exited 124", calls[1]["message"])
-        # The provisional state write never reads as finished mid-run.
-        self.assertEqual(observed["mid_run"]["phase"], "turn_running")
-        self.assertIsNone(observed["mid_run"]["finished_reason"])
+        # Inspect the actual write after turn 1 and before turn 2 starts. A
+        # later turn_running write could otherwise hide a terminal timeout.
+        after_timeout = [
+            item for item in persisted_states
+            if item.get("turns_used") == 1
+            and item.get("phase") == "between_turns"
+            and len(item.get("history", [])) == 1
+            and item["history"][0].get("finished_reason") == "timeout"
+        ]
+        self.assertEqual(len(after_timeout), 1)
+        self.assertIsNone(after_timeout[0]["finished_reason"])
+        self.assertNotEqual(after_timeout[0]["phase"], "finished")
         self.assertIn("handing the timeout block", err)
 
     def test_consecutive_timeouts_stop_the_run(self) -> None:
@@ -615,6 +631,13 @@ class TestTimeoutContinueLoop(unittest.TestCase):
             def side_effect(n, agent, call):
                 if n == 1:
                     raise duet.AgentRunError(duet.FINISHED_TIMEOUT, "slow")
+                # Both first successful turns pin independent sessions. This
+                # proves the timed-out coder retry can pass the after-call
+                # same-cwd guard when it produces a real UUID.
+                if n == 2:
+                    agent.session_id = "11111111-1111-4111-8111-111111111111"
+                elif n == 3:
+                    agent.session_id = "22222222-2222-4222-8222-222222222222"
                 return self._ok_reply()
 
             state, calls, _ = self._run(cfg, side_effect)
@@ -625,6 +648,9 @@ class TestTimeoutContinueLoop(unittest.TestCase):
         # under first-turn rules and the same-cwd guards keep applying.
         self.assertTrue(calls[2]["first_turn"])
         self.assertFalse(calls[3]["first_turn"])
+        self.assertEqual(
+            agents[1].session_id, "22222222-2222-4222-8222-222222222222"
+        )
 
     def test_same_cwd_codex_retry_without_uuid_still_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

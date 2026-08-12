@@ -728,6 +728,8 @@ assert state["finished_reason"] == "agent_error", state
 last = state["history"][-1]
 assert last["finished_reason"] == "agent_error", last
 assert "codex exited 7" in last["error"], last
+assert len(last["error"]) <= m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS, last
+assert "characters omitted" in last["error"], last
 log_path = pathlib.Path(last["stderr_log_path"])
 stderr_log = log_path.read_text()
 assert "fatal backend stderr head" in stderr_log, log_path

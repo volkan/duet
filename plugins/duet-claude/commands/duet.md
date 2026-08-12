@@ -33,7 +33,9 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO" $ARGUMENTS
 
 The recipe owns the canonical defaults: current cwd, `.duet/runs`, recap,
 `claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
-`claude -p /review` kickoff. Explicit flags after `--recipe review` win.
+`claude -p /review` kickoff. It hands one timed-out automatic turn to the
+partner with `--on-turn-timeout continue`. Explicit flags after
+`--recipe review` win.
 
 If the first quoted value in `$ARGUMENTS` is an upstream shell command, use it
 as the kickoff and forward the remaining values as duet flags:

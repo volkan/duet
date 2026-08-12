@@ -46,8 +46,9 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 The `review` recipe means: current cwd, `.duet/runs`, recap mode,
 `claude:reviewer` lead, `codex:coder` partner, six turns, strict worktree
-isolation, and a `claude -p /review` kickoff. Explicit flags supplied by the
-user go after the recipe and override its values.
+isolation, a `claude -p /review` kickoff, and continuation past one non-final
+automatic-turn timeout. Explicit flags supplied by the user go after the
+recipe and override its values.
 
 For a custom upstream command, launch:
 
