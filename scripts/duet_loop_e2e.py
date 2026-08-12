@@ -616,10 +616,7 @@ def build_config(
         "cwd": str(repo),
         "max_turns": scenario.max_turns,
         "sentinel": SENTINEL,
-        "per_turn_timeout": (
-            scenario.per_turn_timeout
-            if scenario.per_turn_timeout is not None else timeout
-        ),
+        "per_turn_timeout": effective_per_turn_timeout(scenario, timeout),
         "runs_dir": str(runs_dir),
         "sandbox": "workspace-write",
         "permission_mode": "acceptEdits",
@@ -634,6 +631,13 @@ def build_config(
     if scenario.on_turn_timeout is not None:
         cfg["on_turn_timeout"] = scenario.on_turn_timeout
     return cfg
+
+
+def effective_per_turn_timeout(scenario: Scenario, default: int) -> int:
+    return (
+        scenario.per_turn_timeout
+        if scenario.per_turn_timeout is not None else default
+    )
 
 
 def run_duet_normal(
@@ -1047,10 +1051,7 @@ def main() -> int:
             write_text(config_path, json.dumps(cfg, indent=2) + "\n")
 
             timeout = scenario_timeout(
-                (
-                    scenario.per_turn_timeout
-                    if scenario.per_turn_timeout is not None else args.timeout
-                ),
+                effective_per_turn_timeout(scenario, args.timeout),
                 scenario.max_turns,
                 forced=scenario.force_feedback is not None,
             )
