@@ -256,7 +256,7 @@ class TestStatusSchema(unittest.TestCase):
                 "schema_version", "kind", "duet_version", "run_id", "run_dir",
                 "health", "phase", "exit_code", "turns_used", "finished_reason",
                 "per_turn_timeout", "active_turn", "last_completed_turn",
-                "artifacts", "error",
+                "last_timeout", "artifacts", "error",
             })
             self.assertEqual(snapshot["kind"], "duet.status")
             self.assertEqual(snapshot["health"], "terminal")
@@ -295,6 +295,55 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(snapshot["active_turn"]["elapsed_seconds"], 42)
             self.assertEqual(snapshot["active_turn"]["budget_seconds"], 60)
             self.assertEqual(snapshot["active_turn"]["remaining_seconds"], 18)
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                duet._print_human_status(snapshot, str(run))
+            self.assertIn("turn_timeout:    60s", human.getvalue())
+            self.assertIn("budget:       60s  (18s remaining)", human.getvalue())
+            self.assertNotIn(secret, json.dumps(snapshot))
+
+    def test_absorbed_timeout_remains_visible_after_partner_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            secret = "timeout-error-secret"
+            run = self._write_state(root, {
+                "phase": "finished",
+                "turns_used": 2,
+                "finished_reason": "max_turns",
+                "history": [
+                    {
+                        "turn": 1,
+                        "agent": "codex-coder",
+                        "elapsed_s": 60.2,
+                        "len_chars": 123,
+                        "finished_reason": "timeout",
+                        "error": secret,
+                    },
+                    {
+                        "turn": 2,
+                        "agent": "claude-reviewer",
+                        "elapsed_s": 10.5,
+                        "len_chars": 456,
+                    },
+                ],
+            })
+
+            snapshot = duet.build_run_status(str(run))
+
+            self.assertEqual(snapshot["last_completed_turn"], {
+                "turn": 2,
+                "agent": "claude-reviewer",
+                "elapsed_seconds": 10.5,
+                "output_chars": 456,
+                "finished_reason": None,
+            })
+            self.assertEqual(snapshot["last_timeout"], {
+                "turn": 1,
+                "agent": "codex-coder",
+                "elapsed_seconds": 60.2,
+                "output_chars": 123,
+                "finished_reason": "timeout",
+            })
             self.assertNotIn(secret, json.dumps(snapshot))
 
     def test_invalid_budget_values_are_null_for_a_live_turn(self) -> None:

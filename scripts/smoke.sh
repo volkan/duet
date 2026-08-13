@@ -79,6 +79,7 @@ assert status["schema_version"] == 1 and status["kind"] == "duet.status", status
 assert status["health"] == "terminal" and status["phase"] == "finished", status
 assert status["exit_code"] == 0, status
 assert status["per_turn_timeout"] == 900, status
+assert status["last_timeout"] is None, status
 if status["active_turn"] is not None:
     assert "budget_seconds" in status["active_turn"], status
     assert "remaining_seconds" in status["active_turn"], status
@@ -104,7 +105,17 @@ run.mkdir(parents=True)
     "phase": "turn_running",
     "turns_used": 0,
     "finished_reason": None,
-    "history": [],
+    "history": [
+        {
+            "turn": 1,
+            "agent": "codex-coder",
+            "elapsed_s": 60,
+            "len_chars": 123,
+            "finished_reason": "timeout",
+            "error": "must not leak",
+        },
+        {"turn": 2, "agent": "claude-reviewer", "elapsed_s": 5, "len_chars": 42},
+    ],
     "per_turn_timeout": 60,
 }), encoding="utf-8")
 (run / "turn-01-coder.pid").write_text("123", encoding="utf-8")
@@ -117,6 +128,11 @@ assert status["exit_code"] == 1, status
 assert status["per_turn_timeout"] == 60, status
 assert status["active_turn"]["budget_seconds"] == 60, status
 assert status["active_turn"]["remaining_seconds"] == 18, status
+assert status["last_completed_turn"]["turn"] == 2, status
+assert status["last_completed_turn"]["finished_reason"] is None, status
+assert status["last_timeout"]["turn"] == 1, status
+assert status["last_timeout"]["finished_reason"] == "timeout", status
+assert "must not leak" not in json.dumps(status), status
 PY
 expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util

@@ -95,13 +95,11 @@ fields. Exit codes are `0` terminal (including timeout/agent/setup failures),
 state, collect the original duet process result and report `finished_reason`,
 `error`, and artifact paths.
 
-When `active_turn` exists, surface its `remaining_seconds`. Warn the user when
-the non-null value is 60 seconds or less. A null value means no valid saved
-budget is available; do not calculate one from `state.json`. If the terminal
-`finished_reason` is `timeout`, use `last_completed_turn` to report the turn
-and agent that timed out. The review recipe continues after one non-final
-coder timeout, so a later partner turn can review its timeout block and
-worktree handoff.
+When `active_turn` exists, surface its `remaining_seconds`. A null value means
+no valid saved budget is available; do not calculate one from `state.json`.
+When `last_timeout` is non-null, report its turn and agent; it remains present
+when the review recipe absorbs one non-final coder timeout so a later partner
+turn can review its timeout block and worktree handoff.
 
 Do not expose `state.json` wholesale. The status document deliberately omits
 prompts, shell commands, credentials, and backend extra arguments.

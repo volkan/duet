@@ -1173,6 +1173,22 @@ class TestTimeoutScaling(unittest.TestCase):
             (duet.DEFAULT_TIMEOUT, None),
         )
 
+    def test_yaml_without_timeout_derives_from_effective_agent_levels(self) -> None:
+        args = duet.argparse.Namespace(timeout=None, reasoning=None)
+        raw = {
+            "reasoning": "max",
+            "agents": [
+                {"reasoning_effort": "low"},
+                {"backend": "codex", "role": "coder"},
+            ],
+        }
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            timeout = duet._yaml_per_turn_timeout(raw, args)
+
+        self.assertEqual(timeout, 1800)
+        self.assertIn("reasoning max", stderr.getvalue())
+
     def test_xhigh_maps_to_xhigh_for_both_backends(self) -> None:
         self.assertEqual(duet.CLAUDE_REASONING_MAP["xhigh"], "xhigh")
         self.assertEqual(duet.CODEX_REASONING_MAP["xhigh"], "xhigh")

@@ -361,6 +361,16 @@ def _note_scaled_timeout(level: Optional[str], seconds: int) -> None:
     print(f"[duet] note: reasoning {level} — per-turn timeout defaulting to "
           f"{seconds}s (pass --timeout to override)", file=sys.stderr)
 
+
+def derive_default_per_turn_timeout(
+    levels: Iterable[Optional[str]], *, notify: bool = True,
+) -> int:
+    """Resolve the reasoning-scaled default and optionally explain scaling."""
+    seconds, level = resolve_default_per_turn_timeout(levels)
+    if notify:
+        _note_scaled_timeout(level, seconds)
+    return seconds
+
 # ---------- data classes ----------
 
 @dataclasses.dataclass
@@ -3828,6 +3838,7 @@ def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
         "per_turn_timeout": None,
         "active_turn": None,
         "last_completed_turn": None,
+        "last_timeout": None,
         "artifacts": {
             "state": str((run_dir / "state.json").resolve()) if run_dir else None,
             "transcript": None,
@@ -3855,31 +3866,62 @@ def _absolute_status_path(run_dir: pathlib.Path, value: object) -> Optional[str]
     return str(path.resolve())
 
 
+def _status_history_turn(item: object) -> Optional[dict]:
+    """Sanitize one history entry for the public status contract."""
+    if not isinstance(item, dict):
+        return None
+    turn = item.get("turn")
+    if not isinstance(turn, int) or isinstance(turn, bool):
+        return None
+    agent = item.get("agent")
+    if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
+        agent = None
+    elapsed = item.get("elapsed_s")
+    if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
+        elapsed = None
+    output_chars = item.get("len_chars")
+    if not isinstance(output_chars, int) or isinstance(output_chars, bool):
+        output_chars = None
+    raw_finished = item.get("finished_reason")
+    if raw_finished is None:
+        finished_reason = None
+    elif isinstance(raw_finished, str) and raw_finished in FINISHED_REASONS:
+        finished_reason = raw_finished
+    else:
+        finished_reason = "unknown"
+    return {
+        "turn": turn,
+        "agent": agent,
+        "elapsed_seconds": elapsed,
+        "output_chars": output_chars,
+        "finished_reason": finished_reason,
+    }
+
+
 def _last_completed_turn(state: dict) -> Optional[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for item in reversed(history):
+        turn = _status_history_turn(item)
+        if turn is not None:
+            return turn
+    return None
+
+
+def _last_timeout(state: dict) -> Optional[dict]:
+    """Latest sanitized timeout outcome, including one absorbed by the loop."""
     history = state.get("history")
     if not isinstance(history, list):
         return None
     for item in reversed(history):
         if not isinstance(item, dict):
             continue
-        turn = item.get("turn")
-        if not isinstance(turn, int) or isinstance(turn, bool):
+        if item.get("finished_reason") != FINISHED_TIMEOUT:
             continue
-        agent = item.get("agent")
-        if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
-            agent = None
-        elapsed = item.get("elapsed_s")
-        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
-            elapsed = None
-        output_chars = item.get("len_chars")
-        if not isinstance(output_chars, int) or isinstance(output_chars, bool):
-            output_chars = None
-        return {
-            "turn": turn,
-            "agent": agent,
-            "elapsed_seconds": elapsed,
-            "output_chars": output_chars,
-        }
+        turn = _status_history_turn(item)
+        if turn is not None:
+            return turn
     return None
 
 
@@ -3981,6 +4023,7 @@ def build_run_status(arg: str) -> dict:
     else:
         snapshot["finished_reason"] = "unknown"
     snapshot["last_completed_turn"] = _last_completed_turn(state)
+    snapshot["last_timeout"] = _last_timeout(state)
     snapshot["artifacts"] = _status_artifacts(run_dir, state)
     per_turn_timeout = _positive_int_or_none(state.get("per_turn_timeout"))
     snapshot["per_turn_timeout"] = per_turn_timeout
@@ -4056,6 +4099,8 @@ def _print_human_status(snapshot: dict, arg: str) -> None:
     turns = snapshot["turns_used"]
     print(f"  turns_used:      {turns if turns is not None else '?'}")
     print(f"  finished_reason: {snapshot['finished_reason']!r}")
+    budget = snapshot["per_turn_timeout"]
+    print(f"  turn_timeout:    {f'{budget}s' if budget is not None else '?'}")
     recap = snapshot["artifacts"]["recap"]
     if recap is not None:
         print(f"  recap:           {recap}")
@@ -4065,6 +4110,9 @@ def _print_human_status(snapshot: dict, arg: str) -> None:
         print(f"    pid:          {active['pid']}  (alive: {active['alive']})")
         print(f"    started:      {active['started_at']}  "
               f"({active['elapsed_seconds']}s ago)")
+        if active["budget_seconds"] is not None:
+            print(f"    budget:       {active['budget_seconds']}s  "
+                  f"({active['remaining_seconds']}s remaining)")
         if active["stderr_updated_at"] is not None:
             print(f"    last stderr:  {active['stderr_updated_at']} "
                   f"({active['stderr_bytes']} bytes)")
@@ -4326,12 +4374,10 @@ def _continue_default_timeout(args: argparse.Namespace, state: dict,
                 else state.get("reasoning"))
     if not isinstance(restored, str):
         restored = None
-    seconds, level = resolve_default_per_turn_timeout(
-        [effective_reasoning(a, restored) for a in agents]
+    return derive_default_per_turn_timeout(
+        [effective_reasoning(a, restored) for a in agents],
+        notify=(args.timeout is None and state.get("per_turn_timeout") is None),
     )
-    if args.timeout is None and state.get("per_turn_timeout") is None:
-        _note_scaled_timeout(level, seconds)
-    return seconds
 
 
 def build_continue_config(run_arg: str,
@@ -4808,9 +4854,7 @@ def _yaml_per_turn_timeout(raw: dict, args: argparse.Namespace) -> int:
         else resolved_global
         for a in agent_dicts
     ] or [resolved_global]
-    seconds, level = resolve_default_per_turn_timeout(levels)
-    _note_scaled_timeout(level, seconds)
-    return seconds
+    return derive_default_per_turn_timeout(levels)
 
 
 def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
@@ -4922,8 +4966,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     else:
         # CLI-built agents carry no per-agent reasoning override, so the run
         # level alone is the effective level for both agents.
-        timeout, scaled_level = resolve_default_per_turn_timeout([args.reasoning])
-        _note_scaled_timeout(scaled_level, timeout)
+        timeout = derive_default_per_turn_timeout([args.reasoning])
     task, kickoff, task_from_cmd = resolve_seed_inputs(
         task=args.task,
         kickoff=args.kickoff,

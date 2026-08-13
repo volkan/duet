@@ -480,7 +480,7 @@ worktree gated by `verify_cmd`.
 | flag | purpose |
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
-| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, and `claude -p /review`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` also pins the kickoff |
+| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` also pins the kickoff |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
@@ -559,7 +559,8 @@ When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
 command, cwd, exit code, stdout, and stderr for each verification run.
 `state.json` also records the continuation-critical safety knobs
 (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`,
-`codex_fast`) plus `verify_cmd` and a capped `last_verify` summary.
+`codex_fast`, `per_turn_timeout`, `on_turn_timeout`) plus `verify_cmd` and a
+capped `last_verify` summary.
 
 ### Recap view
 
@@ -620,7 +621,7 @@ For automation, always add `--json`. Schema version 1 has these top-level keys:
 ```text
 schema_version, kind, duet_version, run_id, run_dir, health, phase,
 exit_code, turns_used, finished_reason, per_turn_timeout, active_turn,
-last_completed_turn, artifacts, error
+last_completed_turn, last_timeout, artifacts, error
 ```
 
 `kind` is `duet.status`; paths are absolute, timestamps are UTC RFC 3339, and
@@ -636,6 +637,10 @@ During a live turn, `active_turn.budget_seconds` repeats that budget and
 `active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
 at zero. All three fields are `null` when saved state contains a missing or
 invalid budget; status never performs arithmetic on the raw state value.
+`last_completed_turn.finished_reason` is that turn's sanitized outcome or
+`null`. `last_timeout` uses the same sanitized turn shape and retains the most
+recent timeout even when `--on-turn-timeout continue` absorbs it and a later
+partner turn completes. Neither field exposes the saved error or raw history.
 
 The matching launch handoff is written by `--run-info-file FILE` with
 `schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
@@ -647,10 +652,12 @@ $ duet --status 20260506-194122
 [duet] /Users/.../runs/20260506-194122
   turns_used:      3
   finished_reason: None
+  turn_timeout:    1200s
   recap:           /Users/.../runs/20260506-194122/recap.md
   in-flight turn:  turn-04-claude-planner
     pid:           44967  (alive: True)
     started:       2026-05-07T06:40:43Z  (171s ago)
+    budget:        1200s  (1029s remaining)
     last stderr:   2026-05-07T06:43:32Z (15909 bytes)
 ```
 
@@ -983,9 +990,9 @@ git add -p                               # selective (interactive)
 
 The shortest path is `--continue`. It reads the prior `state.json`, restores
 the same agent names/roles/session ids, restores saved run knobs such as
-`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, and
-`codex_fast`, reuses the saved worktree when present, and starts with the
-agent who should speak next:
+`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`,
+`per_turn_timeout`, and `on_turn_timeout`, reuses the saved worktree when
+present, and starts with the agent who should speak next:
 
 ```bash
 RUN=<runs_dir>/20260507-191155

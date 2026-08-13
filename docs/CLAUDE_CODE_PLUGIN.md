@@ -170,11 +170,9 @@ extra arguments. Its exit codes are 0 terminal, 1 running, 2 stuck/crashed,
 and 3 status error.
 
 During a live turn, `active_turn.budget_seconds` shows the saved budget and
-`active_turn.remaining_seconds` shows the zero-clamped time left. Warn the
-user when a non-null remaining value is 60 seconds or less. If a run finishes
-with `timeout`, report the turn and agent from `last_completed_turn`. The
-review recipe lets the partner react to one non-final coder timeout before a
-terminal timeout outcome is possible.
+`active_turn.remaining_seconds` shows the zero-clamped time left. When
+`last_timeout` is non-null, report its turn and agent; it remains present when
+the review recipe lets the partner react to one non-final coder timeout.
 
 You can also list recent runs:
 
@@ -264,9 +262,8 @@ user-supplied conflicting pairs instead of rewriting them. Do not pre-add
 
 Validate schema 1 in `$DUET_RUN_INFO`, then poll the discovered run with
 `duet --status <run_dir> --json`. Do not scrape banners.
-Surface `active_turn.remaining_seconds`, and warn when its non-null value is
-60 seconds or less. For a terminal timeout, report the turn and agent from
-`last_completed_turn`; the review recipe continues past one non-final coder
-timeout.
+Surface `active_turn.remaining_seconds`. When `last_timeout` is non-null,
+report its turn and agent; the field remains present when the review recipe
+continues past one non-final coder timeout.
 EOF
 ````
