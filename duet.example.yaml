@@ -66,7 +66,7 @@ dry_run: false
 # Optional: a generic task; only used if neither agent has a session_id and
 # no kickoff is provided.
 # Use @file or @- here too, or run an upstream tool and use its stdout:
-# task_from_cmd: "claude -p /review"
+# task_from_cmd: "claude -p /review --model sonnet"
 task: |
   Refactor the auth module to use JWTs.
   Keep backward compatibility; add tests.
@@ -76,7 +76,8 @@ agents:
     backend: claude
     role: planner
     # session_id: 106c1c57-ca42-473f-b2f1-1ea764f78c46   # paste from prior `claude` session
-    # model: claude-sonnet-4-6
+    # Claude defaults to the stable `sonnet` alias; uncomment to override it.
+    # model: opus
 
   - name: codex-partner
     backend: codex

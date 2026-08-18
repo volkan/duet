@@ -46,9 +46,10 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 The `review` recipe means: current cwd, `.duet/runs`, recap mode,
 `claude:reviewer` lead, `codex:coder` partner, six turns, strict worktree
-isolation, a `claude -p /review` kickoff, and continuation past one non-final
-automatic-turn timeout. Explicit flags supplied by the user go after the
-recipe and override its values.
+isolation, a `claude -p /review --model sonnet` kickoff, Sonnet-defaulted
+Claude loop turns, and continuation past one non-final automatic-turn timeout.
+Explicit flags supplied by the user go after the recipe and override its
+values.
 
 For a custom upstream command, launch:
 
@@ -135,7 +136,8 @@ Preserve exact backend IDs supplied by the user. Known friendly mappings:
 - latest Opus → `opus`
 - GPT Sol → `gpt-5.6-sol`
 
-With `--recipe review`, a Claude `--lead-model` also pins the standalone
+Claude defaults to the stable `sonnet` alias. With `--recipe review`, a Claude
+`--lead-model` overrides that default for both the loop agent and standalone
 `claude -p /review` kickoff automatically. With a custom explicit
 `--task-from-cmd 'claude -p /review …'`, add the same `--model` value inside
 that command yourself.

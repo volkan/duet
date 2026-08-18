@@ -82,9 +82,9 @@ Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
    command -v codex
    ```
 
-   Plain `/duet` runs `claude -p /review` first, then uses `codex:coder` in a
-   worktree. If you pass a custom partner or config, install whichever backend
-   that recipe needs instead.
+   Plain `/duet` runs `claude -p /review --model sonnet` first, then uses
+   `codex:coder` in a worktree. If you pass a custom partner or config, install
+   whichever backend that recipe needs instead.
 
 4. Add and install the marketplace plugin in Claude Code.
 
@@ -123,8 +123,9 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
 The recipe supplies recap mode, `claude:reviewer`, `codex:coder`, six turns,
-strict worktree isolation, `claude -p /review`, and continuation past one
-non-final automatic-turn timeout. Explicit flags override it.
+strict worktree isolation, `claude -p /review --model sonnet`, Sonnet-defaulted
+Claude loop turns, and continuation past one non-final automatic-turn timeout.
+Explicit flags override it.
 
 Custom upstream command:
 

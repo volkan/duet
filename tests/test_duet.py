@@ -289,6 +289,23 @@ class TestAgentFailureTranscript(unittest.TestCase):
 
 
 class TestAgentFinishReasons(unittest.TestCase):
+    def test_claude_call_uses_default_sonnet_model(self) -> None:
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return 0, '{"result":"ok","session_id":"claude-sid"}', ""
+
+        agent = duet.Agent(name="claude-lead", backend="claude", role="planner")
+        with mock.patch.object(duet, "_run", fake_run):
+            duet.call_claude(
+                agent, "sys", "msg", _ROOT, "acceptEdits", 60, dry=False,
+            )
+
+        command = calls[-1]
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "sonnet")
+
     def test_codex_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             return 124, "", "[duet] TIMEOUT after 1s"
@@ -1234,6 +1251,17 @@ class TestParsePartner(unittest.TestCase):
         agent = duet.parse_partner("claude", default_role="planner")
         self.assertEqual(agent.role, "planner")
         self.assertEqual(agent.name, "claude-planner")
+        self.assertEqual(agent.model, "sonnet")
+
+    def test_explicit_claude_model_overrides_default(self) -> None:
+        agent = duet.Agent(
+            name="claude-planner",
+            backend="claude",
+            role="planner",
+            model="opus",
+        )
+
+        self.assertEqual(agent.model, "opus")
 
     def test_empty_backend_raises(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1280,7 +1308,7 @@ class TestBuildCfgFromCli(unittest.TestCase):
         self.assertEqual(cfg.agents[1].role, "coder")
         self.assertEqual(cfg.agents[1].model, "gpt-5")
 
-    def test_empty_cli_model_flags_normalize_to_none(self) -> None:
+    def test_empty_cli_model_flags_use_backend_defaults(self) -> None:
         parser, args = self._parse(
             "--task", "x",
             "--lead-model", "",
@@ -1289,7 +1317,7 @@ class TestBuildCfgFromCli(unittest.TestCase):
 
         cfg = duet._build_cfg_from_cli(args, parser, {})
 
-        self.assertIsNone(cfg.agents[0].model)
+        self.assertEqual(cfg.agents[0].model, "sonnet")
         self.assertIsNone(cfg.agents[1].model)
 
     def test_codex_fast_flags_are_tristate_and_mutually_exclusive(self) -> None:

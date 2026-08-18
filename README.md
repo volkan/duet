@@ -89,9 +89,10 @@ Then invoke `/duet` in the OpenCode TUI (or `opencode run --command duet "..."`
 non-interactively). Like the other plugins it shells out to the `duet` CLI, so
 install that first and make sure `command -v duet` passes in OpenCode's shell.
 The command runs on OpenCode's `build` agent; plain `/duet` runs the same
-`claude -p /review` kickoff, and `/duet 'npm test 2>&1' --turns 4` seeds from
-any command. Custom worktree overrides are constructed conditionally, matching
-the Claude and Codex entry points. Full guide:
+`claude -p /review --model sonnet` kickoff, and
+`/duet 'npm test 2>&1' --turns 4` seeds from any command. Custom worktree
+overrides are constructed conditionally, matching the Claude and Codex entry
+points. Full guide:
 [docs/OPENCODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
 (duet can also drive OpenCode as a backend — `--partner opencode:coder` — so
 OpenCode can be one of the two looped agents too.)
@@ -141,7 +142,9 @@ duet --recipe review --cwd ~/workspace/project
 ```
 
 The review recipe uses recap mode, `claude:reviewer` + `codex:coder`, six
-turns, `claude -p /review`, and strict worktree isolation. It also sets
+turns, `claude -p /review --model sonnet`, and strict worktree isolation.
+Claude agents use the stable `sonnet` alias unless an explicit slot model
+overrides it. The recipe also sets
 `--on-turn-timeout continue`, so when the coder turn times out the reviewer
 still gets the timeout block plus the worktree diff to review instead of the
 run dying reviewless. Explicit flags override recipe values.

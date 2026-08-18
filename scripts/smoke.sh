@@ -69,6 +69,9 @@ assert set(info) == {
 }, info
 assert info["schema_version"] == 1 and info["kind"] == "duet.run", info
 assert pathlib.Path(info["run_dir"]).is_absolute(), info
+state = json.loads(pathlib.Path(info["state_path"]).read_text())
+claude_agents = [agent for agent in state["agents"] if agent["backend"] == "claude"]
+assert claude_agents and all(agent["model"] == "sonnet" for agent in claude_agents), state
 result = subprocess.run(
     [duet, "--status", info["run_dir"], "--json"],
     text=True, capture_output=True,

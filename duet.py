@@ -68,6 +68,7 @@ __version__ = "0.2.9"
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
+DEFAULT_CLAUDE_MODEL = "sonnet"
 SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
 SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
@@ -384,6 +385,13 @@ class Agent:
     extra_args: list[str] = dataclasses.field(default_factory=list)
     cwd_override: Optional[pathlib.Path] = None  # set when this agent runs in a git worktree
     reasoning_effort: Optional[str] = None  # one of REASONING_LEVELS; overrides cfg.reasoning
+
+    def __post_init__(self) -> None:
+        # Pin Claude to its stable Sonnet alias instead of inheriting a
+        # machine-specific Claude CLI default. Explicit CLI/YAML/state models
+        # remain unchanged, and other backends keep their native defaults.
+        if self.backend == "claude" and not self.model:
+            self.model = DEFAULT_CLAUDE_MODEL
 
     def system_prompt(self, sentinel: str, recap: bool = False) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
@@ -4647,9 +4655,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--lead", default=None,
                     help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--lead-model", metavar="MODEL", default=None,
-                    help="model name to pass to the lead agent's backend via --model")
+                    help="lead backend model via --model; Claude defaults to 'sonnet'")
     ap.add_argument("--partner-model", metavar="MODEL", default=None,
-                    help="model name to pass to the partner agent's backend via --model")
+                    help="partner backend model via --model; Claude defaults to 'sonnet'")
     ap.add_argument("--cwd", default=None, help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=None,
                     help=f"max turns (default {DEFAULT_TURNS})")
@@ -4794,6 +4802,9 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.lead = "claude:reviewer"
     if args.partner is None:
         args.partner = "codex:coder"
+    lead_backend = (args.lead or "").partition(":")[0]
+    if lead_backend == "claude" and not args.lead_model:
+        args.lead_model = DEFAULT_CLAUDE_MODEL
     if args.turns is None:
         args.turns = 6
     if args.recap is None:
@@ -4819,9 +4830,12 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
     ))
     if not explicit_seed:
         command = "claude -p /review"
-        lead_backend = (args.lead or "").partition(":")[0]
-        if args.lead_model and lead_backend == "claude":
-            command += f" --model {shlex.quote(args.lead_model)}"
+        kickoff_model = (
+            args.lead_model
+            if lead_backend == "claude" and args.lead_model
+            else DEFAULT_CLAUDE_MODEL
+        )
+        command += f" --model {shlex.quote(kickoff_model)}"
         args.task_from_cmd = command
 
 

@@ -33,9 +33,10 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO" $ARGUMENTS
 
 The recipe owns the canonical defaults: current cwd, `.duet/runs`, recap,
 `claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
-`claude -p /review` kickoff. It hands one timed-out automatic turn to the
-partner with `--on-turn-timeout continue`. Explicit flags after
-`--recipe review` win.
+`claude -p /review --model sonnet` kickoff. Claude loop turns use the same
+stable `sonnet` alias by default. It hands one timed-out automatic turn to the
+partner with `--on-turn-timeout continue`. Explicit flags after `--recipe
+review` win.
 
 If the first quoted value in `$ARGUMENTS` is an upstream shell command, use it
 as the kickoff and forward the remaining values as duet flags:
@@ -114,6 +115,6 @@ Map friendly names in both the Duet slot and its kickoff:
 - GPT Sol → `gpt-5.6-sol`
 
 Use `--lead-model` and `--partner-model`. The `review` recipe automatically
-passes a Claude lead model to its separate `/review` kickoff. For a custom
-explicit `claude -p /review` upstream command, add the same `--model` value
-inside `--task-from-cmd` too.
+defaults Claude to `sonnet` and passes a Claude lead-model override to its
+separate `/review` kickoff. For a custom explicit `claude -p /review` upstream
+command, add the same `--model` value inside `--task-from-cmd` too.

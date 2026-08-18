@@ -164,6 +164,13 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 ## Claude-specific quirks
 
+- **Claude defaults to the stable `sonnet` alias.** `Agent.__post_init__`
+  resolves an omitted Claude model to `sonnet`, so CLI, YAML, resumed-state,
+  and direct adapter paths all pass `--model sonnet` and persist that resolved
+  value in `state.json`. Explicit `--lead-model`, `--partner-model`, or agent
+  `model:` values win unchanged. The review recipe also pins its separate
+  kickoff as `claude -p /review --model sonnet`; an explicit Claude lead model
+  replaces `sonnet` in both places.
 - **Output is JSON-wrapped.** `claude -p ... --output-format json` returns `{"result":"...","session_id":"..."}`. We always re-read `session_id` and write it back to `agent.session_id` so the next turn picks up the rotated id (Claude rotates session ids on every reply). A malformed JSON output raises `RuntimeError` with a 500-char snippet — useful when claude crashes mid-stream.
 - **`--add-dir` is required for any path outside cwd.** Without it Claude silently refuses paths outside `cwd` with a generic permission error. YAML key `add_dirs:` (list); CLI flag `--add-dir` is repeatable. Pre-supply `add_dirs: [..]` (or repeat `--add-dir`) whenever the task writes paths above `cwd`.
 - **`--effort` is the authoritative reasoning control;** the high/xhigh/max prompt prefixes are belt-and-braces.

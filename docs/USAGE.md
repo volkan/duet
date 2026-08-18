@@ -242,7 +242,7 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 It validates schema 1 in that file and polls `duet --status <run_dir> --json`;
 it does not scrape the human banner. The run-info and initial state exist before
-`claude -p /review` starts.
+`claude -p /review --model sonnet` starts.
 
 Full install checklist, custom examples, troubleshooting, and the manual skill
 fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
@@ -293,10 +293,11 @@ The filename becomes the command, so this provides `/duet` in the TUI (and
 `opencode run --command duet "<args>"` non-interactively). It runs on OpenCode's
 `build` agent and shells out to the `duet` CLI, so the binary must be on PATH
 (`make install`, `pipx install duet-cli`, etc.) and the default recipe also
-needs `claude` and `codex`. Plain `/duet` runs the same `claude -p /review`
-kickoff; pass `'<shell cmd>' <duet flags>` to seed from any other command. Note
-that duet can also run OpenCode as a *backend* (`--partner opencode:coder`), so
-OpenCode can be one of the two looped agents, not just the host.
+needs `claude` and `codex`. Plain `/duet` runs the same
+`claude -p /review --model sonnet` kickoff; pass
+`'<shell cmd>' <duet flags>` to seed from any other command. Note that duet can
+also run OpenCode as a *backend* (`--partner opencode:coder`), so OpenCode can
+be one of the two looped agents, not just the host.
 
 Across the Claude, Codex, and OpenCode entry points, custom-command worktree
 defaults are conditional. `--no-worktree`, `--worktree-path`, and
@@ -480,7 +481,7 @@ worktree gated by `verify_cmd`.
 | flag | purpose |
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
-| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` also pins the kickoff |
+| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review --model sonnet`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
@@ -489,8 +490,8 @@ worktree gated by `verify_cmd`.
 | `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
-| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared lead into the other slot, the model follows that agent |
-| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared partner into the other slot, the model follows that agent |
+| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared lead into the other slot, the model follows that agent |
+| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared partner into the other slot, the model follows that agent |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
@@ -698,7 +699,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 ## How session memory works
 
 - **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner` because the intended Codex workflow is "resume Codex with the existing plan in context, then let Claude review." If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
-- **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
+- **Claude**: each call uses `claude -p ... --model <model> --output-format json`, defaulting `<model>` to the stable `sonnet` alias and preserving an explicit slot/YAML model unchanged. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.

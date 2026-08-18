@@ -1,5 +1,5 @@
 ---
-description: Run the duet two-agent CLI harness from OpenCode. Wraps `duet --task-from-cmd <shell>` so /review, gh, npm test, cat error.log, or another upstream tool can drive a two-agent loop. With no arguments it seeds from `claude -p /review`. Use when asked to "duet on …", "run duet with …", or "have duet pick up <some output>".
+description: Run the duet two-agent CLI harness from OpenCode. Wraps `duet --task-from-cmd <shell>` so /review, gh, npm test, cat error.log, or another upstream tool can drive a two-agent loop. With no arguments it seeds from `claude -p /review --model sonnet`. Use when asked to "duet on …", "run duet with …", or "have duet pick up <some output>".
 agent: build
 ---
 
@@ -36,8 +36,9 @@ command -v codex
 
 If `claude` is missing, stop and tell the user:
 
-> The default `/duet` recipe runs `claude -p /review` first, but `claude` is
-> not on PATH. Install or authenticate Claude Code, then re-run `/duet`.
+> The default `/duet` recipe runs `claude -p /review --model sonnet` first, but
+> `claude` is not on PATH. Install or authenticate Claude Code, then re-run
+> `/duet`.
 
 If `codex` is missing, stop and tell the user:
 
@@ -94,7 +95,9 @@ After spawn, print the run dir + the `duet --status <run_dir>` hint once the
 `[duet] run: ...` or `[duet] run dir: ...` line appears.
 
 The review recipe allocates its run directory and writes initial `state.json`
-before starting `claude -p /review`, so the run is observable during kickoff.
+before starting `claude -p /review --model sonnet`, so the run is observable
+during kickoff. Claude loop turns also default to the stable `sonnet` alias;
+explicit slot models override it.
 
 Notes:
 

@@ -43,11 +43,12 @@ command directory and `/duet` is available.
    command -v codex
    ```
 
-   The default recipe runs `claude -p /review` first, then uses `codex:coder`
-   in a worktree. If you pass a custom partner or config, install whichever
-   backend that recipe needs instead. (duet can also drive OpenCode itself as a
-   backend — `--partner opencode:coder` — so OpenCode can be one of the two
-   looped agents, not just the host.)
+   The default recipe runs `claude -p /review --model sonnet` first, then uses
+   `codex:coder` in a worktree. Claude loop turns use Sonnet too. If you pass a
+   custom partner or config, install whichever backend that recipe needs
+   instead. (duet can also drive OpenCode itself as a backend — `--partner
+   opencode:coder` — so OpenCode can be one of the two looped agents, not just
+   the host.)
 
 4. Install the `/duet` command.
 

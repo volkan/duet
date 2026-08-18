@@ -35,7 +35,11 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertTrue(args.recap)
         self.assertTrue(args.worktree)
         self.assertTrue(args.require_worktree)
-        self.assertEqual(args.task_from_cmd, "claude -p /review")
+        self.assertEqual(args.lead_model, "sonnet")
+        self.assertEqual(
+            args.task_from_cmd,
+            "claude -p /review --model sonnet",
+        )
         self.assertEqual(
             pathlib.Path(args.runs_dir),
             pathlib.Path.cwd().resolve() / ".duet" / "runs",
@@ -57,6 +61,18 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertEqual(
             cfg.task_from_cmd,
             "claude -p /review --model claude-fable-5",
+        )
+
+    def test_non_claude_lead_keeps_sonnet_kickoff_default(self) -> None:
+        _, args = self._args(
+            "--recipe", "review",
+            "--lead", "gemini:reviewer",
+        )
+
+        self.assertIsNone(args.lead_model)
+        self.assertEqual(
+            args.task_from_cmd,
+            "claude -p /review --model sonnet",
         )
 
     def test_explicit_seed_suppresses_recipe_kickoff(self) -> None:
