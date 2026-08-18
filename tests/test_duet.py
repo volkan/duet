@@ -21,6 +21,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -288,6 +289,23 @@ class TestAgentFailureTranscript(unittest.TestCase):
 
 
 class TestAgentFinishReasons(unittest.TestCase):
+    def test_claude_call_uses_default_sonnet_model(self) -> None:
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return 0, '{"result":"ok","session_id":"claude-sid"}', ""
+
+        agent = duet.Agent(name="claude-lead", backend="claude", role="planner")
+        with mock.patch.object(duet, "_run", fake_run):
+            duet.call_claude(
+                agent, "sys", "msg", _ROOT, "acceptEdits", 60, dry=False,
+            )
+
+        command = calls[-1]
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "sonnet")
+
     def test_codex_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             return 124, "", "[duet] TIMEOUT after 1s"
@@ -1032,6 +1050,162 @@ class TestReasoningHelpers(unittest.TestCase):
         # backend-normalized alias for the highest Codex effort.
         self.assertEqual(duet.CODEX_REASONING_MAP["max"], "xhigh")
 
+
+class TestAgentExitError(unittest.TestCase):
+    def test_stderr_is_primary_across_all_adapter_exit_shapes(self) -> None:
+        cases = (
+            ("claude", 1, ""),
+            ("codex", 2, "\ncmd: codex exec …"),
+            ("gemini", 55, ""),
+            ("copilot", 1, ""),
+            ("opencode", 9, ""),
+        )
+        for label, rc, extra in cases:
+            with self.subTest(adapter=label):
+                msg = duet._agent_exit_error(
+                    label, rc, "ignored stdout", "real error", extra=extra
+                )
+                self.assertEqual(
+                    msg, f"{label} exited {rc}\nstderr:\nreal error{extra}"
+                )
+                self.assertNotIn("ignored stdout", msg)
+
+    def test_blank_stderr_falls_back_to_stdout_tail(self) -> None:
+        msg = duet._agent_exit_error("claude", 1, '{"error":"boom"}', "")
+        self.assertIn("stdout (tail):", msg)
+        self.assertIn('{"error":"boom"}', msg)
+
+    def test_stdout_tail_is_bounded(self) -> None:
+        msg = duet._agent_exit_error("codex", 1, "x" * 100_000, "  \n")
+        self.assertLess(
+            len(msg), duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 200
+        )
+        self.assertIn("stdout (tail):", msg)
+
+    def test_extra_suffix_survives(self) -> None:
+        msg = duet._agent_exit_error("codex", 2, "", "bad flag",
+                                     extra="\ncmd: codex exec …")
+        self.assertTrue(msg.endswith("\ncmd: codex exec …"))
+
+    def test_both_streams_blank(self) -> None:
+        msg = duet._agent_exit_error("gemini", 55, "", "")
+        self.assertEqual(msg, "gemini exited 55\nstderr:\n")
+
+
+class TestErrorSummaryBounds(unittest.TestCase):
+    def test_first_line_is_kept(self) -> None:
+        self.assertEqual(
+            duet._error_summary("first\nsecond", "fb"), "first"
+        )
+
+    def test_empty_message_uses_fallback(self) -> None:
+        self.assertEqual(duet._error_summary("", "fallback"), "fallback")
+
+    def test_single_line_monster_is_capped(self) -> None:
+        summary = duet._error_summary("y" * 400_000, "fb")
+        self.assertEqual(len(summary), duet.ERROR_SUMMARY_MAX_CHARS)
+
+    def test_stream_tail_bounds_and_labels_empty(self) -> None:
+        self.assertEqual(duet._stream_tail(""), "(empty)")
+        self.assertEqual(duet._stream_tail("  \n"), "(empty)")
+        bounded = duet._stream_tail("z" * 10_000)
+        self.assertEqual(len(bounded), duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 1)
+        self.assertTrue(bounded.startswith("…"))
+
+
+class TestWorktreeDiagnostics(unittest.TestCase):
+    def test_timeout_reports_exit_code_and_both_stream_tails(self) -> None:
+        class TimedOutProcess:
+            returncode = -15
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired("git worktree add", timeout)
+                return "stdout detail", "Preparing worktree"
+
+        proc = TimedOutProcess()
+        with tempfile.TemporaryDirectory() as raw, \
+                mock.patch.object(duet.subprocess, "Popen", return_value=proc), \
+                mock.patch.object(duet, "_register_proc"), \
+                mock.patch.object(duet, "_unregister_proc"), \
+                mock.patch.object(duet, "_signal_proc_tree"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"timed out \(rc=-15\): stderr: Preparing worktree "
+                r"\| stdout: stdout detail",
+            ):
+                duet.setup_worktree(
+                    pathlib.Path(raw), "duet/test", pathlib.Path(raw) / "wt"
+                )
+
+
+class TestTimeoutScaling(unittest.TestCase):
+    def test_no_levels_keeps_default(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([None, "medium", "low"]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+
+    def test_high_and_deeper_levels_scale(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["high"]), (1200, "high")
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["xhigh"]), (1800, "xhigh")
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["max"]), (1800, "max")
+        )
+
+    def test_highest_effective_level_wins(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["high", "max"]),
+            (1800, "max"),
+        )
+
+    def test_overrides_can_mask_a_deep_global(self) -> None:
+        # Callers pass per-agent *effective* levels: a global `max` that every
+        # agent overrides to `low` must derive the plain default, while one
+        # inheriting agent keeps the deep budget.
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["low", "low"]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout(["low", "max"]),
+            (1800, "max"),
+        )
+
+    def test_untrusted_non_string_levels_are_ignored(self) -> None:
+        self.assertEqual(
+            duet.resolve_default_per_turn_timeout([True, 1800, {"x": 1}]),
+            (duet.DEFAULT_TIMEOUT, None),
+        )
+
+    def test_yaml_without_timeout_derives_from_effective_agent_levels(self) -> None:
+        args = duet.argparse.Namespace(timeout=None, reasoning=None)
+        raw = {
+            "reasoning": "max",
+            "agents": [
+                {"reasoning_effort": "low"},
+                {"backend": "codex", "role": "coder"},
+            ],
+        }
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            timeout = duet._yaml_per_turn_timeout(raw, args)
+
+        self.assertEqual(timeout, 1800)
+        self.assertIn("reasoning max", stderr.getvalue())
+
     def test_xhigh_maps_to_xhigh_for_both_backends(self) -> None:
         self.assertEqual(duet.CLAUDE_REASONING_MAP["xhigh"], "xhigh")
         self.assertEqual(duet.CODEX_REASONING_MAP["xhigh"], "xhigh")
@@ -1077,6 +1251,17 @@ class TestParsePartner(unittest.TestCase):
         agent = duet.parse_partner("claude", default_role="planner")
         self.assertEqual(agent.role, "planner")
         self.assertEqual(agent.name, "claude-planner")
+        self.assertEqual(agent.model, "sonnet")
+
+    def test_explicit_claude_model_overrides_default(self) -> None:
+        agent = duet.Agent(
+            name="claude-planner",
+            backend="claude",
+            role="planner",
+            model="opus",
+        )
+
+        self.assertEqual(agent.model, "opus")
 
     def test_empty_backend_raises(self) -> None:
         with self.assertRaises(SystemExit):
@@ -1123,7 +1308,7 @@ class TestBuildCfgFromCli(unittest.TestCase):
         self.assertEqual(cfg.agents[1].role, "coder")
         self.assertEqual(cfg.agents[1].model, "gpt-5")
 
-    def test_empty_cli_model_flags_normalize_to_none(self) -> None:
+    def test_empty_cli_model_flags_use_backend_defaults(self) -> None:
         parser, args = self._parse(
             "--task", "x",
             "--lead-model", "",
@@ -1132,7 +1317,7 @@ class TestBuildCfgFromCli(unittest.TestCase):
 
         cfg = duet._build_cfg_from_cli(args, parser, {})
 
-        self.assertIsNone(cfg.agents[0].model)
+        self.assertEqual(cfg.agents[0].model, "sonnet")
         self.assertIsNone(cfg.agents[1].model)
 
     def test_codex_fast_flags_are_tristate_and_mutually_exclusive(self) -> None:
@@ -1639,6 +1824,12 @@ class TestContinueStateHelpers(unittest.TestCase):
 
 
 class TestStatusHelpers(unittest.TestCase):
+    def test_positive_int_or_none_is_strict(self) -> None:
+        self.assertEqual(duet._positive_int_or_none(42), 42)
+        for value in (None, "42", True, False, 0, -1, 1.0):
+            with self.subTest(value=value):
+                self.assertIsNone(duet._positive_int_or_none(value))
+
     def test_coerce_pid_accepts_positive_integers_only(self) -> None:
         self.assertEqual(duet._coerce_pid(42), 42)
         self.assertEqual(duet._coerce_pid("42"), 42)

@@ -82,9 +82,9 @@ Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
    command -v codex
    ```
 
-   Plain `/duet` runs `claude -p /review` first, then uses `codex:coder` in a
-   worktree. If you pass a custom partner or config, install whichever backend
-   that recipe needs instead.
+   Plain `/duet` runs `claude -p /review --model sonnet` first, then uses
+   `codex:coder` in a worktree. If you pass a custom partner or config, install
+   whichever backend that recipe needs instead.
 
 4. Add and install the marketplace plugin in Claude Code.
 
@@ -123,7 +123,9 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 ```
 
 The recipe supplies recap mode, `claude:reviewer`, `codex:coder`, six turns,
-strict worktree isolation, and `claude -p /review`. Explicit flags override it.
+strict worktree isolation, `claude -p /review --model sonnet`, Sonnet-defaulted
+Claude loop turns, and continuation past one non-final automatic-turn timeout.
+Explicit flags override it.
 
 Custom upstream command:
 
@@ -167,6 +169,11 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 The curated status document omits prompts, commands, credentials, and backend
 extra arguments. Its exit codes are 0 terminal, 1 running, 2 stuck/crashed,
 and 3 status error.
+
+During a live turn, `active_turn.budget_seconds` shows the saved budget and
+`active_turn.remaining_seconds` shows the zero-clamped time left. When
+`last_timeout` is non-null, report its turn and agent; it remains present when
+the review recipe lets the partner react to one non-final coder timeout.
 
 You can also list recent runs:
 
@@ -256,5 +263,8 @@ user-supplied conflicting pairs instead of rewriting them. Do not pre-add
 
 Validate schema 1 in `$DUET_RUN_INFO`, then poll the discovered run with
 `duet --status <run_dir> --json`. Do not scrape banners.
+Surface `active_turn.remaining_seconds`. When `last_timeout` is non-null,
+report its turn and agent; the field remains present when the review recipe
+continues past one non-final coder timeout.
 EOF
 ````

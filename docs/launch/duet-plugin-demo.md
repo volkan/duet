@@ -111,7 +111,8 @@ Code user can run the default review recipe with one command.
 ### Beat 4 - observable run and `/review` kickoff
 
 Plain `/duet` allocates the run, writes initial state/run-info, then starts
-`claude -p /review`. Keep the first human-facing line that looks like:
+`claude -p /review --model sonnet`. Keep the first human-facing line that looks
+like:
 
 ```text
 [duet] run: /path/to/project/.duet/runs/<run_id>

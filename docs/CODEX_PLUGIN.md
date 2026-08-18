@@ -38,9 +38,9 @@ on your PATH.
    command -v codex
    ```
 
-   The default recipe runs `claude -p /review` first, then uses `codex:coder`
-   in a worktree. If you pass a custom partner or config, install whichever
-   backend that recipe needs instead.
+   The default recipe runs `claude -p /review --model sonnet` first, then uses
+   `codex:coder` in a worktree. If you pass a custom partner or config, install
+   whichever backend that recipe needs instead.
 
 4. Add and install the plugin marketplace in Codex.
 
@@ -82,13 +82,16 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 `--recipe review` expands to the current project, `.duet/runs`, recap mode,
 `claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
-`claude -p /review` kickoff. Explicit flags override recipe values.
+`claude -p /review --model sonnet` kickoff. Claude loop turns use Sonnet too.
+It continues past one non-final automatic-turn timeout. Explicit flags
+override recipe values.
 
 ### Select models by name
 
 For the default `claude:reviewer` lead and `codex:coder` partner, named models
-map directly to `--lead-model` and `--partner-model`. The recipe automatically
-pins its separate `/review` kickoff to a Claude lead model too.
+map directly to `--lead-model` and `--partner-model`. Claude defaults to the
+stable `sonnet` alias, and the recipe automatically pins its separate
+`/review` kickoff to the same default or a Claude lead-model override.
 
 For example:
 
@@ -155,6 +158,12 @@ The status schema reports `health`, `phase`, `finished_reason`, active/last
 turns, and artifact paths without exposing prompts, commands, credentials, or
 backend extra arguments. Status exit codes are 0 terminal, 1 running, 2
 stuck/crashed, and 3 status error.
+
+For a live turn, `active_turn.budget_seconds` reports the saved budget and
+`active_turn.remaining_seconds` reports the zero-clamped time left. When
+`last_timeout` is non-null, report its turn and agent; it remains present when
+the review recipe continues after one non-final coder timeout so the partner
+can inspect its failure block and worktree handoff.
 
 You can also list recent runs:
 

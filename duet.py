@@ -59,7 +59,7 @@ import textwrap
 import threading
 import time
 import traceback
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 # ---------- defaults ----------
 
@@ -68,6 +68,7 @@ __version__ = "0.2.9"
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
+DEFAULT_CLAUDE_MODEL = "sonnet"
 SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
 SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
@@ -76,8 +77,16 @@ TASK_MAX_CHARS = 512 * 1024
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
+AGENT_ERROR_STDOUT_TAIL_CHARS = 2000
+ERROR_SUMMARY_MAX_CHARS = 400
 VERIFY_LIVE_PREFIX = "  │ [verify] "
 WORKTREE_FOR_CHOICES = {"lead", "partner"}
+ON_TURN_TIMEOUT_CHOICES = ("stop", "continue")
+# Derived default per-turn timeouts when the user gives no explicit timeout:
+# deep-reasoning turns routinely outlive the 900s default (a real xhigh codex
+# turn was killed at exactly 900s), so the *default* scales with the effective
+# reasoning level. An explicit --timeout / per_turn_timeout always wins.
+REASONING_TIMEOUT_DEFAULTS = {"high": 1200, "xhigh": 1800, "max": 1800}
 FINISHED_CONVERGED = "converged"
 FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
 FINISHED_FORCED_CONTINUATION = "forced_continuation"
@@ -119,6 +128,35 @@ class AgentRunError(RuntimeError):
     def __init__(self, finished_reason: str, message: str) -> None:
         super().__init__(message)
         self.finished_reason = finished_reason
+
+
+def _stream_tail(text: str,
+                 limit: int = AGENT_ERROR_STDOUT_TAIL_CHARS) -> str:
+    tail = (text or "").strip()
+    if len(tail) > limit:
+        tail = "…" + tail[-limit:]
+    return tail or "(empty)"
+
+
+def _agent_exit_error(label: str, rc: object, out: str, err: str,
+                      extra: str = "") -> str:
+    """Uniform nonzero-exit message for the backend adapters.
+
+    stderr is the primary evidence; when it is blank, a bounded stdout tail is
+    appended so an exit with a silent stderr (seen in the wild with
+    `claude -p --resume`) still leaves something to diagnose.
+    """
+    message = f"{label} exited {rc}\nstderr:\n{err}"
+    if not err.strip() and out.strip():
+        message += f"\nstdout (tail):\n{_stream_tail(out)}"
+    return message + extra
+
+
+def _error_summary(message: str, fallback: str) -> str:
+    """First line of an error, capped — splitlines()[0] alone is unbounded
+    when the message has no newline (a 400KB one-line error was observed)."""
+    summary = message.splitlines()[0] if message else fallback
+    return summary[:ERROR_SUMMARY_MAX_CHARS]
 
 
 class RunSetupError(RuntimeError):
@@ -297,6 +335,43 @@ def validate_reasoning(value: Optional[str], context: str) -> None:
 def effective_reasoning(agent: Agent, cfg_reasoning: Optional[str]) -> Optional[str]:
     return agent.reasoning_effort or cfg_reasoning
 
+
+def resolve_default_per_turn_timeout(
+    levels: Iterable[Optional[str]],
+) -> tuple[int, Optional[str]]:
+    """Derived default per-turn timeout for a run's effective reasoning levels.
+
+    Returns (seconds, triggering_level); triggering_level is None when nothing
+    scaled past DEFAULT_TIMEOUT. Callers apply this only when no explicit
+    timeout was given (CLI --timeout, YAML per_turn_timeout, saved state).
+    Non-string levels are ignored so untrusted state values cannot crash it.
+    """
+    best_seconds, best_level = DEFAULT_TIMEOUT, None
+    for level in levels:
+        if not isinstance(level, str):
+            continue
+        seconds = REASONING_TIMEOUT_DEFAULTS.get(level, DEFAULT_TIMEOUT)
+        if seconds > best_seconds:
+            best_seconds, best_level = seconds, level
+    return best_seconds, best_level
+
+
+def _note_scaled_timeout(level: Optional[str], seconds: int) -> None:
+    if level is None:
+        return
+    print(f"[duet] note: reasoning {level} — per-turn timeout defaulting to "
+          f"{seconds}s (pass --timeout to override)", file=sys.stderr)
+
+
+def derive_default_per_turn_timeout(
+    levels: Iterable[Optional[str]], *, notify: bool = True,
+) -> int:
+    """Resolve the reasoning-scaled default and optionally explain scaling."""
+    seconds, level = resolve_default_per_turn_timeout(levels)
+    if notify:
+        _note_scaled_timeout(level, seconds)
+    return seconds
+
 # ---------- data classes ----------
 
 @dataclasses.dataclass
@@ -310,6 +385,13 @@ class Agent:
     extra_args: list[str] = dataclasses.field(default_factory=list)
     cwd_override: Optional[pathlib.Path] = None  # set when this agent runs in a git worktree
     reasoning_effort: Optional[str] = None  # one of REASONING_LEVELS; overrides cfg.reasoning
+
+    def __post_init__(self) -> None:
+        # Pin Claude to its stable Sonnet alias instead of inheriting a
+        # machine-specific Claude CLI default. Explicit CLI/YAML/state models
+        # remain unchanged, and other backends keep their native defaults.
+        if self.backend == "claude" and not self.model:
+            self.model = DEFAULT_CLAUDE_MODEL
 
     def system_prompt(self, sentinel: str, recap: bool = False) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
@@ -357,6 +439,10 @@ class DuetConfig:
     max_turns: int = DEFAULT_TURNS
     sentinel: str = DEFAULT_SENTINEL
     per_turn_timeout: int = DEFAULT_TIMEOUT
+    on_turn_timeout: str = "stop"             # "continue" hands a timed-out loop
+                                              # turn's failure block to the partner
+                                              # instead of ending the run; a second
+                                              # consecutive timeout still stops
     runs_dir: pathlib.Path = pathlib.Path("runs")
     sandbox: str = DEFAULT_SANDBOX            # codex
     permission_mode: str = DEFAULT_PERMISSION_MODE  # claude/gemini
@@ -438,6 +524,13 @@ def validate_config(cfg: DuetConfig,
         _config_error(
             f"task_from_cmd_target must be 'task' or 'kickoff_append', got "
             f"{cfg.task_from_cmd_target!r}",
+            parser,
+        )
+    if cfg.on_turn_timeout not in ON_TURN_TIMEOUT_CHOICES:
+        choices = "|".join(ON_TURN_TIMEOUT_CHOICES)
+        _config_error(
+            f"on_turn_timeout must be one of {choices}, got "
+            f"{cfg.on_turn_timeout!r}",
             parser,
         )
 
@@ -604,19 +697,27 @@ def setup_worktree(repo_path: pathlib.Path, branch_name: str,
     _register_proc(proc)
     try:
         try:
-            _, err = proc.communicate(timeout=30)
+            out, err = proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
             _signal_proc_tree(proc, signal.SIGTERM)
             try:
-                _, err = proc.communicate(timeout=2)
+                out, err = proc.communicate(timeout=2)
             except subprocess.TimeoutExpired:
                 _signal_proc_tree(proc, signal.SIGKILL)
-                _, err = proc.communicate()
-            raise RuntimeError(f"git worktree add timed out: {err.strip()}")
+                out, err = proc.communicate()
+            raise RuntimeError(
+                f"git worktree add timed out (rc={proc.returncode}): "
+                f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+            )
     finally:
         _unregister_proc(proc)
     if proc.returncode != 0:
-        raise RuntimeError(f"git worktree add failed: {err.strip()}")
+        # Always both streams: git's stderr can hold only the "Preparing
+        # worktree…" progress line while the real failure detail is elsewhere.
+        raise RuntimeError(
+            f"git worktree add failed (rc={proc.returncode}): "
+            f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+        )
     return dest
 
 
@@ -1229,7 +1330,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"claude exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("claude", rc, out, err))
     try:
         payload = json.loads(out)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
@@ -1388,7 +1489,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
         raise AgentRunError(
             reason,
-            f"codex exited {rc}\nstderr:\n{err}\ncmd: {' '.join(cmd[:8])}…",
+            _agent_exit_error("codex", rc, out, err,
+                              extra=f"\ncmd: {' '.join(cmd[:8])}…"),
         )
     # Prefer a freshly-parsed UUID from stderr; fall back to whatever id we
     # were already carrying; finally fall back to the "codex-current"
@@ -1465,7 +1567,7 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"gemini exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("gemini", rc, out, err))
     try:
         payload = json.loads(out)
     except json.JSONDecodeError:
@@ -1596,7 +1698,7 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"copilot exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("copilot", rc, out, err))
     try:
         text, new_sid, result_exit_code = _parse_copilot_jsonl(out)
     except ValueError as e:
@@ -1743,7 +1845,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-        raise AgentRunError(reason, f"opencode exited {rc}\nstderr:\n{err}")
+        raise AgentRunError(reason, _agent_exit_error("opencode", rc, out, err))
     text, new_sid, error_message = _parse_opencode_jsonl(out)
     # `opencode run` exits 0 even when the model/tool errored; the failure is an
     # error event in the JSONL stream. Surface it as agent_error rather than
@@ -2310,6 +2412,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "sandbox": cfg.sandbox,
         "permission_mode": cfg.permission_mode,
         "per_turn_timeout": cfg.per_turn_timeout,
+        "on_turn_timeout": cfg.on_turn_timeout,
         "verify_cmd": cfg.verify_cmd,
         "last_verify": last_verify,
         "worktree": str(wt_path.resolve()) if wt_path else None,
@@ -2363,7 +2466,7 @@ def _launch_failure_state(
     wt_path: Optional[pathlib.Path] = None,
     wt_branch: Optional[str] = None,
 ) -> dict:
-    summary = message.splitlines()[0] if message else reason
+    summary = _error_summary(message, reason)
     state = _build_run_state(
         cfg,
         turns_used=0,
@@ -2417,7 +2520,7 @@ def _run_kickoff_command(
         )
     except Exception as exc:
         message = str(exc)
-        summary = message.splitlines()[0] if message else type(exc).__name__
+        summary = _error_summary(message, type(exc).__name__)
         log(
             "duet",
             "kickoff",
@@ -2475,12 +2578,35 @@ class _TurnResult:
     recap_block: Optional[str]
 
 
+def _timeout_may_continue(cfg: DuetConfig, previous_turn_timed_out: bool,
+                          turn: int) -> bool:
+    """Pre-call eligibility: may a timeout on this turn hand off to the partner?
+
+    False on a second consecutive timeout and on the final turn (no partner
+    turn left to react). Evaluated before the call so `_execute_turn` can keep
+    an eligible timeout out of the persisted finished_reason.
+    """
+    return (cfg.on_turn_timeout == "continue"
+            and not previous_turn_timed_out
+            and turn < cfg.max_turns)
+
+
+def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
+                            stop) -> bool:
+    """Post-call decision: re-checks the stop flag so a Ctrl-C that landed
+    during the call beats continuation (the pre-call flag would be stale)."""
+    return (result.failure_reason == FINISHED_TIMEOUT
+            and timeout_may_continue
+            and not stop.requested)
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
                   history: list, seen_first_turn: dict,
                   wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                   last_verify_state: Optional[dict],
+                  timeout_may_continue: bool = False,
                   log: Callable[..., None]) -> _TurnResult:
     """Run a single agent turn: invoke, verify, recap, persist transcript+state.
 
@@ -2538,7 +2664,9 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         _stop_recap_inflight(*inflight)
     if call_succeeded:
         guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn_for_agent)
-    seen_first_turn[speaker.name] = True
+        # Seen only on success: a timed-out/errored first turn must count as a
+        # first turn again on retry, so the same-cwd codex guards keep applying.
+        seen_first_turn[speaker.name] = True
     elapsed = time.time() - t0
     raw_reply = reply
     convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
@@ -2577,14 +2705,22 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                      "len_chars": len(reply), "session_id": speaker.session_id}
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = failure_message
+        # Bounded like the transcript block — a raw xhigh-codex stderr dump
+        # once ballooned state.json to 437KB. The stderr log stays complete.
+        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
         history_entry["stderr_log_path"] = str(
             run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
     if verify_state is not None:
         history_entry["verify"] = verify_state
     history.append(history_entry)
+    # A timeout the loop may continue past must not be persisted as the run's
+    # finished_reason — that would flip the phase to "finished" and make
+    # --status report a still-running run as terminal.
+    persisted_reason = failure_reason
+    if failure_reason == FINISHED_TIMEOUT and timeout_may_continue:
+        persisted_reason = None
     turn_state = _build_run_state(
-        cfg, turns_used=turn, history=history, finished_reason=failure_reason,
+        cfg, turns_used=turn, history=history, finished_reason=persisted_reason,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
     )
@@ -2704,7 +2840,7 @@ def _derive_seed_or_failure(
             "len_chars": len(reply),
             "session_id": seed_agent.session_id,
             "finished_reason": failure_reason,
-            "error": str(e),
+            "error": _bounded_agent_error_excerpt(str(e)),
             "stderr_log_path": str(
                 run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
             ),
@@ -2903,6 +3039,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
     previous_convergence_proposal = False
+    previous_turn_timed_out = False
     last_verify_state: Optional[dict] = None
 
     for turn in range(1, cfg.max_turns + 1):
@@ -2910,13 +3047,15 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = FINISHED_FORCE_STOP
             break
         speaker = cfg.agents[speaker_idx]
+        may_continue = _timeout_may_continue(cfg, previous_turn_timed_out, turn)
         result = _execute_turn(
             cfg, turn=turn, speaker=speaker, last_msg=last_msg,
             run_dir=run_dir, transcript_path=transcript_path,
             recap_path=recap_path, state_path=state_path,
             history=history, seen_first_turn=seen_first_turn,
             wt_path=wt_path, wt_branch=wt_branch,
-            last_verify_state=last_verify_state, log=log,
+            last_verify_state=last_verify_state,
+            timeout_may_continue=may_continue, log=log,
         )
         last_verify_state = result.last_verify_state
         if cfg.recap:
@@ -2925,8 +3064,19 @@ def run_duet(cfg: DuetConfig) -> dict:
             print(result.reply)
 
         if result.failure_reason is not None:
+            if _continue_after_timeout(result, may_continue, stop):
+                print(f"[duet] turn {turn:02d} ({speaker.name}) timed out after "
+                      f"{cfg.per_turn_timeout}s — handing the timeout block to "
+                      f"the partner (--on-turn-timeout continue)",
+                      file=sys.stderr)
+                last_msg = result.reply
+                previous_convergence_proposal = False
+                previous_turn_timed_out = True
+                speaker_idx = 1 - speaker_idx
+                continue
             finished_reason = result.failure_reason
             break
+        previous_turn_timed_out = False
         if result.convergence_hit and previous_convergence_proposal:
             finished_reason = FINISHED_CONVERGED
             break
@@ -3015,8 +3165,10 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         _stop_recap_inflight(*inflight)
     if call_succeeded:
         guard_cwd_keyed_resume_after_call(cfg, next_speaker, first_turn_for_agent)
+        # Seen only on success — mirrors _execute_turn so a failed forced turn
+        # keeps the agent's first-turn guards intact on the next attempt.
+        seen_first_turn[next_speaker.name] = True
     elapsed = time.time() - t0
-    seen_first_turn[next_speaker.name] = True
     raw_reply = reply
     convergence_hit = convergence_proposed(reply, cfg.sentinel)
     verify_state: Optional[dict] = None
@@ -3059,7 +3211,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
                      **({"verify": verify_state} if verify_state is not None else {})}
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = failure_message
+        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
         history_entry["stderr_log_path"] = str(
             run_dir / f"turn-{label}-{next_speaker.name}.stderr.log")
     history.append(history_entry)
@@ -3599,6 +3751,13 @@ def _coerce_pid(value: object) -> Optional[int]:
     return pid if pid > 0 else None
 
 
+def _positive_int_or_none(value: object) -> Optional[int]:
+    """Return only positive, non-bool integers from untrusted state."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 def _pid_file_snapshot(pid_file: pathlib.Path) -> Optional[tuple[Optional[int], dt.datetime]]:
     """Read a transient pid file; return None if it disappears mid-status."""
     try:
@@ -3684,8 +3843,10 @@ def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
         "exit_code": 3,
         "turns_used": None,
         "finished_reason": None,
+        "per_turn_timeout": None,
         "active_turn": None,
         "last_completed_turn": None,
+        "last_timeout": None,
         "artifacts": {
             "state": str((run_dir / "state.json").resolve()) if run_dir else None,
             "transcript": None,
@@ -3713,35 +3874,69 @@ def _absolute_status_path(run_dir: pathlib.Path, value: object) -> Optional[str]
     return str(path.resolve())
 
 
+def _status_history_turn(item: object) -> Optional[dict]:
+    """Sanitize one history entry for the public status contract."""
+    if not isinstance(item, dict):
+        return None
+    turn = item.get("turn")
+    if not isinstance(turn, int) or isinstance(turn, bool):
+        return None
+    agent = item.get("agent")
+    if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
+        agent = None
+    elapsed = item.get("elapsed_s")
+    if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
+        elapsed = None
+    output_chars = item.get("len_chars")
+    if not isinstance(output_chars, int) or isinstance(output_chars, bool):
+        output_chars = None
+    raw_finished = item.get("finished_reason")
+    if raw_finished is None:
+        finished_reason = None
+    elif isinstance(raw_finished, str) and raw_finished in FINISHED_REASONS:
+        finished_reason = raw_finished
+    else:
+        finished_reason = "unknown"
+    return {
+        "turn": turn,
+        "agent": agent,
+        "elapsed_seconds": elapsed,
+        "output_chars": output_chars,
+        "finished_reason": finished_reason,
+    }
+
+
 def _last_completed_turn(state: dict) -> Optional[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return None
+    for item in reversed(history):
+        turn = _status_history_turn(item)
+        if turn is not None:
+            return turn
+    return None
+
+
+def _last_timeout(state: dict) -> Optional[dict]:
+    """Latest sanitized timeout outcome, including one absorbed by the loop."""
     history = state.get("history")
     if not isinstance(history, list):
         return None
     for item in reversed(history):
         if not isinstance(item, dict):
             continue
-        turn = item.get("turn")
-        if not isinstance(turn, int) or isinstance(turn, bool):
+        if item.get("finished_reason") != FINISHED_TIMEOUT:
             continue
-        agent = item.get("agent")
-        if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
-            agent = None
-        elapsed = item.get("elapsed_s")
-        if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
-            elapsed = None
-        output_chars = item.get("len_chars")
-        if not isinstance(output_chars, int) or isinstance(output_chars, bool):
-            output_chars = None
-        return {
-            "turn": turn,
-            "agent": agent,
-            "elapsed_seconds": elapsed,
-            "output_chars": output_chars,
-        }
+        turn = _status_history_turn(item)
+        if turn is not None:
+            return turn
     return None
 
 
-def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
+def _active_turn_snapshot(
+    run_dir: pathlib.Path,
+    budget_seconds: Optional[int],
+) -> Optional[dict]:
     pid_files = sorted(run_dir.glob("turn-*.pid"))
     if not pid_files:
         return None
@@ -3754,12 +3949,18 @@ def _active_turn_snapshot(run_dir: pathlib.Path) -> Optional[dict]:
     label = pid_file.stem.removeprefix("turn-")
     if not re.fullmatch(r"[\w.-]{1,160}", label):
         label = "unknown"
+    elapsed_seconds = max(0, int(time.time() - started_timestamp))
     active = {
         "label": label,
         "pid": pid,
         "alive": _pid_alive(pid) if pid is not None else False,
         "started_at": _utc_rfc3339(started_timestamp),
-        "elapsed_seconds": max(0, int(time.time() - started_timestamp)),
+        "elapsed_seconds": elapsed_seconds,
+        "budget_seconds": budget_seconds,
+        "remaining_seconds": (
+            max(0, budget_seconds - elapsed_seconds)
+            if budget_seconds is not None else None
+        ),
         "stderr_updated_at": None,
         "stderr_bytes": None,
     }
@@ -3830,9 +4031,12 @@ def build_run_status(arg: str) -> dict:
     else:
         snapshot["finished_reason"] = "unknown"
     snapshot["last_completed_turn"] = _last_completed_turn(state)
+    snapshot["last_timeout"] = _last_timeout(state)
     snapshot["artifacts"] = _status_artifacts(run_dir, state)
+    per_turn_timeout = _positive_int_or_none(state.get("per_turn_timeout"))
+    snapshot["per_turn_timeout"] = per_turn_timeout
 
-    active = _active_turn_snapshot(run_dir)
+    active = _active_turn_snapshot(run_dir, per_turn_timeout)
     if active is not None:
         snapshot["active_turn"] = active
         if active["alive"]:
@@ -3903,6 +4107,8 @@ def _print_human_status(snapshot: dict, arg: str) -> None:
     turns = snapshot["turns_used"]
     print(f"  turns_used:      {turns if turns is not None else '?'}")
     print(f"  finished_reason: {snapshot['finished_reason']!r}")
+    budget = snapshot["per_turn_timeout"]
+    print(f"  turn_timeout:    {f'{budget}s' if budget is not None else '?'}")
     recap = snapshot["artifacts"]["recap"]
     if recap is not None:
         print(f"  recap:           {recap}")
@@ -3912,6 +4118,9 @@ def _print_human_status(snapshot: dict, arg: str) -> None:
         print(f"    pid:          {active['pid']}  (alive: {active['alive']})")
         print(f"    started:      {active['started_at']}  "
               f"({active['elapsed_seconds']}s ago)")
+        if active["budget_seconds"] is not None:
+            print(f"    budget:       {active['budget_seconds']}s  "
+                  f"({active['remaining_seconds']}s remaining)")
         if active["stderr_updated_at"] is not None:
             print(f"    last stderr:  {active['stderr_updated_at']} "
                   f"({active['stderr_bytes']} bytes)")
@@ -4166,6 +4375,19 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
     return "\n".join(lines)
 
 
+def _continue_default_timeout(args: argparse.Namespace, state: dict,
+                              agents: list[Agent]) -> int:
+    """Reasoning-scaled fallback for legacy states missing per_turn_timeout."""
+    restored = (args.reasoning if args.reasoning is not None
+                else state.get("reasoning"))
+    if not isinstance(restored, str):
+        restored = None
+    return derive_default_per_turn_timeout(
+        [effective_reasoning(a, restored) for a in agents],
+        notify=(args.timeout is None and state.get("per_turn_timeout") is None),
+    )
+
+
 def build_continue_config(run_arg: str,
                           args: argparse.Namespace,
                           parser: argparse.ArgumentParser,
@@ -4213,7 +4435,12 @@ def build_continue_config(run_arg: str,
                 agent.session_id = "codex-current"
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
     timeout = _state_int_or_arg(
-        args.timeout, state, "per_turn_timeout", DEFAULT_TIMEOUT,
+        args.timeout, state, "per_turn_timeout",
+        _continue_default_timeout(args, state, agents),
+        parser, "--continue",
+    )
+    on_turn_timeout = _state_str_or_arg(
+        args.on_turn_timeout, state, "on_turn_timeout", "stop",
         parser, "--continue",
     )
     user_note, task_from_cmd = _continue_note_from_args(
@@ -4269,6 +4496,7 @@ def build_continue_config(run_arg: str,
             args.codex_fast
             if args.codex_fast is not None else state.get("codex_fast", False)
         ),
+        on_turn_timeout=on_turn_timeout,
         start_speaker_idx=next_idx,
         continue_from=str(run_dir),
         run_info_file=_resolve_opt_path(args.run_info_file),
@@ -4427,9 +4655,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--lead", default=None,
                     help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner (default; ignored if --resume-claude given)")
     ap.add_argument("--lead-model", metavar="MODEL", default=None,
-                    help="model name to pass to the lead agent's backend via --model")
+                    help="lead backend model via --model; Claude defaults to 'sonnet'")
     ap.add_argument("--partner-model", metavar="MODEL", default=None,
-                    help="model name to pass to the partner agent's backend via --model")
+                    help="partner backend model via --model; Claude defaults to 'sonnet'")
     ap.add_argument("--cwd", default=None, help="working dir for both agents")
     ap.add_argument("--turns", type=int, default=None,
                     help=f"max turns (default {DEFAULT_TURNS})")
@@ -4437,7 +4665,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="convergence sentinel; requires an LGTM rationale and "
                          "back-to-back proposals from both agents")
     ap.add_argument("--timeout", type=int, default=None,
-                    help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT})")
+                    help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT}; "
+                         "without this flag the default scales with the "
+                         "effective reasoning level: high=1200, xhigh/max=1800)")
+    ap.add_argument("--on-turn-timeout", choices=list(ON_TURN_TIMEOUT_CHOICES),
+                    default=None,
+                    help="what a per-turn timeout does to the loop: 'stop' ends "
+                         "the run (default); 'continue' hands the timeout block "
+                         "to the partner and keeps looping (a second consecutive "
+                         "timeout still stops; seed extraction and forced turns "
+                         "always stop on timeout). The review recipe defaults to "
+                         "'continue'.")
     ap.add_argument("--verify-cmd", metavar="CMD", default=None,
                     help="shell command that must exit 0 before a convergence "
                          "proposal can count. Runs only for valid LGTM+rationale "
@@ -4564,6 +4802,9 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.lead = "claude:reviewer"
     if args.partner is None:
         args.partner = "codex:coder"
+    lead_backend = (args.lead or "").partition(":")[0]
+    if lead_backend == "claude" and not args.lead_model:
+        args.lead_model = DEFAULT_CLAUDE_MODEL
     if args.turns is None:
         args.turns = 6
     if args.recap is None:
@@ -4574,6 +4815,10 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.worktree = args.worktree_path is None
     if args.require_worktree is None:
         args.require_worktree = bool(args.worktree or args.worktree_path)
+    if args.on_turn_timeout is None:
+        # A review pairing should still get its review: when the coder turn
+        # times out, hand the timeout block to the reviewer instead of dying.
+        args.on_turn_timeout = "continue"
 
     explicit_seed = any((
         args.task is not None,
@@ -4585,9 +4830,12 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
     ))
     if not explicit_seed:
         command = "claude -p /review"
-        lead_backend = (args.lead or "").partition(":")[0]
-        if args.lead_model and lead_backend == "claude":
-            command += f" --model {shlex.quote(args.lead_model)}"
+        kickoff_model = (
+            args.lead_model
+            if lead_backend == "claude" and args.lead_model
+            else DEFAULT_CLAUDE_MODEL
+        )
+        command += f" --model {shlex.quote(kickoff_model)}"
         args.task_from_cmd = command
 
 
@@ -4600,18 +4848,39 @@ def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
     return None
 
 
+def _yaml_per_turn_timeout(raw: dict, args: argparse.Namespace) -> int:
+    """Effective per-turn timeout for a --config run.
+
+    The file value beats CLI --timeout (per_turn_timeout follows the file-wins
+    convention of sentinel/sandbox/permission_mode); the reasoning-scaled
+    default applies only when neither gives a value, computed over each
+    agent's *effective* level (per-agent override, else the resolved global).
+    """
+    if "per_turn_timeout" in raw:
+        return int(raw["per_turn_timeout"])
+    if args.timeout is not None:
+        return args.timeout
+    resolved_global = args.reasoning or raw.get("reasoning")
+    raw_agents = raw.get("agents", [])
+    agent_dicts = raw_agents if isinstance(raw_agents, list) else []
+    levels = [
+        (a.get("reasoning_effort") or resolved_global) if isinstance(a, dict)
+        else resolved_global
+        for a in agent_dicts
+    ] or [resolved_global]
+    return derive_default_per_turn_timeout(levels)
+
+
 def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
                          stdin_cache: dict) -> DuetConfig:
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
-    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast)
-    override or combine with file values; --resume-* still apply on top."""
+    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
+    on_turn_timeout) override or combine with file values; --resume-* still
+    apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
     cfg_cwd = pathlib.Path(raw.get("cwd", ".")).expanduser().resolve()
-    cfg_timeout = int(raw.get(
-        "per_turn_timeout",
-        args.timeout if args.timeout is not None else DEFAULT_TIMEOUT,
-    ))
+    cfg_timeout = _yaml_per_turn_timeout(raw, args)
     raw_task = raw.get("task")
     raw_kickoff = raw.get("kickoff")
     raw_task_from_cmd = raw.get("task_from_cmd")
@@ -4682,6 +4951,11 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             args.codex_fast
             if args.codex_fast is not None else raw.get("codex_fast", False)
         ),
+        on_turn_timeout=(
+            args.on_turn_timeout
+            if args.on_turn_timeout is not None
+            else raw.get("on_turn_timeout", "stop")
+        ),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
     cfg.agents = apply_resume_overrides(
@@ -4701,7 +4975,12 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     agent in the "wrong" slot still routes its session id correctly.
     """
     cfg_cwd = pathlib.Path(args.cwd or ".").expanduser().resolve()
-    timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUT
+    if args.timeout is not None:
+        timeout = args.timeout
+    else:
+        # CLI-built agents carry no per-agent reasoning override, so the run
+        # level alone is the effective level for both agents.
+        timeout = derive_default_per_turn_timeout([args.reasoning])
     task, kickoff, task_from_cmd = resolve_seed_inputs(
         task=args.task,
         kickoff=args.kickoff,
@@ -4756,6 +5035,9 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         ],
         reasoning=args.reasoning,
         codex_fast=bool(args.codex_fast),
+        on_turn_timeout=(
+            args.on_turn_timeout if args.on_turn_timeout is not None else "stop"
+        ),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
 

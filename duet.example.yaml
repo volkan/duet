@@ -4,7 +4,15 @@
 cwd: ~/code/myrepo
 max_turns: 10
 sentinel: "<<<LGTM>>>"
+# Per-turn timeout in seconds. A file value here beats CLI --timeout. When
+# neither is given, the default scales with the effective reasoning level:
+# 900 normally, 1200 at high, 1800 at xhigh/max.
 per_turn_timeout: 900
+# What a per-turn timeout does to the loop: "stop" (default) ends the run;
+# "continue" hands the timeout block (plus any worktree diff) to the partner
+# so the pair can still react. Two consecutive timeouts always stop.
+# The `--recipe review` launch path defaults this to "continue".
+# on_turn_timeout: stop
 runs_dir: runs
 sandbox: workspace-write
 permission_mode: acceptEdits
@@ -58,7 +66,7 @@ dry_run: false
 # Optional: a generic task; only used if neither agent has a session_id and
 # no kickoff is provided.
 # Use @file or @- here too, or run an upstream tool and use its stdout:
-# task_from_cmd: "claude -p /review"
+# task_from_cmd: "claude -p /review --model sonnet"
 task: |
   Refactor the auth module to use JWTs.
   Keep backward compatibility; add tests.
@@ -68,7 +76,8 @@ agents:
     backend: claude
     role: planner
     # session_id: 106c1c57-ca42-473f-b2f1-1ea764f78c46   # paste from prior `claude` session
-    # model: claude-sonnet-4-6
+    # Claude defaults to the stable `sonnet` alias; uncomment to override it.
+    # model: opus
 
   - name: codex-partner
     backend: codex

@@ -18,7 +18,8 @@ RUN_INFO_KEYS = {
 STATUS_KEYS = {
     "schema_version", "kind", "duet_version", "run_id", "run_dir",
     "health", "phase", "exit_code", "turns_used", "finished_reason",
-    "active_turn", "last_completed_turn", "artifacts", "error",
+    "per_turn_timeout", "active_turn", "last_completed_turn", "last_timeout",
+    "artifacts", "error",
 }
 ARTIFACT_KEYS = {"state", "transcript", "recap", "worktree"}
 
@@ -78,6 +79,16 @@ def check(dist_dir: pathlib.Path) -> None:
             "--run-info-file", str(info_path),
         ], root)
         launch = json.loads(info_path.read_text(encoding="utf-8"))
+        state = json.loads(
+            pathlib.Path(launch["state_path"]).read_text(encoding="utf-8")
+        )
+        claude_models = [
+            agent.get("model")
+            for agent in state.get("agents", [])
+            if agent.get("backend") == "claude"
+        ]
+        if not claude_models or any(model != "sonnet" for model in claude_models):
+            raise RuntimeError(f"installed Claude model default mismatch: {state}")
         status_result = _run([
             str(duet), "--status", launch["run_dir"], "--json",
         ], root)

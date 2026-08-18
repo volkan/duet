@@ -242,7 +242,7 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 
 It validates schema 1 in that file and polls `duet --status <run_dir> --json`;
 it does not scrape the human banner. The run-info and initial state exist before
-`claude -p /review` starts.
+`claude -p /review --model sonnet` starts.
 
 Full install checklist, custom examples, troubleshooting, and the manual skill
 fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
@@ -293,10 +293,11 @@ The filename becomes the command, so this provides `/duet` in the TUI (and
 `opencode run --command duet "<args>"` non-interactively). It runs on OpenCode's
 `build` agent and shells out to the `duet` CLI, so the binary must be on PATH
 (`make install`, `pipx install duet-cli`, etc.) and the default recipe also
-needs `claude` and `codex`. Plain `/duet` runs the same `claude -p /review`
-kickoff; pass `'<shell cmd>' <duet flags>` to seed from any other command. Note
-that duet can also run OpenCode as a *backend* (`--partner opencode:coder`), so
-OpenCode can be one of the two looped agents, not just the host.
+needs `claude` and `codex`. Plain `/duet` runs the same
+`claude -p /review --model sonnet` kickoff; pass
+`'<shell cmd>' <duet flags>` to seed from any other command. Note that duet can
+also run OpenCode as a *backend* (`--partner opencode:coder`), so OpenCode can
+be one of the two looped agents, not just the host.
 
 Across the Claude, Codex, and OpenCode entry points, custom-command worktree
 defaults are conditional. `--no-worktree`, `--worktree-path`, and
@@ -480,7 +481,7 @@ worktree gated by `verify_cmd`.
 | flag | purpose |
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
-| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, and `claude -p /review`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` also pins the kickoff |
+| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review --model sonnet`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
@@ -489,15 +490,16 @@ worktree gated by `verify_cmd`.
 | `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
-| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared lead into the other slot, the model follows that agent |
-| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; when `--resume-*` moves the declared partner into the other slot, the model follows that agent |
+| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared lead into the other slot, the model follows that agent |
+| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared partner into the other slot, the model follows that agent |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | Codex sandbox: `read-only`, `workspace-write`, `danger-full-access`. No-op for Claude, Gemini, Copilot, and OpenCode |
 | `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot and OpenCode |
-| `--timeout SEC` | per-turn timeout (default 900) |
+| `--timeout SEC` | per-turn timeout. Without this flag the default scales with the run's effective reasoning levels: 900 normally, 1200 when any agent runs at `high`, 1800 at `xhigh`/`max` (a stderr note says when scaling applied). Precedence per config path: plain CLI — `--timeout` beats the derived default; `--config` — the file's `per_turn_timeout:` beats `--timeout`, which beats the derived default (file-wins matches `sentinel`/`sandbox`/`permission_mode`); `--continue` — `--timeout` beats the saved state value, and the derived default only lands for legacy states missing the key. `--codex-fast` never affects derivation (it only lowers one role's effort; the single per-run budget must still cover the slowest agent) |
+| `--on-turn-timeout stop\|continue` | what a per-turn timeout does to the loop. `stop` (default) ends the run with `reason=timeout`. `continue` records the timeout block as that agent's reply and hands it to the partner — plus the worktree handoff/diff when the timed-out agent ran in a worktree — so the pair can still react (the review recipe defaults to `continue` so the reviewer reviews the coder's on-disk work). A second **consecutive** timeout still stops, a timeout on the final turn is terminal, and Ctrl-C beats continuation. Applies to automatic loop turns only: seed extraction and forced turns always stop on timeout. YAML key: `on_turn_timeout:` |
 | `--runs-dir DIR` | where to save transcripts; default is `runs/` from the invocation directory, or `<cwd>/.duet/runs/` for a foreign `--cwd` |
 | `--run-info-file FILE` | atomically publish schema-v1 launch JSON immediately after allocation; refuses an existing path. Contains only version/run ids, absolute run/state paths, and PID |
 | `--config PATH` | YAML/JSON config (overrides most flags) |
@@ -558,7 +560,8 @@ When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
 command, cwd, exit code, stdout, and stderr for each verification run.
 `state.json` also records the continuation-critical safety knobs
 (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`,
-`codex_fast`) plus `verify_cmd` and a capped `last_verify` summary.
+`codex_fast`, `per_turn_timeout`, `on_turn_timeout`) plus `verify_cmd` and a
+capped `last_verify` summary.
 
 ### Recap view
 
@@ -618,8 +621,8 @@ For automation, always add `--json`. Schema version 1 has these top-level keys:
 
 ```text
 schema_version, kind, duet_version, run_id, run_dir, health, phase,
-exit_code, turns_used, finished_reason, active_turn, last_completed_turn,
-artifacts, error
+exit_code, turns_used, finished_reason, per_turn_timeout, active_turn,
+last_completed_turn, last_timeout, artifacts, error
 ```
 
 `kind` is `duet.status`; paths are absolute, timestamps are UTC RFC 3339, and
@@ -630,6 +633,15 @@ prompts, kickoff/verify shell commands, credentials, agent `extra_args`, or raw
 state/history errors. Treat `schema_version`, not an exact `duet_version`, as
 the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 `error`; `artifacts` contains `state`, `transcript`, `recap`, and `worktree`.
+`per_turn_timeout` is the sanitized positive-integer budget saved for the run.
+During a live turn, `active_turn.budget_seconds` repeats that budget and
+`active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
+at zero. All three fields are `null` when saved state contains a missing or
+invalid budget; status never performs arithmetic on the raw state value.
+`last_completed_turn.finished_reason` is that turn's sanitized outcome or
+`null`. `last_timeout` uses the same sanitized turn shape and retains the most
+recent timeout even when `--on-turn-timeout continue` absorbs it and a later
+partner turn completes. Neither field exposes the saved error or raw history.
 
 The matching launch handoff is written by `--run-info-file FILE` with
 `schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
@@ -641,10 +653,12 @@ $ duet --status 20260506-194122
 [duet] /Users/.../runs/20260506-194122
   turns_used:      3
   finished_reason: None
+  turn_timeout:    1200s
   recap:           /Users/.../runs/20260506-194122/recap.md
   in-flight turn:  turn-04-claude-planner
     pid:           44967  (alive: True)
     started:       2026-05-07T06:40:43Z  (171s ago)
+    budget:        1200s  (1029s remaining)
     last stderr:   2026-05-07T06:43:32Z (15909 bytes)
 ```
 
@@ -685,7 +699,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 ## How session memory works
 
 - **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner` because the intended Codex workflow is "resume Codex with the existing plan in context, then let Claude review." If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
-- **Claude**: each call uses `claude -p --resume <session_id> --output-format json`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
+- **Claude**: each call uses `claude -p ... --model <model> --output-format json`, defaulting `<model>` to the stable `sonnet` alias and preserving an explicit slot/YAML model unchanged. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
@@ -703,7 +717,8 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
-| per-turn agent timeout | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
+| per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
+| per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
 
 `force_stop` is reserved for intentional human interruption: Ctrl-C or a
@@ -976,9 +991,9 @@ git add -p                               # selective (interactive)
 
 The shortest path is `--continue`. It reads the prior `state.json`, restores
 the same agent names/roles/session ids, restores saved run knobs such as
-`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, and
-`codex_fast`, reuses the saved worktree when present, and starts with the
-agent who should speak next:
+`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`,
+`per_turn_timeout`, and `on_turn_timeout`, reuses the saved worktree when
+present, and starts with the agent who should speak next:
 
 ```bash
 RUN=<runs_dir>/20260507-191155

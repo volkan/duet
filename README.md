@@ -89,9 +89,10 @@ Then invoke `/duet` in the OpenCode TUI (or `opencode run --command duet "..."`
 non-interactively). Like the other plugins it shells out to the `duet` CLI, so
 install that first and make sure `command -v duet` passes in OpenCode's shell.
 The command runs on OpenCode's `build` agent; plain `/duet` runs the same
-`claude -p /review` kickoff, and `/duet 'npm test 2>&1' --turns 4` seeds from
-any command. Custom worktree overrides are constructed conditionally, matching
-the Claude and Codex entry points. Full guide:
+`claude -p /review --model sonnet` kickoff, and
+`/duet 'npm test 2>&1' --turns 4` seeds from any command. Custom worktree
+overrides are constructed conditionally, matching the Claude and Codex entry
+points. Full guide:
 [docs/OPENCODE_PLUGIN.md](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
 (duet can also drive OpenCode as a backend — `--partner opencode:coder` — so
 OpenCode can be one of the two looped agents too.)
@@ -141,8 +142,12 @@ duet --recipe review --cwd ~/workspace/project
 ```
 
 The review recipe uses recap mode, `claude:reviewer` + `codex:coder`, six
-turns, `claude -p /review`, and strict worktree isolation. Explicit flags
-override recipe values.
+turns, `claude -p /review --model sonnet`, and strict worktree isolation.
+Claude agents use the stable `sonnet` alias unless an explicit slot model
+overrides it. The recipe also sets
+`--on-turn-timeout continue`, so when the coder turn times out the reviewer
+still gets the timeout block plus the worktree diff to review instead of the
+run dying reviewless. Explicit flags override recipe values.
 
 **Deterministic automation** — discover the run without parsing terminal prose,
 then poll the curated status schema:
@@ -199,7 +204,11 @@ other.
 To converge, an agent must include an `LGTM rationale:` explaining why the work
 is done, followed by the sentinel `<<<LGTM>>>` on its own line — a bare
 sentinel is ignored, and **both** agents must agree in back-to-back turns. The
-loop also stops on `--turns`, a per-turn timeout, or Ctrl-C. After a normal
+loop also stops on `--turns`, a per-turn timeout, or Ctrl-C. With
+`--on-turn-timeout continue` (the review recipe's default) a single turn
+timeout is handed to the partner instead of ending the run; two consecutive
+timeouts still stop. Without `--timeout`, the per-turn budget scales with the
+reasoning level (900s → 1800s at `xhigh`/`max`). After a normal
 stop, duet opens a `force>` prompt so you can push another round.
 
 Every run writes a directory with `transcript.md`, `state.json`, per-turn
@@ -211,6 +220,14 @@ from saved state with `duet --continue <run> --task "next thing"`.
 - **Backends:** `claude`, `codex`, `gemini`, `copilot`, `opencode`
 - **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
 - **Reasoning:** `--reasoning minimal|low|medium|high|xhigh|max`
+
+## Limits / future
+
+Timeout continuation applies only to automatic loop turns. Seed extraction
+and forced turns still stop on timeout. A final-turn timeout also stops because
+no partner turn remains, and two consecutive timeouts stop the run. Poll
+`duet --status <run-id> --json` to watch the current budget instead of assuming
+a deep-reasoning turn is stuck.
 
 ## Documentation
 

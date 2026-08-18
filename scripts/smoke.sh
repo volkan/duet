@@ -69,6 +69,9 @@ assert set(info) == {
 }, info
 assert info["schema_version"] == 1 and info["kind"] == "duet.run", info
 assert pathlib.Path(info["run_dir"]).is_absolute(), info
+state = json.loads(pathlib.Path(info["state_path"]).read_text())
+claude_agents = [agent for agent in state["agents"] if agent["backend"] == "claude"]
+assert claude_agents and all(agent["model"] == "sonnet" for agent in claude_agents), state
 result = subprocess.run(
     [duet, "--status", info["run_dir"], "--json"],
     text=True, capture_output=True,
@@ -78,6 +81,61 @@ status = json.loads(result.stdout)
 assert status["schema_version"] == 1 and status["kind"] == "duet.status", status
 assert status["health"] == "terminal" and status["phase"] == "finished", status
 assert status["exit_code"] == 0, status
+assert status["per_turn_timeout"] == 900, status
+assert status["last_timeout"] is None, status
+if status["active_turn"] is not None:
+    assert "budget_seconds" in status["active_turn"], status
+    assert "remaining_seconds" in status["active_turn"], status
+PY
+expect "live status budget JSON contract"   0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+from unittest import mock
+
+duet_path = pathlib.Path(sys.argv[1])
+tmpd = pathlib.Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+
+run = tmpd / "live-budget-status" / "20260812-120000"
+run.mkdir(parents=True)
+(run / "state.json").write_text(json.dumps({
+    "phase": "turn_running",
+    "turns_used": 0,
+    "finished_reason": None,
+    "history": [
+        {
+            "turn": 1,
+            "agent": "codex-coder",
+            "elapsed_s": 60,
+            "len_chars": 123,
+            "finished_reason": "timeout",
+            "error": "must not leak",
+        },
+        {"turn": 2, "agent": "claude-reviewer", "elapsed_s": 5, "len_chars": 42},
+    ],
+    "per_turn_timeout": 60,
+}), encoding="utf-8")
+(run / "turn-01-coder.pid").write_text("123", encoding="utf-8")
+started = m.dt.datetime.fromtimestamp(1_000)
+with mock.patch.object(m, "_pid_file_snapshot", return_value=(123, started)), \
+        mock.patch.object(m, "_pid_alive", return_value=True), \
+        mock.patch.object(m.time, "time", return_value=1_042):
+    status = m.build_run_status(str(run))
+assert status["exit_code"] == 1, status
+assert status["per_turn_timeout"] == 60, status
+assert status["active_turn"]["budget_seconds"] == 60, status
+assert status["active_turn"]["remaining_seconds"] == 18, status
+assert status["last_completed_turn"]["turn"] == 2, status
+assert status["last_completed_turn"]["finished_reason"] is None, status
+assert status["last_timeout"]["turn"] == 1, status
+assert status["last_timeout"]["finished_reason"] == "timeout", status
+assert "must not leak" not in json.dumps(status), status
 PY
 expect "_run replaces undecodable bytes"     0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
 import importlib.util
@@ -109,6 +167,30 @@ expect_stdout "copilot dry-run accepted"     0 "dry-run copilot/copilot-partner"
 expect_stdout "copilot reasoning accepted"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1 --reasoning max
 expect_stdout "opencode dry-run accepted"    0 "dry-run opencode/opencode-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1
 expect_stdout "opencode reasoning accepted"  0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1 --reasoning max
+# --on-turn-timeout is a choices flag: bad values must die in argparse (rc=2).
+expect "on-turn-timeout bad value"           2 "$DUET" --task "x" --dry-run --cwd "$TMPD" --on-turn-timeout sometimes
+# Reasoning-scaled default per-turn timeout: without --timeout, max reasoning
+# derives 1800s into state.json; an explicit --timeout beats derivation.
+SCALED_RUNS="$TMPD/scaled-timeout-runs"
+expect "reasoning-scaled timeout dry-run"    0 "$DUET" --dry-run --task "x" --cwd "$TMPD" --runs-dir "$SCALED_RUNS" --reasoning max
+SCALED_RUN=$(ls -1d "$SCALED_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$SCALED_RUN" ]]; then
+  grep -q '"per_turn_timeout": 1800' "$SCALED_RUN/state.json" \
+      || { echo "FAIL: reasoning max did not derive per_turn_timeout 1800"; FAIL=$((FAIL+1)); }
+  grep -q '"on_turn_timeout": "stop"' "$SCALED_RUN/state.json" \
+      || { echo "FAIL: on_turn_timeout default missing from state.json"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: reasoning-scaled dry-run dir not created"; FAIL=$((FAIL+1))
+fi
+EXPLICIT_TIMEOUT_RUNS="$TMPD/explicit-timeout-runs"
+expect "explicit timeout beats scaling"      0 "$DUET" --dry-run --task "x" --cwd "$TMPD" --runs-dir "$EXPLICIT_TIMEOUT_RUNS" --reasoning max --timeout 901
+EXPLICIT_TIMEOUT_RUN=$(ls -1d "$EXPLICIT_TIMEOUT_RUNS"/2*/ 2>/dev/null | head -1 || true)
+if [[ -n "$EXPLICIT_TIMEOUT_RUN" ]]; then
+  grep -q '"per_turn_timeout": 901' "$EXPLICIT_TIMEOUT_RUN/state.json" \
+      || { echo "FAIL: explicit --timeout was overridden by reasoning scaling"; FAIL=$((FAIL+1)); }
+else
+  echo "FAIL: explicit-timeout dry-run dir not created"; FAIL=$((FAIL+1))
+fi
 RECAP_RUNS="$TMPD/recap-runs"
 expect "recap dry-run flag"                  0 "$DUET" --dry-run --recap --task "x" --cwd "$TMPD" --runs-dir "$RECAP_RUNS"
 RECAP_RUN=$(ls -1d "$RECAP_RUNS"/2*/ 2>/dev/null | head -1 || true)
@@ -704,6 +786,8 @@ assert state["finished_reason"] == "agent_error", state
 last = state["history"][-1]
 assert last["finished_reason"] == "agent_error", last
 assert "codex exited 7" in last["error"], last
+assert len(last["error"]) <= m.AGENT_ERROR_TRANSCRIPT_MAX_CHARS, last
+assert "characters omitted" in last["error"], last
 log_path = pathlib.Path(last["stderr_log_path"])
 stderr_log = log_path.read_text()
 assert "fatal backend stderr head" in stderr_log, log_path
