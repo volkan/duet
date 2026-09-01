@@ -485,6 +485,8 @@ worktree gated by `verify_cmd`.
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
+| `--stop RUN_DIR_OR_ID` | request a graceful stop for one live run. The argument resolves like `--status`. Duet validates the exact supervisor PID and saved process-start identity, then signals only that PID. The active child turn can finish before the run records `force_stop` |
+| `--immediate` | with `--stop`, ask that supervisor to terminate its active child process group and record `force_stop` without waiting for the turn to finish. It does not signal another run or a broad supervisor process group |
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
 | `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
 | `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
@@ -673,6 +675,35 @@ Exit codes:
 
 The exit-1 vs exit-2 distinction relies on `state.json["duet_pid"]` plus a cmdline check (`/proc/<pid>/cmdline` on Linux, `ps -o command=` on macOS/BSD). Runs from before the `duet_pid` field shipped fall through to a conservative exit-2 with a one-line note.
 
+### `--stop RUN_DIR_OR_ID`
+
+Use `duet --stop <run>` for a graceful stop. Duet sends a dedicated signal to
+the exact supervisor PID. This has the same first-Ctrl-C behavior: the active
+turn can finish, and the run then records `finished_reason=force_stop`.
+Repeated graceful stop requests stay graceful. They do not trigger the
+double-Ctrl-C hard-exit path.
+
+Use `duet --stop <run> --immediate` when the active turn must end now. Duet
+sends `SIGTERM` to the exact supervisor PID. That supervisor terminates only
+its tracked active child process group. It then records
+`finished_reason=force_stop`.
+
+Both forms fail closed. Duet refuses an invalid PID, PID 1, a stale PID, a
+terminal run, a reused PID, a foreign process, or a run without saved
+process-start identity. A bare run ID that exists under multiple roots is also
+refused. Pass an explicit path for that case. Duet also refuses when the
+platform cannot prove the start identity. The command never uses `pkill`,
+`killall`, process-name matching, or a broad supervisor process group.
+
+Stop exit codes are `0` when the request was sent, `2` when identity or run
+state made the stop unsafe, and `3` for lookup or unreadable-state errors.
+After exit `0`, poll `duet --status <run> --json` until the run is terminal.
+There is one TTY limitation. A signal does not reliably wake the blocking
+`force>` input on all platforms. If status remains `awaiting_force`, press
+Enter in the original duet terminal or close its stdin. Duet then records
+`force_stop`. `--immediate` has the same limitation at this prompt because no
+child process is active.
+
 ### `--list [PATH]`
 
 Multi-row companion to `--status`. With no path, `--list` scans the three places duet writes runs (`./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`) and prints one row per run dir, newest first. With an explicit path, it scans only that directory.
@@ -717,6 +748,8 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
+| `duet --stop RUN` | validates and signals only that run's supervisor; finishes the current turn, then exits with `reason=force_stop` |
+| `duet --stop RUN --immediate` | validates and signals only that run's supervisor; terminates its active child process group, then exits with `reason=force_stop` |
 | per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
 | per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |

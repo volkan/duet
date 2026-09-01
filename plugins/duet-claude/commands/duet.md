@@ -105,6 +105,27 @@ turn can review its timeout block and worktree handoff.
 Do not expose `state.json` wholesale. The status document deliberately omits
 prompts, shell commands, credentials, and backend extra arguments.
 
+## Stop one run safely
+
+If the user asks to stop the discovered run, use its validated control path:
+
+```bash
+duet --stop '<run_dir>'
+```
+
+This graceful form lets the active turn finish. If the user asks to stop it
+now, use:
+
+```bash
+duet --stop '<run_dir>' --immediate
+```
+
+After either request, poll `duet --status '<run_dir>' --json` until it is
+terminal. If status remains `awaiting_force`, tell the user to press Enter in
+the original duet terminal or close its stdin. A signal does not reliably wake
+blocking TTY input on all platforms. Never use `pkill`, `killall`, process-name
+matching, or a broad process group. Never stop a different duet run.
+
 ## Models
 
 Map friendly names in both the Duet slot and its kickoff:
