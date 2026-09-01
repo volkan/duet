@@ -181,6 +181,18 @@ You can also list recent runs:
 duet --list
 ```
 
+Stop one discovered run with `duet --stop <run_dir>`. This is graceful and
+lets the active turn finish. Use `duet --stop <run_dir> --immediate` only when
+the active child must end now. Poll status until the run is terminal.
+
+If status remains `awaiting_force`, press Enter in the original duet terminal
+or close its stdin. A signal does not reliably wake blocking TTY input on all
+platforms. Duet records `force_stop` when that input returns.
+
+Do not use `pkill`, `killall`, process-name matching, or a broad process group.
+The stop interface validates the saved supervisor identity and signals only
+that run's exact supervisor PID.
+
 The default recipe uses `--worktree`, so edits land under:
 
 ```text

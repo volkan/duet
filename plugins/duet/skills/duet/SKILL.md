@@ -126,6 +126,27 @@ Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and
 backend extra arguments.
 
+## Stop one run safely
+
+If the user asks to stop the discovered run, use:
+
+```bash
+duet --stop '<run_dir>'
+```
+
+This request is graceful. The active turn can finish before Duet records
+`force_stop`. If the user asks to stop the run now, use:
+
+```bash
+duet --stop '<run_dir>' --immediate
+```
+
+After either request, poll `duet --status '<run_dir>' --json` until the run is
+terminal. If status remains `awaiting_force`, ask the user to press Enter in
+the original Duet terminal or close its stdin. Never use `pkill`, `killall`,
+process-name matching, or a broad process group. Never stop a different Duet
+run.
+
 ## Model selection
 
 Use `--lead-model` for the lead slot and `--partner-model` for the partner slot.

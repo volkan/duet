@@ -120,6 +120,8 @@ STATUS_PHASES = {
     "finished",
     "unknown",
 }
+STOP_GRACEFUL_SIGNAL = getattr(signal, "SIGUSR1", None)
+STOP_IMMEDIATE_SIGNAL = signal.SIGTERM
 
 
 class AgentRunError(RuntimeError):
@@ -618,7 +620,8 @@ class VerifyResult:
 # ---------- active child process tracking ----------
 
 _ACTIVE_PROCS: set[subprocess.Popen] = set()
-_ACTIVE_PROCS_LOCK = threading.Lock()
+# A signal handler can interrupt the main thread inside this lock and re-enter it.
+_ACTIVE_PROCS_LOCK = threading.RLock()
 
 
 def _register_proc(proc: subprocess.Popen) -> None:
@@ -2092,6 +2095,41 @@ def _install_sigint(stop: StopFlag) -> None:
     signal.signal(signal.SIGINT, handler)
 
 
+def _install_run_stop_signal(stop: StopFlag) -> None:
+    """Handle repeatable graceful stop requests without changing Ctrl-C."""
+    if STOP_GRACEFUL_SIGNAL is None:
+        return
+
+    def handler(signum, frame):
+        if not stop.requested:
+            print(
+                "\n[duet] graceful stop requested — finishing the current "
+                "turn, then stopping.",
+                file=sys.stderr,
+            )
+        stop.request("run_stop")
+
+    signal.signal(STOP_GRACEFUL_SIGNAL, handler)
+
+
+def _install_sigterm(stop: StopFlag) -> None:
+    """Make run-scoped immediate stops durable before this process exits."""
+    def handler(signum, frame):
+        if not stop.requested:
+            print(
+                "\n[duet] immediate stop requested — terminating the active "
+                "child, then stopping.",
+                file=sys.stderr,
+            )
+        stop.request("SIGTERM")
+        # Each tracked child is its own process-group leader. This preserves
+        # the existing descendant cleanup without signaling the supervisor's
+        # process group or any other duet run.
+        _terminate_active_processes(signal.SIGKILL)
+
+    signal.signal(signal.SIGTERM, handler)
+
+
 def _convergence_markers(text: str, sentinel: str) -> tuple[bool, bool]:
     """Return (sentinel_seen, rationale_seen), ignoring fenced code blocks."""
     sentinel_re = re.compile(rf"^\s*{re.escape(sentinel)}\s*$")
@@ -2424,6 +2462,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "codex_fast": cfg.codex_fast,
         "continue_from": cfg.continue_from,
         "duet_pid": os.getpid(),
+        "duet_process_start": _CURRENT_PROCESS_START_IDENTITY,
         "error": error,
     }
     if cfg.recap:
@@ -2486,6 +2525,34 @@ def _launch_failure_state(
     return state
 
 
+def _requested_stop_state(
+    cfg: DuetConfig,
+    *,
+    history: list,
+    transcript_path: pathlib.Path,
+    recap_path: pathlib.Path,
+    state_path: pathlib.Path,
+    wt_path: Optional[pathlib.Path] = None,
+    wt_branch: Optional[str] = None,
+) -> dict:
+    """Persist an intentional stop that interrupted a setup subprocess."""
+    state = _build_run_state(
+        cfg,
+        turns_used=len(history),
+        history=history,
+        finished_reason=FINISHED_FORCE_STOP,
+        transcript_path=transcript_path,
+        recap_path=recap_path,
+        wt_path=wt_path,
+        wt_branch=wt_branch,
+    )
+    _write_run_state(state_path, state)
+    print(f"[duet] done. reason=force_stop. transcript: {transcript_path}")
+    if cfg.recap:
+        print(f"[duet] recap: {recap_path}")
+    return state
+
+
 def _run_kickoff_command(
     cfg: DuetConfig,
     *,
@@ -2496,6 +2563,7 @@ def _run_kickoff_command(
     history: list,
     wt_path: Optional[pathlib.Path],
     wt_branch: Optional[str],
+    stop: StopFlag,
     log: Callable[..., None],
 ) -> Optional[dict]:
     """Execute deferred task_from_cmd; return terminal state on failure."""
@@ -2519,6 +2587,17 @@ def _run_kickoff_command(
             cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir
         )
     except Exception as exc:
+        if stop.requested and stop.reason == "SIGTERM":
+            log("duet", "stop", "[duet] immediate stop requested", kind="stop")
+            return _requested_stop_state(
+                cfg,
+                history=history,
+                transcript_path=transcript_path,
+                recap_path=recap_path,
+                state_path=state_path,
+                wt_path=wt_path,
+                wt_branch=wt_branch,
+            )
         message = str(exc)
         summary = _error_summary(message, type(exc).__name__)
         log(
@@ -2797,6 +2876,7 @@ def _derive_seed_or_failure(
     cfg: DuetConfig, *, run_dir: pathlib.Path, transcript_path: pathlib.Path,
     recap_path: pathlib.Path, state_path: pathlib.Path, history: list,
     wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
+    stop: StopFlag,
     log: Callable[..., None],
 ) -> tuple[Optional[str], Optional[dict]]:
     """Extract the opening seed message from the lead agent.
@@ -2826,6 +2906,18 @@ def _derive_seed_or_failure(
             )
         return derive_seed(cfg, run_dir=run_dir), None
     except Exception as e:
+        if stop.requested and stop.reason == "SIGTERM":
+            log("duet", "stop", "[duet] immediate stop requested", kind="stop")
+            state = _requested_stop_state(
+                cfg,
+                history=history,
+                transcript_path=transcript_path,
+                recap_path=recap_path,
+                state_path=state_path,
+                wt_path=wt_path,
+                wt_branch=wt_branch,
+            )
+            return None, state
         failure_reason = _agent_finished_reason(e)
         seed_agent = cfg.agents[0]
         reply = _agent_failure_block(
@@ -2921,6 +3013,8 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
 
     stop = StopFlag()
     _install_sigint(stop)
+    _install_run_stop_signal(stop)
+    _install_sigterm(stop)
     history: list[dict] = []
     transcript = ""
 
@@ -2963,7 +3057,7 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     failure = _run_kickoff_command(
         cfg, run_dir=run_dir, transcript_path=transcript_path,
         recap_path=recap_path, state_path=state_path, history=history,
-        wt_path=None, wt_branch=None, log=log,
+        wt_path=None, wt_branch=None, stop=stop, log=log,
     )
     if failure is not None:
         return context, failure
@@ -2978,6 +3072,16 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
             cfg, run_id, run_dir
         )
     except RunSetupError as exc:
+        if stop.requested and stop.reason == "SIGTERM":
+            log("duet", "stop", "[duet] immediate stop requested", kind="stop")
+            state = _requested_stop_state(
+                cfg,
+                history=history,
+                transcript_path=transcript_path,
+                recap_path=recap_path,
+                state_path=state_path,
+            )
+            return context, state
         state = _launch_failure_state(
             cfg, reason=FINISHED_SETUP_ERROR, message=str(exc), history=history,
             transcript_path=transcript_path, recap_path=recap_path,
@@ -3026,7 +3130,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     seed, seed_failure_state = _derive_seed_or_failure(
         cfg, run_dir=run_dir, transcript_path=transcript_path,
         recap_path=recap_path, state_path=state_path, history=history,
-        wt_path=wt_path, wt_branch=wt_branch, log=log,
+        wt_path=wt_path, wt_branch=wt_branch, stop=stop, log=log,
     )
     if seed_failure_state is not None:
         return seed_failure_state
@@ -3063,6 +3167,9 @@ def run_duet(cfg: DuetConfig) -> dict:
         else:
             print(result.reply)
 
+        if stop.requested and stop.reason == "SIGTERM":
+            finished_reason = FINISHED_FORCE_STOP
+            break
         if result.failure_reason is not None:
             if _continue_after_timeout(result, may_continue, stop):
                 print(f"[duet] turn {turn:02d} ({speaker.name}) timed out after "
@@ -3076,14 +3183,13 @@ def run_duet(cfg: DuetConfig) -> dict:
                 continue
             finished_reason = result.failure_reason
             break
+        if stop.requested:
+            finished_reason = FINISHED_FORCE_STOP
+            break
         previous_turn_timed_out = False
         if result.convergence_hit and previous_convergence_proposal:
             finished_reason = FINISHED_CONVERGED
             break
-        if stop.requested:
-            finished_reason = FINISHED_FORCE_STOP
-            break
-
         last_msg = result.reply
         previous_convergence_proposal = result.convergence_hit
         speaker_idx = 1 - speaker_idx
@@ -3095,7 +3201,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         finished_reason, forced_verify_state = ask_force(
             cfg, history, transcript_path, state_path,
             last_msg, speaker_idx, seen_first_turn,
-            finished_reason, wt_path, wt_branch
+            finished_reason, wt_path, wt_branch, stop=stop,
         )
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
@@ -3227,8 +3333,11 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               state_path: pathlib.Path, last_msg: str, speaker_idx: int,
               seen_first_turn: dict, reason: str,
               wt_path: Optional[pathlib.Path] = None,
-              wt_branch: Optional[str] = None) -> tuple[str, Optional[dict]]:
+              wt_branch: Optional[str] = None,
+              stop: Optional[StopFlag] = None) -> tuple[str, Optional[dict]]:
     """Post-loop interactive prompt: human can push another turn or accept."""
+    if stop is not None and stop.requested:
+        return FINISHED_FORCE_STOP, None
     if not sys.stdin.isatty():
         return reason, None
     last_verify_state: Optional[dict] = None
@@ -3253,7 +3362,12 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         try:
             line = input("force> ").strip()
         except EOFError:
-            return reason, last_verify_state
+            return (
+                FINISHED_FORCE_STOP if stop is not None and stop.requested else reason,
+                last_verify_state,
+            )
+        if stop is not None and stop.requested:
+            return FINISHED_FORCE_STOP, last_verify_state
         if not line:
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
@@ -3274,21 +3388,24 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             last_verify_state=last_verify_state,
         )
         last_verify_state = result.last_verify_state
+        forced_reason = result.failure_reason
+        if stop is not None and stop.requested:
+            forced_reason = FINISHED_FORCE_STOP
         # Persist each forced turn so a crash at the next force> prompt doesn't
         # lose it (the --status/--continue durability contract). finished_reason
         # stays None mid-loop (duet is alive at the prompt); run_duet writes the
         # final state with the real reason once ask_force returns.
         forced_state = _build_run_state(
             cfg, turns_used=len(history), history=history,
-            finished_reason=result.failure_reason,
+            finished_reason=forced_reason,
             transcript_path=transcript_path,
             recap_path=transcript_path.parent / "recap.md",
             last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
             phase="awaiting_force",
         )
         _write_run_state(state_path, forced_state)
-        if result.failure_reason is not None:
-            return result.failure_reason, last_verify_state
+        if forced_reason is not None:
+            return forced_reason, last_verify_state
         last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
@@ -3797,16 +3914,8 @@ def _proc_cmdline(pid: int) -> Optional[str]:
     return None
 
 
-def _is_duet_process(pid: int) -> bool:
-    """True if `pid` is alive AND looks like a duet.py process (avoids stale-PID false positives)."""
-    if not _pid_alive(pid):
-        return False
-    cmdline = _proc_cmdline(pid)
-    if cmdline is None:
-        # Sandboxed macOS callers may be allowed to probe a sibling PID with
-        # signal 0 but denied `ps`. PID 1 is never duet; for other live PIDs,
-        # liveness is the best evidence available when identity is hidden.
-        return pid != 1
+def _looks_like_duet_cmdline(cmdline: str) -> bool:
+    """Return whether a command line identifies a duet entry point."""
     try:
         argv = shlex.split(cmdline)
     except ValueError:
@@ -3822,6 +3931,90 @@ def _is_duet_process(pid: int) -> bool:
     if executable_names & {"duet", "duet.py", "duet.exe"}:
         return True
     return False
+
+
+def _proc_start_identity(pid: int) -> Optional[str]:
+    """Return the strongest stable process-start identity available."""
+    if sys.platform.startswith("linux"):
+        try:
+            stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            # The command name is parenthesized and can contain spaces. Fields
+            # after its final ')' start at procfs field 3; starttime is field 22.
+            fields = stat[stat.rfind(")") + 2:].split()
+            return f"linux-proc-start:{fields[19]}"
+        except (OSError, IndexError):
+            return None
+    if sys.platform == "darwin":
+        try:
+            import ctypes
+
+            class ProcBsdInfo(ctypes.Structure):
+                _fields_ = [
+                    ("flags", ctypes.c_uint32),
+                    ("status", ctypes.c_uint32),
+                    ("xstatus", ctypes.c_uint32),
+                    ("pid", ctypes.c_uint32),
+                    ("ppid", ctypes.c_uint32),
+                    ("uid", ctypes.c_uint32),
+                    ("gid", ctypes.c_uint32),
+                    ("ruid", ctypes.c_uint32),
+                    ("rgid", ctypes.c_uint32),
+                    ("svuid", ctypes.c_uint32),
+                    ("svgid", ctypes.c_uint32),
+                    ("rfu", ctypes.c_uint32),
+                    ("comm", ctypes.c_char * 16),
+                    ("name", ctypes.c_char * 32),
+                    ("nfiles", ctypes.c_uint32),
+                    ("pgid", ctypes.c_uint32),
+                    ("pjobc", ctypes.c_uint32),
+                    ("e_tdev", ctypes.c_uint32),
+                    ("e_tpgid", ctypes.c_uint32),
+                    ("nice", ctypes.c_int32),
+                    ("start_sec", ctypes.c_uint64),
+                    ("start_usec", ctypes.c_uint64),
+                ]
+
+            info = ProcBsdInfo()
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            size = ctypes.sizeof(info)
+            read = libproc.proc_pidinfo(
+                pid, 3, 0, ctypes.byref(info), size  # PROC_PIDTBSDINFO
+            )
+            if read == size and info.pid == pid and info.start_sec:
+                return f"darwin-proc-start:{info.start_sec}:{info.start_usec}"
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2,
+        )
+        started = " ".join(result.stdout.split())
+        if result.returncode == 0 and started:
+            return f"ps-lstart:{started}"
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
+_CURRENT_PROCESS_START_IDENTITY = _proc_start_identity(os.getpid())
+
+
+def _is_duet_process(pid: int) -> bool:
+    """True if `pid` is alive AND looks like a duet.py process."""
+    if not _pid_alive(pid):
+        return False
+    cmdline = _proc_cmdline(pid)
+    if cmdline is None:
+        # Status is observational. A sandbox can hide identity inspection, so
+        # retain its prior liveness fallback. Mutating stop operations use the
+        # stricter proof in `_validated_stop_target` instead.
+        return pid != 1
+    return _looks_like_duet_cmdline(cmdline)
 
 
 def _utc_rfc3339(value: float) -> str:
@@ -4243,6 +4436,141 @@ def _resolve_run_dir(arg: str, *, warn_ambiguous: bool = True) -> Optional[pathl
     return None
 
 
+def _bare_stop_run_candidates(arg: str) -> list[pathlib.Path]:
+    """Return distinct directories addressed by one bare run id."""
+    if "/" in arg or "\\" in arg or not _RUN_ID_RE.match(arg):
+        return []
+    candidates = [pathlib.Path(arg), *(
+        root / arg for root in _default_list_paths()
+    )]
+    unique: list[pathlib.Path] = []
+    seen: set[pathlib.Path] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+class StopTargetError(RuntimeError):
+    """A run cannot be safely resolved or proven before signaling."""
+
+    def __init__(self, message: str, exit_code: int) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+
+
+def _read_stop_state(run_dir: pathlib.Path) -> dict:
+    state_path = run_dir / "state.json"
+    if not state_path.is_file():
+        raise StopTargetError(f"missing state.json in {run_dir}", 3)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise StopTargetError(
+            f"cannot read state.json in {run_dir}: {type(exc).__name__}", 3
+        ) from exc
+    if not isinstance(state, dict):
+        raise StopTargetError(f"state.json root is not an object in {run_dir}", 3)
+    return state
+
+
+def _validated_stop_target(arg: str) -> tuple[pathlib.Path, int]:
+    """Resolve a run and prove its exact live supervisor identity.
+
+    Unlike status, this mutating path never falls back from hidden process
+    identity to liveness alone. It also binds the PID to the process-start
+    identity saved by that supervisor, which detects PID reuse.
+    """
+    bare_candidates = _bare_stop_run_candidates(arg)
+    if len(bare_candidates) > 1:
+        raise StopTargetError(
+            f"run id {arg!r} is ambiguous across multiple roots; "
+            "pass an explicit run directory path",
+            2,
+        )
+    run_dir = bare_candidates[0] if bare_candidates else _resolve_run_dir(arg)
+    if run_dir is None:
+        raise StopTargetError(f"run directory not found: {arg}", 3)
+    state = _read_stop_state(run_dir)
+    if state.get("finished_reason") is not None or state.get("phase") == "finished":
+        raise StopTargetError(f"run is already terminal: {run_dir}", 2)
+
+    pid = _coerce_pid(state.get("duet_pid"))
+    if pid is None:
+        raise StopTargetError(f"run has an invalid duet_pid: {run_dir}", 2)
+    if pid == 1:
+        raise StopTargetError("refusing to signal PID 1", 2)
+    if not _pid_alive(pid):
+        raise StopTargetError(f"duet supervisor PID {pid} is stale", 2)
+
+    saved_start = state.get("duet_process_start")
+    if not isinstance(saved_start, str) or not saved_start:
+        raise StopTargetError(
+            "run lacks a saved supervisor start identity; refusing unsafe stop", 2
+        )
+    live_start = _proc_start_identity(pid)
+    if live_start is None:
+        raise StopTargetError(
+            f"cannot prove the start identity of duet supervisor PID {pid}", 2
+        )
+    if live_start != saved_start:
+        raise StopTargetError(
+            f"duet supervisor PID {pid} was reused; refusing to signal it", 2
+        )
+    cmdline = _proc_cmdline(pid)
+    if cmdline is not None and not _looks_like_duet_cmdline(cmdline):
+        raise StopTargetError(
+            f"PID {pid} belongs to a foreign process; refusing to signal it", 2
+        )
+    return run_dir, pid
+
+
+def request_run_stop(arg: str, *, immediate: bool = False) -> int:
+    """Signal one validated supervisor. Return 0=sent, 2=unsafe, 3=error."""
+    try:
+        run_dir, pid = _validated_stop_target(arg)
+        # Re-read all identity evidence immediately before the signal. This
+        # narrows the unavoidable check/signal race and catches state changes.
+        checked_dir, checked_pid = _validated_stop_target(str(run_dir))
+        if checked_dir != run_dir or checked_pid != pid:
+            raise StopTargetError("run supervisor identity changed during stop", 2)
+        if not immediate and STOP_GRACEFUL_SIGNAL is None:
+            raise StopTargetError(
+                "this platform has no run-scoped graceful stop signal", 2
+            )
+        stop_signal = (
+            STOP_IMMEDIATE_SIGNAL if immediate else STOP_GRACEFUL_SIGNAL
+        )
+        os.kill(pid, stop_signal)
+    except StopTargetError as exc:
+        print(f"[duet] stop refused: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except ProcessLookupError:
+        print(
+            f"[duet] stop refused: duet supervisor PID {pid} became stale",
+            file=sys.stderr,
+        )
+        return 2
+    except PermissionError:
+        print(
+            f"[duet] stop refused: permission denied for duet supervisor PID {pid}",
+            file=sys.stderr,
+        )
+        return 2
+
+    mode = "immediate" if immediate else "graceful"
+    print(f"[duet] {mode} stop requested for {run_dir} (supervisor PID {pid})")
+    return 0
+
+
 def _load_run_state(run_dir: pathlib.Path,
                     parser: argparse.ArgumentParser,
                     option_name: str) -> dict:
@@ -4627,6 +4955,26 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
     return 0
 
 
+def _add_control_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--continue", metavar="RUN_DIR_OR_ID", dest="continue_run",
+        help="start a new run from an existing run's state.json: restore "
+             "agents/session ids, reuse its worktree when available, and send "
+             "the next agent a continuation kickoff. Seed flags can add guidance.",
+    )
+    parser.add_argument(
+        "--stop", metavar="RUN_DIR_OR_ID", default=None,
+        help="request a graceful stop for one live run. Resolves like --status, "
+             "proves the exact supervisor PID and process-start identity, then "
+             "signals only that PID. The current child turn can finish.",
+    )
+    parser.add_argument(
+        "--immediate", action="store_true",
+        help="with --stop, terminate that run's active child process group and "
+             "finish the run with reason=force_stop",
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
@@ -4639,11 +4987,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "its latest message and feed it to the partner agent.")
     ap.add_argument("--resume-codex", metavar="SESSION_ID",
                     help="(advanced) seed codex with an existing session id.")
-    ap.add_argument("--continue", metavar="RUN_DIR_OR_ID", dest="continue_run",
-                    help="start a new run from an existing run's state.json: "
-                         "restore agents/session ids, reuse its worktree when "
-                         "available, and send the next agent a continuation kickoff. "
-                         "--task/--kickoff/--task-from-cmd may add optional guidance.")
+    _add_control_arguments(ap)
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
     ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
@@ -5153,6 +5497,15 @@ def _warn_missing_backends(cfg: DuetConfig) -> None:
 def main() -> int:
     ap = _build_arg_parser()
     args = ap.parse_args()
+
+    if args.immediate and args.stop is None:
+        ap.error("--immediate is only valid with --stop")
+    if args.stop is not None:
+        if args.status or args.list_runs is not None or args.continue_run:
+            ap.error("--stop cannot be combined with --status, --list, or --continue")
+        if args.json_output:
+            ap.error("--json is only valid with --status")
+        return request_run_stop(args.stop, immediate=args.immediate)
 
     # `--status` is read-only: print run health and exit. Skip everything below.
     if args.status:

@@ -214,8 +214,18 @@ stop, duet opens a `force>` prompt so you can push another round.
 Every run writes a directory with `transcript.md`, `state.json`, per-turn
 stderr logs, and the `wt/` worktree when `--worktree` is on. Inspect a run with
 `duet --status <run-id> --json` (or omit `--json` for the human view), list runs
-with `duet --list`, and start a fresh run
+with `duet --list`, stop one exact live run with `duet --stop <run-id>`, and
+start a fresh run
 from saved state with `duet --continue <run> --task "next thing"`.
+
+`--stop` is graceful. It lets the current agent turn finish before duet records
+`force_stop`. Use `--stop <run-id> --immediate` to terminate that run's active
+child and record `force_stop` now. Both forms validate the saved supervisor PID
+and process-start identity. They never use a process-name match or signal a
+different duet run.
+
+If status remains `awaiting_force`, press Enter in the original terminal.
+Some platforms do not wake the blocking `force>` input after an external signal.
 
 - **Backends:** `claude`, `codex`, `gemini`, `copilot`, `opencode`
 - **Roles:** `planner`, `coder`, `reviewer`, `triage-reviewer`, or a custom one
@@ -233,7 +243,7 @@ a deep-reasoning turn is stuck.
 
 [docs/USAGE.md](https://github.com/volkan/duet/blob/main/docs/USAGE.md) is the
 full reference: every flag, reasoning levels, session memory, output layout,
-`--status` / `--continue`, the force prompt, Codex sandbox and network rules,
+`--status` / `--stop` / `--continue`, the force prompt, Codex sandbox and network rules,
 and worktree mode.
 
 ## Contributing

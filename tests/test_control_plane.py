@@ -224,6 +224,39 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()):
                 duet._setup_run_worktree(cfg, "run", root)
 
+    def test_immediate_stop_during_worktree_setup_is_force_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            info = root / "run.json"
+            cfg = self._cfg(root, info, task="x", worktree=True)
+            installed: dict[str, duet.StopFlag] = {}
+
+            def capture_stop(stop: duet.StopFlag) -> None:
+                installed["stop"] = stop
+
+            def interrupted_setup(*_args):
+                installed["stop"].request("SIGTERM")
+                raise duet.RunSetupError("interrupted setup")
+
+            with mock.patch.object(duet, "_install_sigint"), \
+                    mock.patch.object(
+                        duet, "_install_sigterm", side_effect=capture_stop
+                    ), \
+                    mock.patch.object(
+                        duet, "_setup_run_worktree", side_effect=interrupted_setup
+                    ), \
+                    mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+
+            self.assertEqual(state["phase"], "finished")
+            self.assertEqual(state["finished_reason"], "force_stop")
+            saved = json.loads(
+                pathlib.Path(json.loads(info.read_text())["state_path"]).read_text()
+            )
+            self.assertEqual(saved["finished_reason"], "force_stop")
+
     def test_kickoff_failure_is_terminal_but_status_stays_secret_minimized(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw).resolve()
@@ -459,6 +492,169 @@ class TestStatusSchema(unittest.TestCase):
             self.assertIn("JSONDecodeError", snapshot["error"])
 
 
+class TestRunScopedStopValidation(unittest.TestCase):
+    def _run(self, root: pathlib.Path, **overrides) -> pathlib.Path:
+        run = root / "20260719-120000"
+        run.mkdir()
+        state = {
+            "phase": "turn_running",
+            "finished_reason": None,
+            "duet_pid": 123,
+            "duet_process_start": "start-123",
+        }
+        state.update(overrides)
+        (run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        return run
+
+    def test_invalid_pid_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw), duet_pid="invalid")
+            with mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_ambiguous_bare_run_id_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            run_id = "20260719-120000"
+            roots = [root / "one", root / "two"]
+            for candidate_root in roots:
+                (candidate_root / run_id).mkdir(parents=True)
+            with mock.patch.object(
+                    duet, "_default_list_paths", return_value=roots), \
+                    mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(duet.request_run_stop(run_id), 2)
+            self.assertIn("ambiguous", stderr.getvalue())
+            self.assertIn("explicit run directory path", stderr.getvalue())
+            kill.assert_not_called()
+
+    def test_stale_pid_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw))
+            with mock.patch.object(duet, "_pid_alive", return_value=False), \
+                    mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_terminal_run_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(
+                pathlib.Path(raw), phase="finished", finished_reason="max_turns"
+            )
+            with mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_pid_one_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw), duet_pid=1)
+            with mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_reused_pid_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw))
+            with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                    mock.patch.object(
+                        duet, "_proc_start_identity", return_value="new-start"
+                    ), \
+                    mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_foreign_process_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw))
+            with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                    mock.patch.object(
+                        duet, "_proc_start_identity", return_value="start-123"
+                    ), \
+                    mock.patch.object(
+                        duet, "_proc_cmdline", return_value="python worker.py"
+                    ), \
+                    mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_missing_start_identity_is_refused_without_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._run(pathlib.Path(raw), duet_process_start=None)
+            with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                    mock.patch.object(duet.os, "kill") as kill, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(duet.request_run_stop(str(run)), 2)
+            kill.assert_not_called()
+
+    def test_graceful_and_immediate_signal_only_exact_supervisor_pid(self) -> None:
+        for immediate, expected_signal in (
+                (False, duet.STOP_GRACEFUL_SIGNAL),
+                (True, duet.signal.SIGTERM)):
+            with self.subTest(immediate=immediate), \
+                    tempfile.TemporaryDirectory() as raw:
+                run = self._run(pathlib.Path(raw))
+                with mock.patch.object(duet, "_pid_alive", return_value=True), \
+                        mock.patch.object(
+                            duet, "_proc_start_identity", return_value="start-123"
+                        ), \
+                        mock.patch.object(duet, "_proc_cmdline", return_value=None), \
+                        mock.patch.object(duet.os, "kill") as kill, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        duet.request_run_stop(str(run), immediate=immediate), 0
+                    )
+                kill.assert_called_once_with(123, expected_signal)
+
+    def test_repeated_run_stop_signal_does_not_hard_exit(self) -> None:
+        if duet.STOP_GRACEFUL_SIGNAL is None:
+            self.skipTest("platform has no run-scoped graceful stop signal")
+        stop = duet.StopFlag()
+        with mock.patch.object(duet.signal, "signal") as install, \
+                mock.patch.object(duet.os, "_exit") as hard_exit, \
+                contextlib.redirect_stderr(io.StringIO()):
+            duet._install_run_stop_signal(stop)
+            handler = install.call_args.args[1]
+            handler(duet.STOP_GRACEFUL_SIGNAL, None)
+            handler(duet.STOP_GRACEFUL_SIGNAL, None)
+        self.assertTrue(stop.requested)
+        self.assertEqual(stop.reason, "run_stop")
+        hard_exit.assert_not_called()
+
+    def test_force_prompt_records_stop_after_tty_input_unblocks(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            cfg = duet.DuetConfig(cwd=root, agents=_agents(), task="x")
+            stop = duet.StopFlag()
+
+            def unblock_prompt(_prompt: str) -> str:
+                stop.request("SIGTERM")
+                return ""
+
+            with mock.patch.object(duet.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=unblock_prompt), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                reason, _ = duet.ask_force(
+                    cfg,
+                    [],
+                    root / "transcript.md",
+                    root / "state.json",
+                    "last message",
+                    1,
+                    {agent.name: False for agent in cfg.agents},
+                    "max_turns",
+                    stop=stop,
+                )
+
+            self.assertEqual(reason, "force_stop")
+
+
 class TestContinueWorktreeOverrides(unittest.TestCase):
     def _write_prior_run(
         self,
@@ -619,7 +815,7 @@ class TestTimeoutContinueLoop(unittest.TestCase):
 
         def skip_force(_cfg, _history, _transcript_path, _state_path,
                        _last_msg, _speaker_idx, _seen_first_turn, reason,
-                       _wt_path=None, _wt_branch=None):
+                       _wt_path=None, _wt_branch=None, **_kwargs):
             return reason, None
 
         err = io.StringIO()
