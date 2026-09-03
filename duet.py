@@ -274,16 +274,17 @@ CLAUDE_REASONING_MAP = {
 }
 
 # Codex CLI takes a config override `-c model_reasoning_effort=<value>`.
-# Its accepted values, lowest→highest, are: minimal, low, medium, high, xhigh.
-# We also map duet's `max` alias to Codex's `xhigh` because Codex does not
-# document a separate `max` effort value.
+# Pass every duet level through unchanged. Codex support is model-specific, so
+# its model resolver must reject an unsupported value instead of duet silently
+# changing the requested effort. Always emit an explicit requested value: a
+# model's native default is not necessarily `medium`.
 CODEX_REASONING_MAP = {
     "minimal": "minimal",
     "low":     "low",
     "medium":  "medium",
     "high":    "high",
     "xhigh":   "xhigh",
-    "max":     "xhigh",
+    "max":     "max",
 }
 
 # Gemini CLI does not expose a documented reasoning-effort flag. Keep the duet
@@ -1424,10 +1425,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     reasoning_args: list[str] = []
     if effective:
         codex_value = backend_adapter("codex").reasoning_map.get(effective, effective)
-        # `medium` is Codex's default; only override when we actually want a
-        # different effort level.
-        if codex_value != "medium":
-            reasoning_args = ["-c", f"model_reasoning_effort={codex_value}"]
+        reasoning_args = ["-c", f"model_reasoning_effort={codex_value}"]
     if fast:
         # Concise reasoning summaries cut output volume and time-to-first-token
         # on Codex turns. Pairs with low effort above; together they're the
@@ -5074,8 +5072,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "`add_dirs:` (list).")
     ap.add_argument("--reasoning", choices=REASONING_LEVELS, default=None,
                     help="reasoning effort for both agents. Codex: passes "
-                         "`-c model_reasoning_effort=<v>` except for medium "
-                         "(max → xhigh). Claude: passes `--effort <v>` "
+                         "`-c model_reasoning_effort=<v>` unchanged. Claude: "
+                         "passes `--effort <v>` "
                          "(minimal → low) and adds high/xhigh/max prompt nudges. "
                          "Copilot: passes `--effort <v>` (minimal → none). "
                          "Gemini: no effort flag; high/xhigh/max are prompt nudges only.")

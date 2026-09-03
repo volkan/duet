@@ -21,7 +21,8 @@ dry_run: false
 
 # Optional reasoning effort for both agents:
 # minimal | low | medium | high | xhigh | max
-# Codex: max maps to xhigh. Claude: minimal maps to low.
+# Codex: every explicit level passes through unchanged; model support varies.
+# Claude: minimal maps to low.
 # Copilot: minimal maps to none.
 # Gemini: no effort flag; high/xhigh/max are prompt nudges only.
 # reasoning: high

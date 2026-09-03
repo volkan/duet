@@ -1045,10 +1045,13 @@ class TestReasoningHelpers(unittest.TestCase):
                 self.assertIn(level, duet.COPILOT_REASONING_PROMPT_PREFIX)
                 self.assertIn(level, duet.OPENCODE_REASONING_PROMPT_PREFIX)
 
-    def test_codex_max_maps_to_xhigh(self) -> None:
-        # Codex documents `xhigh` but not `max`; duet keeps `max` as a
-        # backend-normalized alias for the highest Codex effort.
-        self.assertEqual(duet.CODEX_REASONING_MAP["max"], "xhigh")
+    def test_codex_reasoning_levels_pass_through_exactly(self) -> None:
+        # Model support varies. Duet must not silently change the requested
+        # value before Codex validates it for the selected model.
+        self.assertEqual(
+            duet.CODEX_REASONING_MAP,
+            {level: level for level in duet.REASONING_LEVELS},
+        )
 
 
 class TestAgentExitError(unittest.TestCase):
