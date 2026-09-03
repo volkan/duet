@@ -171,6 +171,18 @@ You can also list recent runs:
 duet --list
 ```
 
+Stop one discovered run with:
+
+```bash
+duet --stop /path/to/project/.duet/runs/<run_id>
+```
+
+This request lets the active turn finish. Add `--immediate` when the run must
+stop now. The skill then polls status until the run is terminal. It never uses
+`pkill`, `killall`, process-name matching, or a broad process group. If status
+remains `awaiting_force`, press Enter in the original Duet terminal or close
+its stdin.
+
 The default recipe uses `--worktree`, so edits land under:
 
 ```text

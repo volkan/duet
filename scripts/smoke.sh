@@ -1725,10 +1725,15 @@ expect "list failure labels distinct"        0 bash -c '
 
 # Bogus id → exit 3 with helpful "use --list" error.
 expect "status nonexistent id -> exit 3"  3 bash -c "cd '$TMPD' && '$DUET_ABS' --status '99999999-999999'"
+expect "stop nonexistent id -> exit 3"    3 bash -c "cd '$TMPD' && '$DUET_ABS' --stop '99999999-999999'"
+expect "immediate requires stop"          2 "$DUET" --immediate
+expect "stop terminal run -> exit 2"      2 "$DUET" --stop "$FINISHED_SYNTH/20260507-100003"
 
 # state.json should record duet_pid for liveness checks during the run.
 [[ -n "$RUN" ]] && grep -q '"duet_pid"' "$RUN/state.json" \
     || { echo "FAIL: duet_pid missing from dry-run state.json"; FAIL=$((FAIL+1)); }
+[[ -n "$RUN" ]] && grep -q '"duet_process_start"' "$RUN/state.json" \
+    || { echo "FAIL: duet_process_start missing from dry-run state.json"; FAIL=$((FAIL+1)); }
 
 # Synthetic mid-run state.json with a stale (or unrelated) duet_pid → exit 2.
 # We use PID 1 (init) which is alive but whose cmdline does not contain

@@ -89,6 +89,8 @@ def check(dist_dir: pathlib.Path) -> None:
         ]
         if not claude_models or any(model != "sonnet" for model in claude_models):
             raise RuntimeError(f"installed Claude model default mismatch: {state}")
+        if not isinstance(state.get("duet_process_start"), str):
+            raise RuntimeError(f"installed supervisor identity missing: {state}")
         status_result = _run([
             str(duet), "--status", launch["run_dir"], "--json",
         ], root)
