@@ -2,7 +2,7 @@
 """Verify duet's reasoning-effort translation layer end-to-end.
 
 Six duet-abstraction levels (`minimal`, `low`, `medium`, `high`, `xhigh`,
-`max`) map to backend-specific cmd-line flags / values via four constants in
+`max`) map to backend-specific cmd-line flags / values via constants in
 `duet.py`:
 `REASONING_LEVELS`, backend reasoning maps, and backend prompt-prefix maps.
 Drift between any of them is a P0 because the user-facing flag values silently
@@ -11,8 +11,8 @@ lie about which effort is in use.
 This script monkey-patches `_run` so no agent is actually invoked, walks every
 level, and asserts:
   - claude is invoked with `--effort <mapped>` for that level
-  - codex is invoked with `-c model_reasoning_effort=<mapped>` (or no `-c`
-    flag at all for `medium`, which is Codex's default)
+  - codex is invoked with `-c model_reasoning_effort=<level>` for every
+    explicitly requested level
   - copilot is invoked with `--effort <mapped>`
   - opencode is invoked with `--variant <level>` (identity map: OpenCode
     tolerates/ignores unknown variants, so duet passes the level through)
@@ -24,8 +24,8 @@ level, and asserts:
 
 Exits 0 on full match, 1 on any row mismatch (with the offending rows
 flagged in the printed table). CLAUDE.md's reasoning-translation invariant
-points here as the canonical regression check; rerun after touching any of
-the four constants.
+points here as the canonical regression check; rerun after touching these
+constants.
 
 Was previously an inline Python one-liner inside `examples/self-review.yaml`;
 promoted to a standalone script when that example was deleted.
@@ -44,10 +44,10 @@ import sys
 EXPECTED = {
     "minimal": {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=minimal", "copilot_effort": "none",   "opencode_variant": "minimal", "gemini_arg": "(none)"},
     "low":     {"prefix_marker": "sys",        "effort": "low",    "codex_arg": "model_reasoning_effort=low",     "copilot_effort": "low",    "opencode_variant": "low",     "gemini_arg": "(none)"},
-    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "(none)",                         "copilot_effort": "medium", "opencode_variant": "medium",  "gemini_arg": "(none)"},
+    "medium":  {"prefix_marker": "sys",        "effort": "medium", "codex_arg": "model_reasoning_effort=medium",  "copilot_effort": "medium", "opencode_variant": "medium",  "gemini_arg": "(none)"},
     "high":    {"prefix_marker": "think hard", "effort": "high",   "codex_arg": "model_reasoning_effort=high",    "copilot_effort": "high",   "opencode_variant": "high",    "gemini_arg": "(none)"},
     "xhigh":   {"prefix_marker": "think very", "effort": "xhigh",  "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "xhigh",  "opencode_variant": "xhigh",   "gemini_arg": "(none)"},
-    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=xhigh",   "copilot_effort": "max",    "opencode_variant": "max",     "gemini_arg": "(none)"},
+    "max":     {"prefix_marker": "ultrathink", "effort": "max",    "codex_arg": "model_reasoning_effort=max",     "copilot_effort": "max",    "opencode_variant": "max",     "gemini_arg": "(none)"},
 }
 
 
