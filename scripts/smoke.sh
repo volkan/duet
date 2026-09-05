@@ -1806,5 +1806,104 @@ cat > "$SYNTH_OLD/state.json" <<JSON
 JSON
 expect "no duet_pid (old run) -> exit 2"      2 "$DUET" --status "$SYNTH_OLD"
 
+# Central stats exercise the actual CLI and survive deletion of raw artifacts.
+expect "central metrics CLI durability" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+duet, raw = sys.argv[1:]
+root = pathlib.Path(raw)
+env = dict(os.environ, DUET_METRICS="1")
+def command(*args):
+    result = subprocess.run([duet, *args], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    return result.stdout
+def stats(*args):
+    return json.loads(command("--stats", "--json", *args))
+before = stats()
+run_root = root / "metrics-smoke"
+command("--task", "private-metrics-task", "--dry-run", "--recap", "--cwd", raw,
+        "--runs-dir", str(run_root))
+source_run = next(run_root.glob("*/state.json")).parent
+after = stats()
+assert after["records"]["dry_run"] == before["records"]["dry_run"] + 1
+assert after["records"]["performance_records"] == before["records"]["performance_records"]
+assert "private-metrics-task" not in json.dumps(after)
+refreshed = stats("--refresh", str(run_root))
+assert refreshed == after
+command("--task", "disabled", "--dry-run", "--recap", "--cwd", raw,
+        "--runs-dir", str(run_root), "--no-metrics")
+assert stats() == after
+continued_info = root / "metrics-continued.json"
+continued = subprocess.run(
+    [duet, "--continue", str(source_run), "--dry-run", "--recap",
+     "--runs-dir", str(run_root), "--run-info-file", str(continued_info)],
+    env=dict(env, DUET_METRICS="0"), text=True, capture_output=True,
+)
+assert continued.returncode == 0, continued.stderr
+continued_state = pathlib.Path(json.loads(continued_info.read_text())["state_path"])
+assert json.loads(continued_state.read_text())["metrics_enabled"] is False
+assert stats() == after
+shutil.rmtree(run_root)
+assert stats() == after
+PY
+
+# Malformed dates and extreme finite numbers must still produce valid CLI JSON.
+expect "central metrics numeric boundary recovery" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet, raw = sys.argv[1:]
+root = pathlib.Path(raw) / "metrics-boundaries"
+env = dict(os.environ, HOME=str(root / "home"))
+originals = {}
+for number, timestamp in enumerate(("0001-01-01T00:00:00+23:00",
+                                    "9999-12-31T23:59:59-23:00"), start=1):
+    source = root / "source" / str(number) / "state.json"
+    source.parent.mkdir(parents=True)
+    profiles = [{"backend": "claude", "role": "planner"},
+                {"backend": "codex", "role": "coder"}]
+    state = {
+        "agents": [dict(name=slot, **profile)
+                   for slot, profile in zip(("lead", "partner"), profiles)],
+        "history": [{"turn": 1, "agent": "lead", "elapsed_s": 1e308,
+                     "metrics": {"usage_scope": "invocation", "cost_usd": 1e308}}],
+        "dry_run": False, "phase": "finished", "finished_reason": "max_turns",
+        "metrics": {"id": f"00000000-0000-4000-8000-{number:012d}",
+                    "project_id": "a" * 64, "agents": profiles,
+                    "started_at": timestamp, "updated_at": timestamp,
+                    "wall_elapsed_s": 1e308},
+    }
+    originals[source] = json.dumps(state)
+    source.write_text(originals[source], encoding="utf-8")
+
+def command(*args):
+    result = subprocess.run([duet, "--stats", *args], env=env,
+                            text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+def reject_constant(token):
+    raise ValueError(f"non-JSON numeric constant: {token}")
+
+report = json.loads(command("--refresh", str(root / "source"), "--json"),
+                    parse_constant=reject_constant)
+assert report["records"]["performance_records"] == 2
+assert report["wall_elapsed_s"]["median"] == 1e308
+assert report["agent_groups"][0]["reported_cost_usd"]["total"] is None
+assert "provider-reported cost: unknown (overflow)" in command()
+for snapshot in (root / "home" / ".duet" / "metrics" / "runs").glob("*.json"):
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert data["started_at"] is None and data["updated_at"] is None
+assert all(path.read_text(encoding="utf-8") == text for path, text in originals.items())
+PY
+
 echo "---"; echo "smoke: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

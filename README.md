@@ -172,6 +172,26 @@ duet --reasoning high --codex-fast \
 
 Use `--no-codex-fast` to override a config or continued run that enabled it.
 
+**Inspect local performance data** — view curated metrics snapshots saved
+outside the project directory:
+
+```bash
+duet --stats
+duet --stats --json
+duet --stats --refresh              # import discoverable older run states
+duet --stats --refresh ~/old-runs   # import one explicit runs root
+```
+
+Metrics are enabled by default unless `DUET_METRICS=0`, contain numeric and
+configuration metadata only, and never upload automatically. Use
+`--no-metrics` or `metrics_enabled: false` to disable collection. See the
+[metrics reference](https://github.com/volkan/duet/blob/main/docs/METRICS.md)
+for the schema, privacy boundary, refresh rules, and interpretation limits.
+`DUET_METRICS=0` also overrides collection settings in config files and
+continued runs.
+Refresh tolerates invalid timestamps, and reports mark overflowing cost totals
+as unknown.
+
 **Verify gate** — a convergence proposal only counts if `make test` exits 0;
 any failure feeds back into the next turn:
 
@@ -218,6 +238,13 @@ with `duet --list`, stop one exact live run with `duet --stop <run-id>`, and
 start a fresh run
 from saved state with `duet --continue <run> --task "next thing"`.
 
+When metrics are enabled, duet also writes one standalone curated snapshot to
+`~/.duet/metrics/runs/<UUID>.json`. This store survives deletion of a project
+or its raw run directory; a best-effort home-directory write failure only emits
+a warning and does not fail the agent run. Raw transcripts, prompts, paths,
+commands, errors, credentials, and session IDs remain in the configured run
+directory and are never copied into central metrics.
+
 `--stop` is graceful. It lets the current agent turn finish before duet records
 `force_stop`. Use `--stop <run-id> --immediate` to terminate that run's active
 child and record `force_stop` now. Both forms validate the saved supervisor PID
@@ -245,6 +272,10 @@ a deep-reasoning turn is stuck.
 full reference: every flag, reasoning levels, session memory, output layout,
 `--status` / `--stop` / `--continue`, the force prompt, Codex sandbox and network rules,
 and worktree mode.
+
+[docs/METRICS.md](https://github.com/volkan/duet/blob/main/docs/METRICS.md)
+documents central metrics collection, the snapshot schema, refresh/import
+behavior, and the limits of comparisons.
 
 [Usage evidence and product direction](https://github.com/volkan/duet/blob/main/docs/USAGE_EVIDENCE.md) summarizes an
 anonymized audit of one developer's history across two computers, its limits,
