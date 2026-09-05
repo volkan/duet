@@ -1,5 +1,9 @@
 # Review evidence demo
 
+For examples from actual project work, start with the
+[anonymized cases](../REAL_CASES.md). This separate toy-fixture demo shows how
+to inspect findings and continue an unresolved review.
+
 [![Watch the edited 80-second review demo](finding-review.png)](finding-review.mp4)
 
 [Watch or download the MP4](finding-review.mp4) ·

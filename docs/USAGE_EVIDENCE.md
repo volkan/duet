@@ -73,11 +73,14 @@ The 128 work records with project tasks were classified as follows:
 
 Review and claim verification are recurring uses in this person's workflow.
 Selected cases in the work audit describe a rebuttal corrected after a
-repository-history comparison, a proposed fix challenged for masking a problem,
+repository-history comparison, a proposed fix that stopped masking values,
 a severity reduction, a review left unresolved at the turn limit, and one
 exchange with no visible new contribution. These cases illustrate possible
 benefits and limits; they do not establish how often either occurs. None confirms
 downstream human acceptance, posting, merging, or deployment.
+
+[Read the cases in plain language](REAL_CASES.md) for the initial claim,
+challenge, and reported change, including unresolved and low-value exchanges.
 
 The work audit identified 25 candidate transitions from a convergence proposal
 to a reply without a proposal. It classified 23 events across 22 records as
@@ -130,6 +133,7 @@ contracts and limits. It does not establish adoption or downstream value.
 
 The [public toy fixture](../examples/review-evidence/README.md) now provides
 repeatable checks for a defect, a refuted claim, and an unresolved requirement.
-The next deliverables are a recorded walkthrough and an opt-in pilot. The
+The [recorded walkthrough](demos/README.md) demonstrates that fixture's report
+workflow. The next validation step is an opt-in pilot. The
 [validation and attention plan](launch/validation-plan.md) describes how to test
 that workflow with other developers before expanding the product's claims.
