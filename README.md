@@ -246,9 +246,9 @@ full reference: every flag, reasoning levels, session memory, output layout,
 `--status` / `--stop` / `--continue`, the force prompt, Codex sandbox and network rules,
 and worktree mode.
 
-[Usage evidence and product direction](docs/USAGE_EVIDENCE.md) summarizes an
+[Usage evidence and product direction](https://github.com/volkan/duet/blob/main/docs/USAGE_EVIDENCE.md) summarizes an
 anonymized audit of one developer's history across two computers, its limits,
-and proposed next steps. The [validation plan](docs/launch/validation-plan.md)
+and proposed next steps. The [validation plan](https://github.com/volkan/duet/blob/main/docs/launch/validation-plan.md)
 describes a public demonstration and pilot to test the workflow with others.
 
 ## Contributing
