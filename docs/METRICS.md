@@ -21,6 +21,8 @@ Collection is enabled by default unless the environment sets
 `metrics_enabled: false` in YAML/JSON. Set `--metrics-kind test` or
 `metrics_kind: test` for a manual evaluation; the default is `live`. Dry runs
 are always classified as `dry_run` and are kept separate.
+For CLI launches, `DUET_METRICS=0` takes precedence over config files and
+settings restored by `--continue`, including `metrics_enabled: true`.
 
 If the home metrics directory cannot be created or written, duet prints a
 warning and continues the run. A failed snapshot must never block agent work.
@@ -84,6 +86,9 @@ used the same repository or identify an anonymous user.
 counts, skipped-file counts, outcome totals, verification and wall-time
 coverage, agent groups, and paired-agent groups. Malformed, unreadable,
 oversized, unknown-schema, and duplicate snapshots are skipped and counted.
+Malformed records include numeric JSON values rejected by Python's integer
+conversion limit; one such record does not prevent valid snapshots from being
+reported.
 
 `duet --stats --refresh` explicitly imports discoverable older `state.json`
 files, then reports. The no-argument form uses the normal default roots and

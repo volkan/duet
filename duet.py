@@ -5513,7 +5513,7 @@ def _metrics_report_load_records(root: pathlib.Path) -> tuple[list[dict], dict]:
         except OSError:
             skipped["read_errors"] += 1
             continue
-        except (UnicodeError, json.JSONDecodeError, RecursionError):
+        except (ValueError, RecursionError):
             skipped["malformed"] += 1
             continue
         if not isinstance(payload, dict):
@@ -6221,10 +6221,12 @@ def _add_metrics_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _apply_metrics_options(cfg: DuetConfig, args: argparse.Namespace,
                            saved: Optional[dict] = None) -> None:
-    """Apply CLI overrides, then saved/config values, without old-Namespace assumptions."""
+    """Honor the environment opt-out before CLI and saved/config preferences."""
     enabled = getattr(args, "metrics_enabled", None)
     kind = getattr(args, "metrics_kind", None)
-    if enabled is not None:
+    if os.environ.get("DUET_METRICS") == "0":
+        cfg.metrics_enabled = False
+    elif enabled is not None:
         cfg.metrics_enabled = enabled
     elif saved is not None and "metrics_enabled" in saved:
         cfg.metrics_enabled = saved["metrics_enabled"]

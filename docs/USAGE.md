@@ -544,6 +544,8 @@ machine. Collection is enabled by default unless `DUET_METRICS=0`; configure
 `metrics_enabled: false` or pass `--no-metrics` to opt out. A run may be
 classified with `--metrics-kind live|test` (or YAML `metrics_kind:`), with
 `live` as the default. `--dry-run` is always classified separately.
+`DUET_METRICS=0` overrides config files and saved `--continue` settings, even
+when they contain `metrics_enabled: true`.
 
 The snapshot is written best effort to `~/.duet/metrics/runs/<UUID>.json` using
 an atomic replace. It contains the duet version, bounded backend CLI version

@@ -68,6 +68,39 @@ class TestMetricsCliConfig(unittest.TestCase):
         self.assertFalse(cfg.metrics_enabled)
         self.assertEqual(cfg.metrics_kind, "live")
 
+    def test_environment_opt_out_wins_over_config_and_continued_state(self) -> None:
+        for mode in ("--config", "--continue"):
+            for enabled in ("0", "1"):
+                with self.subTest(mode=mode, environment=enabled), \
+                        tempfile.TemporaryDirectory() as raw:
+                    root = pathlib.Path(raw)
+                    source = root / "source"
+                    source.mkdir()
+                    state_path = source / "state.json"
+                    state_path.write_text(json.dumps({
+                        "cwd": raw, "task": "test metrics opt-out",
+                        "agents": [
+                            {"name": "lead", "backend": "claude", "role": "planner"},
+                            {"name": "partner", "backend": "codex", "role": "coder"},
+                        ],
+                        "history": [], "turns_used": 0, "metrics_enabled": True,
+                        "metrics_kind": "test", "per_turn_timeout": 10,
+                    }), encoding="utf-8")
+                    target = state_path if mode == "--config" else source
+                    argv = ["duet", mode, str(target), "--dry-run", "--recap",
+                            "--runs-dir", str(root / "raw-runs")]
+                    with mock.patch.dict(os.environ, {"DUET_METRICS": enabled}), \
+                            mock.patch.object(sys, "argv", argv), \
+                            mock.patch.object(pathlib.Path, "home", return_value=root / "home"), \
+                            mock.patch.object(duet, "_metrics_root", return_value=root / "central"), \
+                            contextlib.redirect_stdout(io.StringIO()), \
+                            contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(duet.main(), 0)
+                    saved = next((root / "raw-runs").glob("*/state.json"))
+                    self.assertEqual(json.loads(saved.read_text())["metrics_enabled"], enabled == "1")
+                    snapshots = list((root / "central" / "runs").glob("*.json"))
+                    self.assertEqual(len(snapshots), int(enabled))
+
     def test_direct_config_validation_and_old_namespace(self) -> None:
         agents = [duet.Agent("lead", "claude", "planner"),
                   duet.Agent("partner", "codex", "coder")]

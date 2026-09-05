@@ -187,6 +187,8 @@ configuration metadata only, and never upload automatically. Use
 `--no-metrics` or `metrics_enabled: false` to disable collection. See the
 [metrics reference](https://github.com/volkan/duet/blob/main/docs/METRICS.md)
 for the schema, privacy boundary, refresh rules, and interpretation limits.
+`DUET_METRICS=0` also overrides collection settings in config files and
+continued runs.
 
 **Verify gate** — a convergence proposal only counts if `make test` exits 0;
 any failure feeds back into the next turn:

@@ -1828,6 +1828,7 @@ before = stats()
 run_root = root / "metrics-smoke"
 command("--task", "private-metrics-task", "--dry-run", "--recap", "--cwd", raw,
         "--runs-dir", str(run_root))
+source_run = next(run_root.glob("*/state.json")).parent
 after = stats()
 assert after["records"]["dry_run"] == before["records"]["dry_run"] + 1
 assert after["records"]["performance_records"] == before["records"]["performance_records"]
@@ -1836,6 +1837,16 @@ refreshed = stats("--refresh", str(run_root))
 assert refreshed == after
 command("--task", "disabled", "--dry-run", "--recap", "--cwd", raw,
         "--runs-dir", str(run_root), "--no-metrics")
+assert stats() == after
+continued_info = root / "metrics-continued.json"
+continued = subprocess.run(
+    [duet, "--continue", str(source_run), "--dry-run", "--recap",
+     "--runs-dir", str(run_root), "--run-info-file", str(continued_info)],
+    env=dict(env, DUET_METRICS="0"), text=True, capture_output=True,
+)
+assert continued.returncode == 0, continued.stderr
+continued_state = pathlib.Path(json.loads(continued_info.read_text())["state_path"])
+assert json.loads(continued_state.read_text())["metrics_enabled"] is False
 assert stats() == after
 shutil.rmtree(run_root)
 assert stats() == after

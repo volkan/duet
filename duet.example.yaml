@@ -15,7 +15,8 @@ per_turn_timeout: 900
 # on_turn_timeout: stop
 runs_dir: runs
 # Central, privacy-bounded performance snapshots. Collection is enabled by
-# default unless DUET_METRICS=0; set false to disable it for this run.
+# default unless DUET_METRICS=0; that opt-out overrides this setting.
+# Set false to disable collection for this run without changing the environment.
 # metrics_enabled: true
 # Label manual evaluations separately from ordinary live runs. Dry runs are
 # always reported separately. Accepted values: live | test.

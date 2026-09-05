@@ -194,6 +194,50 @@ class TestMetricsReportStore(unittest.TestCase):
         self.assertEqual(records, [])
         self.assertEqual(skipped["malformed"], 1)
 
+    def test_integer_digit_limit_snapshot_is_skipped_and_report_stays_json(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            runs = root / "runs"
+            runs.mkdir()
+            digits = "9" * 700
+            (runs / "bad.json").write_text(
+                '{"schema_version": 1, "kind": "duet.metrics.run", '
+                f'"id": {digits}}}',
+                encoding="utf-8",
+            )
+            (runs / "good.json").write_text(json.dumps(_record(1)), encoding="utf-8")
+
+            set_limit = getattr(sys, "set_int_max_str_digits", None)
+            if set_limit is not None:
+                get_limit = sys.get_int_max_str_digits
+                previous_limit = get_limit()
+                try:
+                    set_limit(640)
+                    with mock.patch.object(duet, "_metrics_root", return_value=root):
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out):
+                            result = duet.print_metrics_report(json_output=True)
+                finally:
+                    set_limit(previous_limit)
+            else:
+                original_loads = duet.json.loads
+
+                def loads_with_digit_failure(value, *args, **kwargs):
+                    if digits in value:
+                        raise ValueError("simulated integer digit limit")
+                    return original_loads(value, *args, **kwargs)
+
+                with mock.patch.object(duet.json, "loads", side_effect=loads_with_digit_failure):
+                    with mock.patch.object(duet, "_metrics_root", return_value=root):
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out):
+                            result = duet.print_metrics_report(json_output=True)
+
+        report = json.loads(out.getvalue())
+        self.assertEqual(result, 0)
+        self.assertEqual(report["records"]["total"], 1)
+        self.assertEqual(report["skipped"]["malformed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
