@@ -646,7 +646,8 @@ def run_duet_normal(
     log_path: pathlib.Path,
     timeout: int,
 ) -> int:
-    cmd = [sys.executable, str(duet_path), "--config", str(config_path)]
+    cmd = [sys.executable, str(duet_path), "--config", str(config_path),
+           "--metrics-kind", "test"]
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     with log_path.open("w", encoding="utf-8") as log:
@@ -669,7 +670,8 @@ def run_duet_with_force_pty(
     feedback: str,
     timeout: int,
 ) -> int:
-    cmd = [sys.executable, str(duet_path), "--config", str(config_path)]
+    cmd = [sys.executable, str(duet_path), "--config", str(config_path),
+           "--metrics-kind", "test"]
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     master_fd, slave_fd = pty.openpty()

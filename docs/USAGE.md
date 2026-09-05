@@ -117,6 +117,12 @@ $duet
 
 When `--cwd` points at a different directory and `--runs-dir` is omitted, run artifacts land under that project at `.duet/runs/<run_id>/`. Pass `--runs-dir runs` to keep the legacy invocation-relative `runs/<run_id>/` layout.
 
+Raw run artifacts stay in this configured directory for compatibility and for
+agent access. Independently, enabled runs emit a sanitized numeric/configuration
+snapshot at `~/.duet/metrics/runs/<UUID>.json`; this central store does not use
+the `~/.duet/runs` legacy index or symlinks. See [Central metrics](#central-metrics)
+for collection, privacy, and refresh details.
+
 ### Real examples: review an implementation
 
 Use Codex as the reviewer and Claude as the coder when you want a high-effort
@@ -517,6 +523,11 @@ worktree gated by `verify_cmd`.
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--json` | with `--status`, emit the stable schema-v1 `duet.status` document instead of the human view |
+| `--stats` | read the central curated metrics store and print an aggregate report; does not inspect or modify raw run directories |
+| `--stats --json` | emit the stable `duet.metrics.report` JSON document |
+| `--stats --refresh [PATH]` | explicitly import discoverable older `state.json` files into central metrics, then report. With no `PATH`, uses the default roots and known home index; with a path, imports that runs root. Refresh never runs commands or edits originals; duplicates are ignored |
+| `--no-metrics` | disable collection of the new central metrics snapshot for this run |
+| `--metrics-kind live\|test` | label a run for reporting (default `live`); manual evaluations belong under `test`. Dry runs are always counted separately |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
 | `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
@@ -525,6 +536,52 @@ worktree gated by `verify_cmd`.
 | `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
 
 ---
+
+## Central metrics
+
+Central metrics are standalone, local snapshots for comparing runs on one
+machine. Collection is enabled by default unless `DUET_METRICS=0`; configure
+`metrics_enabled: false` or pass `--no-metrics` to opt out. A run may be
+classified with `--metrics-kind live|test` (or YAML `metrics_kind:`), with
+`live` as the default. `--dry-run` is always classified separately.
+
+The snapshot is written best effort to `~/.duet/metrics/runs/<UUID>.json` using
+an atomic replace. It contains the duet version, bounded backend CLI version
+probes, role, requested model, CLI-reported model when available, reasoning
+requested/effective/backend values and transport, fast-mode effects, turn
+budget, timing fields, prompt/output/handoff byte counts, and optional
+provider-reported token and USD cost data. Missing values remain unknown and
+are accompanied by coverage information. Codex remains on its current text
+transport: absent actual-model, token, and cost metadata stays unknown. Duet
+never guesses prices or converts bytes to token counts.
+
+Snapshots contain no raw task, repository or folder name, filesystem paths,
+prompts, errors, command text, session IDs, or credentials. A stable locally
+salted opaque working-context identifier can group runs on the same machine;
+it is not proof of a unique repository or anonymous user. A home-directory
+permission or storage failure warns and does not fail the agent run.
+
+`duet --stats` reads only the central snapshot directory. `--stats --json`
+prints schema `duet.metrics.report`, grouping observations by duet/backend
+versions, requested and reported models, reasoning values, roles, and paired
+agent profiles. It reports timing, verification, provider-usage coverage, and
+skipped malformed, unreadable, unknown-schema, or duplicate snapshots.
+Legacy imports are counted separately and excluded from default live
+performance groups. Dry-run, test, unknown-kind, and incomplete snapshots are
+also excluded from those groups. Agreement between agents is an outcome signal
+and does not establish correctness; these observations are not a controlled
+vendor benchmark, and provider usage scopes may differ.
+
+`--stats --refresh` explicitly imports older discoverable states without
+running commands or editing source run directories. Without a path it scans
+the default roots and known home index; `--stats --refresh PATH` scans the
+specified runs root. Imports are deduplicated. Historic version, budget, and
+live-versus-dry classification remain unknown when the old state cannot prove
+them.
+Refresh also recovers missing or stale metrics from new-format states, without
+replacing a newer snapshot. The imported count includes recovered updates.
+
+See [docs/METRICS.md](METRICS.md) for the snapshot fields and limitations.
 
 ## Output layout and status mode
 
@@ -550,6 +607,10 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     …
     wt/                                      # the git worktree (if --worktree)
 ```
+
+The files above are the raw, agent-accessible run artifacts. They remain under
+the configured `--runs-dir`; central metrics snapshots live independently at
+`~/.duet/metrics/runs/` and are not symlinks into this tree.
 
 When `--task-from-cmd` is used, `turn-00-kickoff.pid` exists while it runs and
 `turn-00-kickoff.stderr.log` preserves diagnostics. If `--run-info-file` is

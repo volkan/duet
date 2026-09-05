@@ -14,7 +14,7 @@ uninstall: ## remove the symlink
 test: unit-test smoke-test ## run unit tests then scripts/smoke.sh
 ci: unit-test reasoning-check smoke-test complexity distribution-check ## run the fast local merge gate
 unit-test: ## run pure-function unit tests (stdlib unittest, no agents)
-	@python3 -m unittest discover -s tests
+	@DUET_METRICS=0 python3 -m unittest discover -s tests
 smoke-test: ## run scripts/smoke.sh dry-run regression checks
 	@bash scripts/smoke.sh
 complexity: ## fail if any function exceeds the cyclomatic-complexity/length budget

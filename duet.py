@@ -46,10 +46,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import hashlib
 import json
+import math
 import os
 import pathlib
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -59,6 +62,7 @@ import textwrap
 import threading
 import time
 import traceback
+import uuid
 from typing import Callable, Iterable, Optional
 
 # ---------- defaults ----------
@@ -388,6 +392,10 @@ class Agent:
     extra_args: list[str] = dataclasses.field(default_factory=list)
     cwd_override: Optional[pathlib.Path] = None  # set when this agent runs in a git worktree
     reasoning_effort: Optional[str] = None  # one of REASONING_LEVELS; overrides cfg.reasoning
+    # Ephemeral, curated per-call observability metadata. This deliberately
+    # stays out of Agent's repr and serialized config/state shape; the run
+    # lifecycle records it alongside the turn when metrics are enabled.
+    last_call_metrics: dict = dataclasses.field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         # Pin Claude to its stable Sonnet alias instead of inheriting a
@@ -475,6 +483,10 @@ class DuetConfig:
     start_speaker_idx: int = 1                # default loop starts with partner replying
     continue_from: Optional[str] = None       # prior run dir/id when created by --continue
     run_info_file: Optional[pathlib.Path] = None  # atomic machine-readable launch handoff
+    metrics_enabled: bool = dataclasses.field(
+        default_factory=lambda: os.environ.get("DUET_METRICS", "1") != "0")
+    metrics_kind: str = "live"                # tests are excluded from performance comparisons
+    _metrics_context: dict = dataclasses.field(default_factory=dict, repr=False)
 
 
 def _resume_never_cwd_keyed(agent: Agent) -> bool:
@@ -536,6 +548,10 @@ def validate_config(cfg: DuetConfig,
             f"{cfg.on_turn_timeout!r}",
             parser,
         )
+    if not isinstance(cfg.metrics_enabled, bool):
+        _config_error("metrics_enabled must be a boolean", parser)
+    if not isinstance(cfg.metrics_kind, str) or cfg.metrics_kind not in {"live", "test"}:
+        _config_error("metrics_kind must be 'live' or 'test'", parser)
 
     seen_names: set[str] = set()
     for agent in cfg.agents:
@@ -616,6 +632,7 @@ class VerifyResult:
     log_path: pathlib.Path
     timed_out: bool = False
     error: Optional[str] = None
+    elapsed_s: Optional[float] = None
 
 
 # ---------- active child process tracking ----------
@@ -1186,6 +1203,7 @@ def verify_result_state(result: VerifyResult) -> dict:
         "log_path": str(result.log_path),
         "stdout_tail": result.stdout_tail,
         "stderr_tail": result.stderr_tail,
+        "elapsed_s": result.elapsed_s,
     }
     if result.error:
         data["error"] = result.error
@@ -1237,6 +1255,7 @@ def run_verify_command(cfg: DuetConfig, run_dir: pathlib.Path, turn_label: str,
     log_path = run_dir / f"turn-{turn_label}-verify.log"
     pid_path = run_dir / f"turn-{turn_label}-verify.pid"
     started = dt.datetime.now().isoformat(timespec="seconds")
+    measured_start = time.monotonic()
     print(f"[duet] verify turn {turn_label}: {cfg.verify_cmd} (cwd={cwd})")
     try:
         rc, stdout, stderr = _run(
@@ -1272,6 +1291,7 @@ def run_verify_command(cfg: DuetConfig, run_dir: pathlib.Path, turn_label: str,
             log_path=log_path,
             error=str(e),
         )
+    result.elapsed_s = max(0.0, time.monotonic() - measured_start)
     finished = dt.datetime.now().isoformat(timespec="seconds")
     log_text = (
         f"started: {started}\n"
@@ -1280,6 +1300,304 @@ def run_verify_command(cfg: DuetConfig, run_dir: pathlib.Path, turn_label: str,
     )
     write_text_atomic(log_path, log_text)
     return result
+
+
+_METRICS_BUILTIN_ROLES = frozenset(ROLE_PROMPTS)
+_METRICS_IDENTIFIER_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:+/-]*\Z")
+_METRICS_VERSION_RE = re.compile(
+    r"\bv?(\d+(?:\.\d+){1,3}(?:[-+._][A-Za-z0-9]+)*)\b", re.IGNORECASE,
+)
+_METRICS_CLI_VERSION_CACHE: dict[str, Optional[str]] = {}
+_METRICS_VERSION_OUTPUT_MAX_BYTES = 4096
+_METRICS_USAGE_KEYS = (
+    "input_tokens", "output_tokens", "cache_read_input_tokens",
+    "cache_creation_input_tokens", "reasoning_tokens",
+)
+
+
+def _metrics_identifier(value: object, max_chars: int = 128) -> Optional[str]:
+    """Return a bounded identifier suitable for persisted metric metadata."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if (not value or len(value) > max_chars or any(ord(ch) < 32 or ord(ch) == 127
+                                             for ch in value)
+            or value.startswith("/") or "://" in value or "@" in value):
+        return None
+    return value if _METRICS_IDENTIFIER_RE.match(value) else None
+
+
+def _metrics_cli_version(binary: str) -> Optional[str]:
+    """Best-effort, cached CLI version probe with no shell or raw errors."""
+    if binary in _METRICS_CLI_VERSION_CACHE:
+        return _METRICS_CLI_VERSION_CACHE[binary]
+    version: Optional[str] = None
+    try:
+        proc = subprocess.Popen(
+            [binary, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _register_proc(proc)
+        assert proc.stdout is not None
+        os.set_blocking(proc.stdout.fileno(), False)
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        output = bytearray()
+        deadline = time.monotonic() + 2
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired([binary, "--version"], 2)
+                events = selector.select(remaining)
+                if not events:
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 1024)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > _METRICS_VERSION_OUTPUT_MAX_BYTES:
+                    raise ValueError("version output exceeds metric bound")
+        finally:
+            selector.close()
+        remaining = max(0.01, deadline - time.monotonic())
+        if proc.wait(timeout=remaining) == 0:
+            text = output.decode("utf-8", errors="replace")
+            match = _METRICS_VERSION_RE.search(text)
+            if match:
+                version = _metrics_identifier(match.group(1), max_chars=64)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    finally:
+        if "proc" in locals():
+            try:
+                # A version wrapper can exit while a child still holds work;
+                # this isolated process group belongs only to the probe.
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=0.2)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            _unregister_proc(proc)
+        if "proc" in locals() and proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except (OSError, ValueError):
+                pass
+    _METRICS_CLI_VERSION_CACHE[binary] = version
+    return version
+
+
+def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
+        Optional[str], Optional[str], Optional[str], str, bool]:
+    """Return requested/effective/backend reasoning and its transport."""
+    requested = effective_reasoning(agent, cfg.reasoning)
+    fast = bool(cfg.codex_fast and agent.backend == "codex" and agent.role == "coder")
+    effective = "low" if fast else requested
+    if effective is None:
+        return requested, None, None, "native_default", fast
+    adapter = backend_adapter(agent.backend)
+    backend_value = adapter.reasoning_map.get(effective, effective)
+    if agent.backend == "gemini":
+        if effective not in {"high", "xhigh", "max"}:
+            # Gemini has no effort flag, and its low/medium/minimal prefixes
+            # are empty. Reporting those as an effective setting would claim
+            # control the adapter did not exercise.
+            return requested, None, None, "native_default", fast
+        transport = "prompt"
+        backend_value = None
+    elif agent.backend == "codex":
+        transport = "config_flag"
+    else:
+        transport = "flag"
+    return requested, effective, backend_value, transport, fast
+
+
+def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
+                          probe_versions: bool = False) -> dict:
+    """Return safe, non-secret backend metadata for one agent configuration."""
+    requested, effective, backend_value, transport, fast = _metrics_reasoning_profile(
+        agent, cfg,
+    )
+    adapter = backend_adapter(agent.backend)
+    version = None
+    if (probe_versions and not cfg.dry_run
+            and getattr(cfg, "metrics_enabled", True)):
+        version = _metrics_cli_version(adapter.binary)
+    return {
+        "backend": adapter.name,
+        "role": agent.role if agent.role in _METRICS_BUILTIN_ROLES else "custom",
+        "model_requested": _metrics_identifier(agent.model),
+        "cli_version": version,
+        "reasoning_requested": requested,
+        "reasoning_effective": effective,
+        "reasoning_backend_value": backend_value,
+        "reasoning_transport": transport,
+        "fast_mode": fast,
+        "extra_args_present": bool(agent.extra_args),
+        "prompt_transport": (
+            "system_flag_and_message" if agent.backend == "claude" else "combined_prompt"
+        ),
+    }
+
+
+def _metrics_nonnegative_int(value: object) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _metrics_nonnegative_amount(value: object) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except OverflowError:
+        return None
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
+def _metrics_add_usage(total: dict[str, int], complete: dict[str, bool],
+                       source: object, names: dict[str, str]) -> None:
+    if not isinstance(source, dict):
+        for key in names:
+            complete[key] = False
+        return
+    for key, source_name in names.items():
+        value = _metrics_nonnegative_int(source.get(source_name))
+        if value is None:
+            complete[key] = False
+        else:
+            total[key] = total.get(key, 0) + value
+
+
+def _metrics_set_models(metrics: dict, model_ids: Iterable[object]) -> None:
+    models = sorted({model for value in model_ids
+                     if (model := _metrics_identifier(value)) is not None})
+    if len(models) == 1:
+        metrics["model_reported"] = models[0]
+    elif len(models) > 1:
+        metrics["model_reported"] = None
+        metrics["models_reported"] = models
+
+
+def _metrics_commit_invocation(agent: Agent, usage: dict[str, int],
+                               model_ids: Iterable[object],
+                               cost_usd: Optional[float] = None) -> None:
+    """Save a decoded CLI invocation aggregate; malformed fields stay absent."""
+    metrics = agent.last_call_metrics
+    _metrics_set_models(metrics, model_ids)
+    if usage or cost_usd is not None:
+        # This parser only calls the helper for native command/event totals.
+        # A cost-only provider report is still invocation-scoped.
+        metrics["usage_scope"] = "invocation"
+    if usage:
+        metrics["usage"] = usage
+    if cost_usd is not None:
+        metrics["cost_usd"] = cost_usd
+
+
+def _metrics_record_claude_metadata(agent: Agent, payload: object) -> None:
+    """Read Claude print JSON's invocation-level ``modelUsage`` ledger."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("modelUsage"), dict):
+        return
+    usage: dict[str, int] = {}
+    complete = {name: True for name in _METRICS_USAGE_KEYS}
+    models = []
+    for model, entry in payload["modelUsage"].items():
+        models.append(model)
+        _metrics_add_usage(usage, complete, entry, {
+            "input_tokens": "inputTokens",
+            "output_tokens": "outputTokens",
+            "cache_read_input_tokens": "cacheReadInputTokens",
+            "cache_creation_input_tokens": "cacheCreationInputTokens",
+        })
+    cost = _metrics_nonnegative_amount(payload.get("total_cost_usd"))
+    usage = {name: value for name, value in usage.items() if complete[name]}
+    _metrics_commit_invocation(agent, usage, models, cost)
+
+
+def _metrics_record_gemini_metadata(agent: Agent, payload: object) -> None:
+    """Read Gemini CLI JSON ``stats.models`` totals for this invocation."""
+    if not isinstance(payload, dict):
+        return
+    stats = payload.get("stats")
+    models_data = stats.get("models") if isinstance(stats, dict) else None
+    if not isinstance(models_data, dict):
+        return
+    usage: dict[str, int] = {}
+    complete = {name: True for name in _METRICS_USAGE_KEYS}
+    models = []
+    for model, entry in models_data.items():
+        tokens = entry.get("tokens") if isinstance(entry, dict) else None
+        models.append(model)
+        prompt = _metrics_nonnegative_int(tokens.get("prompt")) if isinstance(tokens, dict) else None
+        cached = _metrics_nonnegative_int(tokens.get("cached")) if isinstance(tokens, dict) else None
+        if prompt is None or cached is None or cached > prompt:
+            complete["input_tokens"] = False
+        else:
+            # Gemini's prompt total includes cached context; split it so
+            # callers never count those tokens again as cache reads.
+            usage["input_tokens"] = usage.get("input_tokens", 0) + max(
+                0, prompt - (cached or 0),
+            )
+        if cached is None:
+            complete["cache_read_input_tokens"] = False
+        else:
+            usage["cache_read_input_tokens"] = usage.get(
+                "cache_read_input_tokens", 0,
+            ) + cached
+        _metrics_add_usage(usage, complete, tokens, {
+            "output_tokens": "candidates", "reasoning_tokens": "thoughts",
+        })
+    usage = {name: value for name, value in usage.items() if complete[name]}
+    _metrics_commit_invocation(agent, usage, models)
+
+
+def _metrics_record_opencode_metadata(agent: Agent, stdout: str) -> None:
+    """Sum this command's native ``step_finish`` JSONL usage ledger."""
+    usage: dict[str, int] = {}
+    complete = {name: True for name in _METRICS_USAGE_KEYS}
+    models = []
+    cost = 0.0
+    cost_complete = True
+    step_seen = False
+    for raw_line in stdout.splitlines():
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "step_finish":
+            continue
+        part = event.get("part")
+        if not isinstance(part, dict) or part.get("type") != "step-finish":
+            continue
+        step_seen = True
+        models.append(part.get("modelID", event.get("modelID")))
+        _metrics_add_usage(usage, complete, part.get("tokens"), {
+            "input_tokens": "input",
+            "output_tokens": "output",
+            "reasoning_tokens": "reasoning",
+        })
+        tokens = part.get("tokens")
+        cache = tokens.get("cache") if isinstance(tokens, dict) else None
+        _metrics_add_usage(usage, complete, cache, {
+            "cache_read_input_tokens": "read",
+            "cache_creation_input_tokens": "write",
+        })
+        step_cost = _metrics_nonnegative_amount(part.get("cost"))
+        if step_cost is not None:
+            cost += step_cost
+        else:
+            cost_complete = False
+    usage = {name: value for name, value in usage.items() if complete[name]}
+    _metrics_commit_invocation(
+        agent, usage, models, cost if step_seen and cost_complete else None,
+    )
+
+
+def _metrics_record_raw_output(agent: Agent, output: str) -> None:
+    agent.last_call_metrics["raw_output_bytes"] = len(output.encode("utf-8"))
 
 
 def call_claude(agent: Agent, system_prompt: str, message: str,
@@ -1337,6 +1655,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         raise AgentRunError(reason, _agent_exit_error("claude", rc, out, err))
     try:
         payload = json.loads(out)
+        _metrics_record_raw_output(agent, out)
+        _metrics_record_claude_metadata(agent, payload)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
     except json.JSONDecodeError:
         snippet = out[:500].strip()
@@ -1498,6 +1818,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # sentinel so the next turn at least knows a prior turn happened.
     parsed_sid = _parse_codex_session_id(err)
     session_pin = _resolve_codex_session_pin(agent, parsed_sid)
+    _metrics_record_raw_output(agent, out)
     return out.rstrip(), session_pin or "codex-current"
 
 
@@ -1586,6 +1907,8 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
             "gemini JSON output did not include session_id; duet requires a "
             "Gemini CLI build with JSON session_id support for multi-turn memory.",
         )
+    _metrics_record_raw_output(agent, out)
+    _metrics_record_gemini_metadata(agent, payload)
     return (payload.get("response") or "").rstrip(), new_sid
 
 
@@ -1723,6 +2046,7 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
             "copilot JSONL output did not include sessionId; duet requires a "
             "Copilot CLI build with JSON sessionId support for multi-turn memory.",
         )
+    _metrics_record_raw_output(agent, out)
     return text, new_sid
 
 
@@ -1862,6 +2186,8 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
             "opencode JSONL output did not include a sessionID; duet requires an "
             "OpenCode CLI build that emits JSON session events for multi-turn memory.",
         )
+    _metrics_record_raw_output(agent, out)
+    _metrics_record_opencode_metadata(agent, out)
     return text, new_sid
 
 
@@ -1995,7 +2321,17 @@ SUPPORTED_BACKENDS = set(BACKENDS)
 def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent: bool,
                *, run_dir: Optional[pathlib.Path] = None,
                turn_label: Optional[str] = None) -> str:
+    agent.last_call_metrics = {}
+    metrics_enabled = getattr(cfg, "metrics_enabled", True)
     sys_prompt = agent.system_prompt(cfg.sentinel, recap=cfg.recap)
+    if metrics_enabled:
+        agent.last_call_metrics = metrics_agent_profile(agent, cfg)
+        agent.last_call_metrics["system_prompt_bytes"] = len(sys_prompt.encode("utf-8"))
+        agent.last_call_metrics["partner_message_bytes"] = len(message.encode("utf-8"))
+        resuming = bool(agent.session_id) and (
+            agent.backend != "codex" or not first_turn_for_agent
+        )
+        agent.last_call_metrics["call_mode"] = "resume" if resuming else "fresh"
     reasoning = effective_reasoning(agent, cfg.reasoning)
     # Per-turn stderr log + pid file land in the run dir for forensics +
     # liveness checks, sortable by turn number. The pid file is the only
@@ -2011,6 +2347,15 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
         agent, sys_prompt, message, cfg, first_turn_for_agent,
         log_path, pid_path, reasoning,
     )
+    if metrics_enabled:
+        if "raw_output_bytes" not in agent.last_call_metrics:
+            # Dry runs do not have provider stdout; their adapter result is
+            # the complete synthetic backend output for this call.
+            _metrics_record_raw_output(agent, text)
+    else:
+        # Adapters also support direct callers and therefore collect optional
+        # decoded telemetry locally. A disabled normal run must retain none.
+        agent.last_call_metrics = {}
     agent.session_id = new_sid
     return text
 
@@ -2417,6 +2762,343 @@ def _setup_run_worktree(
     return None, None
 
 
+# ---------- central local metrics ----------
+
+_METRICS_WARNED: set[str] = set()
+_METRIC_PHASES = {"kickoff_pending", "kickoff_running", "turn_running",
+                 "between_turns", "awaiting_force", "finished"}
+_METRIC_REASONS = {"converged", "converged_after_force", "max_turns", "timeout",
+                   "agent_error", "kickoff_error", "setup_error", "force_stop",
+                   "forced_continuation", "dry_run"}
+
+
+def _metrics_root() -> pathlib.Path:
+    return pathlib.Path.home() / ".duet" / "metrics"
+
+
+def _metrics_now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _metrics_warning(metric_id: str) -> None:
+    if metric_id not in _METRICS_WARNED:
+        _METRICS_WARNED.add(metric_id)
+        print("[duet] central metrics unavailable; local run artifacts are intact. "
+              "Use --stats --refresh later to recover metrics.", file=sys.stderr)
+
+
+def _metrics_project_id(cwd: object) -> Optional[str]:
+    """Salt working-context identifiers locally; never publish the path or salt."""
+    if not isinstance(cwd, (str, pathlib.Path)) or not str(cwd):
+        return None
+    root = _metrics_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    key_path = root / "identity.key"
+    if not key_path.exists():
+        try:
+            write_text_atomic_new(key_path, uuid.uuid4().hex + uuid.uuid4().hex)
+            key_path.chmod(0o600)
+        except FileExistsError:
+            pass
+    salt = key_path.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", salt):
+        raise ValueError("invalid metrics identity key")
+    identity = str(pathlib.Path(cwd).expanduser().resolve())
+    return hashlib.sha256((salt + "\0" + identity).encode("utf-8")).hexdigest()
+
+
+def _begin_run_metrics(cfg: DuetConfig) -> None:
+    cfg._metrics_context = {}
+    if not cfg.metrics_enabled:
+        return
+    cfg._metrics_context = {
+        "id": str(uuid.uuid4()), "started_at": _metrics_now(),
+        "_monotonic": time.monotonic(), "project_id": None,
+        "agents": [dict(slot=slot, **metrics_agent_profile(agent, cfg))
+                   for slot, agent in zip(("lead", "partner"), cfg.agents)],
+    }
+    try:
+        cfg._metrics_context["project_id"] = _metrics_project_id(cfg.cwd)
+    except (OSError, ValueError, RuntimeError):
+        _metrics_warning(cfg._metrics_context["id"])
+
+
+def _probe_run_metrics(cfg: DuetConfig) -> None:
+    if cfg._metrics_context and not cfg.dry_run:
+        cfg._metrics_context["agents"] = [
+            dict(slot=slot, **metrics_agent_profile(agent, cfg, probe_versions=True))
+            for slot, agent in zip(("lead", "partner"), cfg.agents)]
+
+
+def _metrics_state_context(cfg: DuetConfig) -> Optional[dict]:
+    if not cfg._metrics_context:
+        return None
+    value = {key: val for key, val in cfg._metrics_context.items()
+             if not key.startswith("_")}
+    value["updated_at"] = _metrics_now()
+    value["wall_elapsed_s"] = max(0.0, time.monotonic() - cfg._metrics_context["_monotonic"])
+    return value
+
+
+def _metrics_timed(cfg: DuetConfig, key: str, operation: Callable[[], str]) -> str:
+    started = time.monotonic()
+    try:
+        return operation()
+    finally:
+        if cfg._metrics_context:
+            cfg._metrics_context[key] = max(0.0, time.monotonic() - started)
+
+
+def _metrics_derive_seed(cfg: DuetConfig, run_dir: pathlib.Path) -> str:
+    extracting = not cfg.kickoff and bool(cfg.agents[0].session_id)
+    seed = _metrics_timed(cfg, "seed_elapsed_s", lambda: derive_seed(cfg, run_dir))
+    if extracting and cfg._metrics_context:
+        cfg._metrics_context["seed_entry"] = {
+            "turn": 0, "kind": "seed_extract", "agent": cfg.agents[0].name,
+            "elapsed_s": cfg._metrics_context["seed_elapsed_s"],
+            "metrics": _record_turn_metrics(cfg.agents[0], seed, seed, False, cfg),
+        }
+    return seed
+
+
+def _metrics_timestamp(value: object) -> Optional[str]:
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(dt.timezone.utc).isoformat() if parsed.tzinfo else None
+    except ValueError:
+        return None
+
+
+def _metrics_snapshot_profile(raw: object, slot: str) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    fields = ("backend", "model_requested", "cli_version", "reasoning_requested",
+              "reasoning_effective", "reasoning_backend_value", "reasoning_transport",
+              "prompt_transport")
+    result = {key: _metrics_identifier(raw.get(key)) for key in fields}
+    result.update(slot=slot, role=raw.get("role") if raw.get("role") in ROLE_PROMPTS else "custom",
+                  fast_mode=raw.get("fast_mode") if isinstance(raw.get("fast_mode"), bool) else None)
+    extra = raw.get("extra_args_present")
+    result["extra_args_present"] = extra if isinstance(extra, bool) else None
+    return result
+
+
+def _metrics_legacy_profiles(state: dict) -> list[dict]:
+    profiles = []
+    agents = state.get("agents") if isinstance(state.get("agents"), list) else []
+    for slot, raw in zip(("lead", "partner"), agents):
+        raw = raw if isinstance(raw, dict) else {}
+        profile = _metrics_snapshot_profile(raw, slot)
+        profile["model_requested"] = _metrics_identifier(raw.get("model"))
+        profile["reasoning_requested"] = _metrics_identifier(
+            raw.get("reasoning_effort") or state.get("reasoning"))
+        # Historical backend mappings, fast overrides, and CLI versions are unknown.
+        profile["reasoning_effective"] = None
+        profile["reasoning_transport"] = None
+        profiles.append(profile)
+    return profiles
+
+
+def _metrics_history_slot(entry: dict, state: dict) -> str:
+    agents = state.get("agents") if isinstance(state.get("agents"), list) else []
+    for slot, agent in zip(("lead", "partner"), agents):
+        if isinstance(agent, dict) and agent.get("name") == entry.get("agent"):
+            return slot
+    return "unknown"
+
+
+def _metrics_snapshot_turn(entry: dict, state: dict) -> dict:
+    metrics = entry.get("metrics") if isinstance(entry.get("metrics"), dict) else {}
+    outcome = entry.get("finished_reason")
+    verify = entry.get("verify") if isinstance(entry.get("verify"), dict) else {}
+    value = {
+        "turn": _metrics_nonnegative_int(entry.get("turn")),
+        "kind": "forced" if entry.get("forced") else (
+            "seed" if entry.get("kind") == "seed_extract" else "loop"),
+        "slot": _metrics_history_slot(entry, state),
+        "outcome": outcome if outcome in {"timeout", "agent_error"} else (
+            "unknown" if outcome is not None else "ok"),
+        "agent_elapsed_s": _metrics_nonnegative_amount(entry.get("elapsed_s")),
+        "verify_elapsed_s": _metrics_nonnegative_amount(verify.get("elapsed_s")),
+        "model_reported": _metrics_identifier(metrics.get("model_reported")),
+        "models_reported": sorted({model for raw in metrics.get("models_reported", [])[:32]
+                                  if (model := _metrics_identifier(raw)) is not None})
+                           if isinstance(metrics.get("models_reported"), list) else [],
+        "cost_usd": _metrics_nonnegative_amount(metrics.get("cost_usd")),
+    }
+    for key in ("system_prompt_bytes", "partner_message_bytes", "raw_output_bytes",
+                "delivered_output_bytes", "handoff_bytes"):
+        value[key] = _metrics_nonnegative_int(metrics.get(key))
+    for key, allowed in (("call_mode", {"fresh", "resume"}),
+                         ("usage_scope", {"invocation", "turn", "session", "unknown"})):
+        value[key] = metrics.get(key) if metrics.get(key) in allowed else None
+    usage = metrics.get("usage") if isinstance(metrics.get("usage"), dict) else {}
+    value["usage"] = {key: _metrics_nonnegative_int(usage.get(key)) for key in (
+        "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_input_tokens",
+        "cache_creation_input_tokens")}
+    for key in ("convergence_proposed", "convergence_counted"):
+        value[key] = metrics.get(key) if isinstance(metrics.get(key), bool) else None
+    return value
+
+
+def _metrics_run_kind(state: dict) -> str:
+    if isinstance(state.get("dry_run"), bool):
+        if state["dry_run"]:
+            return "dry_run"
+        return "test" if state.get("metrics_kind") == "test" else "live"
+    return "dry_run" if state.get("finished_reason") == "dry_run" else "unknown"
+
+
+def build_metrics_snapshot(state: dict, state_path: pathlib.Path) -> dict:
+    """Whitelist a saved state into a path/prompt/command-free metrics record."""
+    meta = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+    metric_id = meta.get("id")
+    recorded = isinstance(metric_id, str) and bool(re.fullmatch(
+        r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", metric_id))
+    project_id = meta.get("project_id")
+    if not isinstance(project_id, str) or not re.fullmatch(r"[0-9a-f]{64}", project_id):
+        project_id = _metrics_project_id(state.get("cwd"))
+    if not recorded:
+        metric_id = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                  str(project_id) + str(state_path.resolve())))
+    history = state.get("history") if isinstance(state.get("history"), list) else []
+    history = [entry for entry in history if isinstance(entry, dict)]
+    if isinstance(meta.get("seed_entry"), dict):
+        history = [meta["seed_entry"]] + history
+    checks = [entry["verify"]["ok"] for entry in history
+              if isinstance(entry.get("verify"), dict)
+              and isinstance(entry["verify"].get("ok"), bool)]
+    profiles = meta.get("agents") if isinstance(meta.get("agents"), list) else []
+    reason = state.get("finished_reason")
+    return {
+        "schema_version": 1, "kind": "duet.metrics.run", "id": metric_id,
+        "source": "recorded" if recorded else "legacy", "run_kind": _metrics_run_kind(state),
+        "project_id": project_id, "duet_version": _metrics_identifier(state.get("duet_version")),
+        "started_at": _metrics_timestamp(meta.get("started_at")),
+        "updated_at": _metrics_timestamp(meta.get("updated_at")) if recorded else None,
+        "phase": state.get("phase") if state.get("phase") in _METRIC_PHASES else "unknown",
+        "finished_reason": reason if reason in _METRIC_REASONS else None,
+        "max_turns": _positive_int_or_none(state.get("max_turns")),
+        "per_turn_timeout": _positive_int_or_none(state.get("per_turn_timeout")),
+        "wall_elapsed_s": _metrics_nonnegative_amount(meta.get("wall_elapsed_s")),
+        "kickoff_elapsed_s": _metrics_nonnegative_amount(meta.get("kickoff_elapsed_s")),
+        "seed_elapsed_s": _metrics_nonnegative_amount(meta.get("seed_elapsed_s")),
+        "agents": [_metrics_snapshot_profile(raw, slot)
+                   for slot, raw in zip(("lead", "partner"), profiles)] if recorded
+                  else _metrics_legacy_profiles(state),
+        "turns": [_metrics_snapshot_turn(entry, state) for entry in history
+                  if entry.get("kind") != "kickoff"],
+        "verification": {"attempts": len(checks), "passed": sum(checks),
+                         "failed": len(checks) - sum(checks)},
+    }
+
+
+def _write_metric_snapshot(snapshot: dict) -> bool:
+    # Duet's process-group runtime is POSIX; flock releases automatically on
+    # exit/crash. Never wait for another writer on the agent's critical path.
+    import fcntl
+
+    destination = _metrics_root() / "runs"
+    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+    locks = _metrics_root() / "locks"
+    locks.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = destination / (snapshot["id"] + ".json")
+    with (locks / (snapshot["id"] + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _metrics_snapshot_is_current(target, snapshot):
+            return False
+        write_text_atomic(target, json.dumps(snapshot, indent=2, allow_nan=False) + "\n")
+    return True
+
+
+def _persist_run_metrics(state: dict, state_path: pathlib.Path) -> None:
+    meta = state.get("metrics")
+    if state.get("metrics_enabled") is False or not isinstance(meta, dict):
+        return
+    try:
+        _write_metric_snapshot(build_metrics_snapshot(state, state_path))
+    except (OSError, ValueError, TypeError, RuntimeError):
+        _metrics_warning(str(meta.get("id", "unknown")))
+
+
+def _record_turn_metrics(agent: Agent, raw: str, delivered: str,
+                         convergence_counted: bool, cfg: DuetConfig,
+                         handoff_bytes: int = 0) -> dict:
+    if not cfg.metrics_enabled:
+        return {}
+    value = dict(agent.last_call_metrics)
+    value.update(delivered_output_bytes=len(delivered.encode("utf-8")),
+                 handoff_bytes=max(0, handoff_bytes),
+                 convergence_proposed=convergence_proposed(raw, cfg.sentinel),
+                 convergence_counted=convergence_counted)
+    return value
+
+
+def _metric_import_paths(explicit: Optional[str]) -> Iterable[pathlib.Path]:
+    roots = [pathlib.Path(explicit).expanduser()] if explicit else _default_list_paths()
+    for root in roots:
+        try:
+            if (root / "state.json").is_file():
+                yield root / "state.json"
+            if root.is_dir():
+                yield from root.glob("*/state.json")
+        except OSError:
+            # Let refresh's normal read-error path count an inaccessible root.
+            yield root / "state.json"
+
+
+def _metrics_snapshot_is_current(target: pathlib.Path, snapshot: dict) -> bool:
+    """Allow explicit recovery of failed rolling writes without rolling back time."""
+    try:
+        if target.stat().st_size > 8 * 1024 * 1024:
+            return False
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if (not isinstance(existing, dict) or existing.get("id") != snapshot["id"]
+                or existing.get("schema_version") != 1
+                or existing.get("kind") != "duet.metrics.run"):
+            return False
+        if existing == snapshot:
+            return True
+        previous_wall = _metrics_nonnegative_amount(existing.get("wall_elapsed_s"))
+        incoming_wall = _metrics_nonnegative_amount(snapshot.get("wall_elapsed_s"))
+        if (previous_wall is not None and incoming_wall is not None
+                and previous_wall != incoming_wall):
+            return previous_wall > incoming_wall
+        older = _metrics_timestamp(snapshot.get("updated_at"))
+        newer = _metrics_timestamp(existing.get("updated_at"))
+        return bool(older and newer and newer > older)
+    except (OSError, ValueError):
+        return False
+
+
+def refresh_metrics(explicit: Optional[str] = None) -> dict:
+    counts = {"imported": 0, "unchanged": 0, "skipped": 0}
+    seen: set[pathlib.Path] = set()
+    for path in _metric_import_paths(explicit):
+        try:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            with path.open("rb") as handle:
+                raw = handle.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise ValueError("oversized state")
+            state = json.loads(raw.decode("utf-8"))
+            if (not isinstance(state, dict) or state.get("metrics_enabled") is False
+                    or not isinstance(state.get("agents"), list)
+                    or not isinstance(state.get("history"), list)):
+                counts["skipped"] += 1
+                continue
+            snapshot = build_metrics_snapshot(state, path)
+            changed = _write_metric_snapshot(snapshot)
+            counts["imported" if changed else "unchanged"] += 1
+        except (OSError, ValueError, TypeError, RuntimeError):
+            counts["skipped"] += 1
+    return counts
+
+
 def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
                      finished_reason: Optional[str],
                      transcript_path: pathlib.Path,
@@ -2436,6 +3118,12 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
     """
     effective_phase = "finished" if finished_reason else (phase or "between_turns")
     state = {
+        "duet_version": __version__,
+        "max_turns": cfg.max_turns,
+        "dry_run": cfg.dry_run,
+        "metrics_enabled": cfg.metrics_enabled,
+        "metrics_kind": cfg.metrics_kind,
+        "metrics": _metrics_state_context(cfg),
         "task": cfg.task,
         "cwd": str(cfg.cwd),
         "phase": effective_phase,
@@ -2470,6 +3158,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
 
 def _write_run_state(path: pathlib.Path, state: dict) -> None:
     write_text_atomic(path, json.dumps(state, indent=2) + "\n")
+    _persist_run_metrics(state, path)
 
 
 def _publish_run_info(cfg: DuetConfig, run_dir: pathlib.Path,
@@ -2579,10 +3268,11 @@ def _run_kickoff_command(
         phase="kickoff_running",
     )
     _write_run_state(state_path, running)
-    started = time.time()
+    started = time.monotonic()
     try:
-        output = run_task_from_cmd(
-            cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir
+        output = _metrics_timed(
+            cfg, "kickoff_elapsed_s", lambda: run_task_from_cmd(
+                cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir)
         )
     except Exception as exc:
         if stop.requested and stop.reason == "SIGTERM":
@@ -2609,7 +3299,7 @@ def _run_kickoff_command(
             "turn": 0,
             "agent": "duet",
             "kind": "kickoff",
-            "elapsed_s": time.time() - started,
+            "elapsed_s": time.monotonic() - started,
             "finished_reason": FINISHED_KICKOFF_ERROR,
             "error": summary,
             "stderr_log_path": str(run_dir / "turn-00-kickoff.stderr.log"),
@@ -2708,6 +3398,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     first_turn_for_agent = not seen_first_turn[speaker.name]
     guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
     t0 = time.time()
+    measured_start = time.monotonic()
     inflight: Optional[tuple[threading.Event, threading.Thread]] = None
     if cfg.recap:
         inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
@@ -2732,7 +3423,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
             inflight = None
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - measured_start
             print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
                   f"ERROR after {int(round(elapsed))}s — "
                   f"see turn-{turn:02d}-{speaker.name}.stderr.log")
@@ -2744,7 +3435,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         # Seen only on success: a timed-out/errored first turn must count as a
         # first turn again on retry, so the same-cwd codex guards keep applying.
         seen_first_turn[speaker.name] = True
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - measured_start
     raw_reply = reply
     convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
     verify_state: Optional[dict] = None
@@ -2774,12 +3465,16 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         )
         append_text_atomic(recap_path, recap_block)
 
+    before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
 
     log(speaker.name, speaker.role, reply)
     history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                      "len_chars": len(reply), "session_id": speaker.session_id}
+    history_entry["metrics"] = _record_turn_metrics(
+        speaker, raw_reply, reply, convergence_hit, cfg,
+        len(reply.encode("utf-8")) - before_handoff_bytes)
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         # Bounded like the transcript block — a raw xhigh-codex stderr dump
@@ -2884,7 +3579,7 @@ def _derive_seed_or_failure(
     prints the done banner, and returns (None, state) so `run_duet` can return
     immediately.
     """
-    seed_t0 = time.time()
+    seed_t0 = time.monotonic()
     try:
         if not cfg.kickoff and cfg.agents[0].session_id:
             extracting = _build_run_state(
@@ -2902,7 +3597,7 @@ def _derive_seed_or_failure(
             guard_cwd_keyed_resume_before_call(
                 cfg, cfg.agents[0], first_turn_for_agent=False
             )
-        return derive_seed(cfg, run_dir=run_dir), None
+        return _metrics_derive_seed(cfg, run_dir), None
     except Exception as e:
         if stop.requested and stop.reason == "SIGTERM":
             log("duet", "stop", "[duet] immediate stop requested", kind="stop")
@@ -2926,7 +3621,8 @@ def _derive_seed_or_failure(
             "turn": 0,
             "agent": seed_agent.name,
             "kind": "seed_extract",
-            "elapsed_s": time.time() - seed_t0,
+            "elapsed_s": time.monotonic() - seed_t0,
+            "metrics": _record_turn_metrics(seed_agent, "", reply, False, cfg),
             "len_chars": len(reply),
             "session_id": seed_agent.session_id,
             "finished_reason": failure_reason,
@@ -2997,6 +3693,7 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     """Allocate, publish launch metadata, isolate, and run deferred kickoff."""
     _validate_run_info_target(cfg)
     run_dir, run_id = _allocate_run_dir(cfg)
+    _begin_run_metrics(cfg)
     transcript_path = run_dir / "transcript.md"
     recap_path = run_dir / "recap.md"
     state_path = run_dir / "state.json"
@@ -3052,6 +3749,7 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
         return context, state
 
     _print_run_banner(cfg, context)
+    _probe_run_metrics(cfg)
     failure = _run_kickoff_command(
         cfg, run_dir=run_dir, transcript_path=transcript_path,
         recap_path=recap_path, state_path=state_path, history=history,
@@ -3241,6 +3939,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
     run_dir = transcript_path.parent
     label = f"{forced_turn:02d}-forced"
     t0 = time.time()
+    measured_start = time.monotonic()
     inflight: Optional[tuple[threading.Event, threading.Thread]] = None
     if cfg.recap:
         inflight = _start_recap_inflight(forced_turn, next_speaker.name,
@@ -3259,7 +3958,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         if cfg.recap and inflight is not None:
             _stop_recap_inflight(*inflight)
             inflight = None
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - measured_start
             print(f"Turn {forced_turn:02d} | {next_speaker.name} "
                   f"({next_speaker.role}) · ERROR after "
                   f"{int(round(elapsed))}s — see "
@@ -3272,7 +3971,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         # Seen only on success — mirrors _execute_turn so a failed forced turn
         # keeps the agent's first-turn guards intact on the next attempt.
         seen_first_turn[next_speaker.name] = True
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - measured_start
     raw_reply = reply
     convergence_hit = convergence_proposed(reply, cfg.sentinel)
     verify_state: Optional[dict] = None
@@ -3285,6 +3984,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         else:
             reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
             convergence_hit = False
+    before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and next_speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
     recap_block = ""
@@ -3310,9 +4010,12 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
     )
     history_entry = {"turn": forced_turn, "agent": next_speaker.name,
-                     "forced": True, "len_chars": len(reply),
+                     "forced": True, "len_chars": len(reply), "elapsed_s": elapsed,
                      "session_id": next_speaker.session_id,
                      **({"verify": verify_state} if verify_state is not None else {})}
+    history_entry["metrics"] = _record_turn_metrics(
+        next_speaker, raw_reply, reply, convergence_hit, cfg,
+        len(reply.encode("utf-8")) - before_handoff_bytes)
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
@@ -4371,6 +5074,530 @@ _LIST_STATUS_FINISHED = {
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
 
 
+# ---------- metrics reporting ----------
+
+_METRICS_REPORT_FILE_MAX_BYTES = 8 * 1024 * 1024
+_METRICS_REPORT_UUID_RE = re.compile(
+    r"\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
+_METRICS_REPORT_USAGE_KEYS = (
+    "input_tokens", "output_tokens", "cache_read_input_tokens",
+    "cache_creation_input_tokens", "reasoning_tokens",
+)
+_METRICS_REPORT_PROFILE_KEYS = (
+    "slot", "backend", "role", "model_requested", "cli_version",
+    "reasoning_requested", "reasoning_effective", "reasoning_backend_value",
+    "reasoning_transport", "fast_mode", "extra_args_present", "prompt_transport",
+)
+
+
+def _metrics_report_string(value: object, max_chars: int = 128) -> Optional[str]:
+    """Return a bounded reporting identifier, never a raw snapshot value."""
+    return _metrics_identifier(value, max_chars=max_chars)
+
+
+def _metrics_report_optional_int(value: object) -> tuple[bool, Optional[int]]:
+    if value is None:
+        return True, None
+    result = _metrics_nonnegative_int(value)
+    return result is not None, result
+
+
+def _metrics_report_optional_number(value: object) -> tuple[bool, Optional[float]]:
+    if value is None:
+        return True, None
+    result = _metrics_nonnegative_amount(value)
+    return result is not None, result
+
+
+def _metrics_report_value(payload: dict, name: str) -> object:
+    """Return an optional snapshot value without treating absence as zero."""
+    return payload.get(name) if name in payload else None
+
+
+def _metrics_report_profile(payload: object, *, slot: Optional[str] = None) -> Optional[dict]:
+    if not isinstance(payload, dict):
+        return None
+    profile: dict[str, object] = {}
+    for name in _METRICS_REPORT_PROFILE_KEYS:
+        value = slot if name == "slot" and slot is not None else payload.get(name)
+        if name in {"fast_mode", "extra_args_present"}:
+            if value is not None and not isinstance(value, bool):
+                return None
+            profile[name] = value
+        elif name == "slot":
+            if not isinstance(value, str) or value not in {"lead", "partner", "unknown"}:
+                return None
+            profile[name] = value
+        else:
+            safe = _metrics_report_string(value)
+            if value is not None and safe is None:
+                return None
+            profile[name] = safe
+    return profile
+
+
+def _metrics_report_usage(payload: object) -> Optional[dict]:
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        return None
+    usage: dict[str, int] = {}
+    for name in _METRICS_REPORT_USAGE_KEYS:
+        valid, value = _metrics_report_optional_int(payload.get(name))
+        if not valid:
+            return None
+        if value is not None:
+            usage[name] = value
+    return usage
+
+
+def _metrics_report_models(payload: object) -> Optional[list[str]]:
+    if payload is None:
+        return []
+    if not isinstance(payload, list) or len(payload) > 32:
+        return None
+    models: list[str] = []
+    for value in payload:
+        safe = _metrics_report_string(value)
+        if safe is None:
+            return None
+        models.append(safe)
+    return sorted(set(models))
+
+
+def _metrics_report_turn_labels(payload: dict, fields: dict[str, object]) -> bool:
+    model = _metrics_report_string(_metrics_report_value(payload, "model_reported"))
+    if payload.get("model_reported") is not None and model is None:
+        return False
+    if model is not None:
+        fields["model_reported"] = model
+    call_mode = payload.get("call_mode")
+    if call_mode is not None and (not isinstance(call_mode, str)
+                                  or call_mode not in {"fresh", "resume"}):
+        return False
+    fields["call_mode"] = call_mode
+    usage_scope = payload.get("usage_scope")
+    if usage_scope is not None and (not isinstance(usage_scope, str)
+                                    or usage_scope not in {"invocation", "turn", "session", "unknown"}):
+        return False
+    models = _metrics_report_models(payload.get("models_reported"))
+    if models is None:
+        return False
+    fields["usage_scope"] = usage_scope
+    fields["models_reported"] = models
+    return True
+
+
+def _metrics_report_turn(payload: object) -> Optional[dict]:
+    if not isinstance(payload, dict):
+        return None
+    number = _metrics_nonnegative_int(payload.get("turn"))
+    kind, slot, outcome = payload.get("kind"), payload.get("slot"), payload.get("outcome")
+    if (number is None or not isinstance(kind, str) or kind not in {"loop", "forced", "seed"}
+            or not isinstance(slot, str) or slot not in {"lead", "partner", "unknown"}
+            or not isinstance(outcome, str) or outcome not in {"ok", "timeout", "agent_error", "unknown"}):
+        return None
+    fields: dict[str, object] = {
+        "turn": number, "kind": payload["kind"], "slot": payload["slot"],
+        "outcome": payload["outcome"],
+    }
+    for name in ("agent_elapsed_s", "verify_elapsed_s", "cost_usd"):
+        valid, value = _metrics_report_optional_number(_metrics_report_value(payload, name))
+        if not valid:
+            return None
+        fields[name] = value
+    for name in ("system_prompt_bytes", "partner_message_bytes", "raw_output_bytes",
+                 "delivered_output_bytes", "handoff_bytes"):
+        valid, value = _metrics_report_optional_int(_metrics_report_value(payload, name))
+        if not valid:
+            return None
+        if value is not None:
+            fields[name] = value
+    if not _metrics_report_turn_labels(payload, fields):
+        return None
+    usage = _metrics_report_usage(_metrics_report_value(payload, "usage"))
+    if usage is None:
+        return None
+    fields["usage"] = usage
+    return fields
+
+
+def _metrics_report_header(payload: object) -> Optional[dict]:
+    """Copy top-level public fields after strict schema validation."""
+    if not isinstance(payload, dict):
+        return None
+    source, run_kind = payload.get("source"), payload.get("run_kind")
+    if (payload.get("schema_version") != 1 or payload.get("kind") != "duet.metrics.run"
+            or not isinstance(source, str) or source not in {"recorded", "legacy"}
+            or not isinstance(run_kind, str) or run_kind not in {"live", "dry_run", "test", "unknown"}):
+        return None
+    run_id = payload.get("id")
+    phase = _metrics_report_string(payload.get("phase"))
+    if not isinstance(run_id, str) or not _METRICS_REPORT_UUID_RE.match(run_id) or phase is None:
+        return None
+    record: dict[str, object] = {
+        "id": run_id.lower(), "source": payload["source"], "run_kind": payload["run_kind"],
+        "phase": phase,
+    }
+    for name in ("duet_version", "project_id", "started_at", "updated_at", "finished_reason"):
+        safe = _metrics_report_string(_metrics_report_value(payload, name))
+        if payload.get(name) is not None and safe is None:
+            return None
+        record[name] = safe
+    for name in ("max_turns", "per_turn_timeout"):
+        valid, value = _metrics_report_optional_int(_metrics_report_value(payload, name))
+        if not valid:
+            return None
+        record[name] = value
+    valid, wall_elapsed = _metrics_report_optional_number(
+        _metrics_report_value(payload, "wall_elapsed_s"),
+    )
+    if not valid:
+        return None
+    record["wall_elapsed_s"] = wall_elapsed
+    return record
+
+
+def _metrics_report_verification(payload: object) -> Optional[dict]:
+    if not isinstance(payload, dict):
+        return None
+    copied: dict[str, int] = {}
+    for name in ("attempts", "passed", "failed"):
+        value = _metrics_nonnegative_int(payload.get(name))
+        if value is None:
+            return None
+        copied[name] = value
+    return copied if copied["passed"] + copied["failed"] <= copied["attempts"] else None
+
+
+def _metrics_report_record(payload: object) -> Optional[dict]:
+    """Validate and copy the public snapshot schema used by reports."""
+    record = _metrics_report_header(payload)
+    if record is None or not isinstance(payload, dict):
+        return None
+    agents = payload.get("agents")
+    turns = payload.get("turns")
+    verification = _metrics_report_verification(payload.get("verification"))
+    if (not isinstance(agents, list) or not isinstance(turns, list)
+            or verification is None):
+        return None
+    copied_agents = [_metrics_report_profile(agent) for agent in agents]
+    copied_turns = [_metrics_report_turn(turn) for turn in turns]
+    if any(agent is None for agent in copied_agents) or any(turn is None for turn in copied_turns):
+        return None
+    record["agents"] = copied_agents
+    record["turns"] = copied_turns
+    record["verification"] = verification
+    return record
+
+
+def _metrics_report_median(values: list[float]) -> Optional[float]:
+    if not values:
+        return None
+    values = sorted(values)
+    middle = len(values) // 2
+    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+
+
+def _metrics_report_coverage(measured: int, total: int) -> dict:
+    return {
+        "reported_turns": measured,
+        "total_turns": total,
+        "fraction": (measured / total) if total else None,
+    }
+
+
+def _metrics_report_new_group(profile: dict) -> dict:
+    return {
+        "profile": profile,
+        "turn_count": 0,
+        "outcomes": {},
+        "_agent_elapsed": [], "_verify_elapsed": [],
+        "_tokens": {name: [] for name in _METRICS_REPORT_USAGE_KEYS}, "_costs": [],
+    }
+
+
+def _metrics_report_add_turn(group: dict, turn: dict) -> None:
+    group["turn_count"] += 1
+    outcome = turn["outcome"]
+    group["outcomes"][outcome] = group["outcomes"].get(outcome, 0) + 1
+    for field, internal in (("agent_elapsed_s", "_agent_elapsed"),
+                            ("verify_elapsed_s", "_verify_elapsed")):
+        if turn[field] is not None:
+            group[internal].append(turn[field])
+    if turn["usage_scope"] == "invocation":
+        for name in _METRICS_REPORT_USAGE_KEYS:
+            if name in turn["usage"]:
+                group["_tokens"][name].append(turn["usage"][name])
+        if turn["cost_usd"] is not None:
+            group["_costs"].append(turn["cost_usd"])
+
+
+def _metrics_report_finish_group(group: dict) -> dict:
+    total = group["turn_count"]
+    result = {key: value for key, value in group.items() if not key.startswith("_")}
+    result["timing"] = {
+        "agent_elapsed_s": {
+            **_metrics_report_coverage(len(group["_agent_elapsed"]), total),
+            "median": _metrics_report_median(group["_agent_elapsed"]),
+        },
+        "verify_elapsed_s": {
+            **_metrics_report_coverage(len(group["_verify_elapsed"]), total),
+            "median": _metrics_report_median(group["_verify_elapsed"]),
+        },
+    }
+    result["provider_tokens"] = {
+        name: {
+            **_metrics_report_coverage(len(values), total),
+            "total": sum(values) if values else None,
+        }
+        for name, values in group["_tokens"].items()
+    }
+    result["reported_cost_usd"] = {
+        **_metrics_report_coverage(len(group["_costs"]), total),
+        "total": sum(group["_costs"]) if group["_costs"] else None,
+    }
+    return result
+
+
+def _metrics_report_agent_for_slot(record: dict, slot: str) -> dict:
+    for agent in record["agents"]:
+        if agent["slot"] == slot:
+            return agent
+    return {name: (slot if name == "slot" else None) for name in _METRICS_REPORT_PROFILE_KEYS}
+
+
+def _metrics_report_pair_profile(record: dict) -> dict:
+    return {
+        "duet_version": record["duet_version"],
+        "max_turns": record["max_turns"],
+        "per_turn_timeout": record["per_turn_timeout"],
+        "lead": _metrics_report_agent_for_slot(record, "lead"),
+        "partner": _metrics_report_agent_for_slot(record, "partner"),
+    }
+
+
+def _metrics_report_key(value: dict) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _metrics_report_is_performance(record: dict, counts: dict) -> bool:
+    """Count one sanitized snapshot and select recorded live data only."""
+    counts["total"] += 1
+    if record["source"] == "legacy":
+        counts["legacy"] += 1
+        return False
+    kind = record["run_kind"]
+    if kind == "dry_run" or kind == "test":
+        counts[kind] += 1
+        return False
+    if kind != "live":
+        counts["unknown"] += 1
+        return False
+    counts["live"] += 1
+    counts["recorded_live"] += 1
+    if record["phase"] != "finished":
+        counts["incomplete"] += 1
+        return False
+    counts["performance_records"] += 1
+    return True
+
+
+def build_metrics_report(records: Iterable[dict], skipped: Optional[dict] = None) -> dict:
+    """Aggregate sanitized run snapshots without ranking models or outcomes."""
+    skip_counts = {"read_errors": 0, "malformed": 0, "unknown_schema": 0, "duplicate_id": 0}
+    if skipped:
+        for name in skip_counts:
+            value = _metrics_nonnegative_int(skipped.get(name))
+            if value is not None:
+                skip_counts[name] = value
+    counts = {"total": 0, "live": 0, "recorded_live": 0, "dry_run": 0, "test": 0,
+              "legacy": 0, "unknown": 0, "incomplete": 0, "performance_records": 0}
+    report = {
+        "schema_version": 1, "kind": "duet.metrics.report", "records": counts,
+        "skipped": skip_counts, "turn_outcomes": {},
+        "verification": {"attempts": 0, "passed": 0, "failed": 0, "runs_with_data": 0,
+                         "coverage": None},
+        "wall_elapsed_s": {"terminal_runs": 0, "reported_runs": 0, "coverage": None,
+                           "median": None},
+    }
+    seen_ids: set[str] = set()
+    groups: dict[str, dict] = {}
+    pairs: dict[str, dict] = {}
+    wall_values: list[float] = []
+    for payload in records:
+        if (isinstance(payload, dict)
+                and (payload.get("schema_version") != 1
+                     or payload.get("kind") != "duet.metrics.run")):
+            skip_counts["unknown_schema"] += 1
+            continue
+        try:
+            record = _metrics_report_record(payload)
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            record = None
+        if record is None:
+            skip_counts["malformed"] += 1
+            continue
+        if record["id"] in seen_ids:
+            skip_counts["duplicate_id"] += 1
+            continue
+        seen_ids.add(record["id"])
+        if not _metrics_report_is_performance(record, counts):
+            continue
+        terminal = record["phase"] == "finished"
+        verification = record["verification"]
+        for name in ("attempts", "passed", "failed"):
+            report["verification"][name] += verification[name]
+        if verification["attempts"]:
+            report["verification"]["runs_with_data"] += 1
+        if terminal:
+            report["wall_elapsed_s"]["terminal_runs"] += 1
+            if record["wall_elapsed_s"] is not None:
+                wall_values.append(record["wall_elapsed_s"])
+        for turn in record["turns"]:
+            outcome = turn["outcome"]
+            report["turn_outcomes"][outcome] = report["turn_outcomes"].get(outcome, 0) + 1
+            profile = _metrics_report_agent_for_slot(record, turn["slot"]).copy()
+            profile["duet_version"] = record["duet_version"]
+            profile["model_reported"] = turn.get("model_reported")
+            profile["models_reported"] = turn["models_reported"]
+            profile["turn_kind"] = turn["kind"]
+            profile["call_mode"] = turn["call_mode"]
+            profile["usage_scope"] = turn["usage_scope"]
+            key = _metrics_report_key(profile)
+            group = groups.setdefault(key, _metrics_report_new_group(profile))
+            _metrics_report_add_turn(group, turn)
+        pair_profile = _metrics_report_pair_profile(record)
+        pair_key = _metrics_report_key(pair_profile)
+        pair = pairs.setdefault(pair_key, {"profile": pair_profile, "run_count": 0, "outcomes": {}})
+        pair["run_count"] += 1
+        outcome = record["finished_reason"] if terminal else "incomplete"
+        outcome = outcome or "unknown"
+        pair["outcomes"][outcome] = pair["outcomes"].get(outcome, 0) + 1
+    performance = counts["performance_records"]
+    report["verification"]["coverage"] = (report["verification"]["runs_with_data"] / performance
+                                            if performance else None)
+    report["wall_elapsed_s"]["reported_runs"] = len(wall_values)
+    terminals = report["wall_elapsed_s"]["terminal_runs"]
+    report["wall_elapsed_s"]["coverage"] = len(wall_values) / terminals if terminals else None
+    report["wall_elapsed_s"]["median"] = _metrics_report_median(wall_values)
+    report["agent_groups"] = [_metrics_report_finish_group(groups[key]) for key in sorted(groups)]
+    report["pair_groups"] = [pairs[key] for key in sorted(pairs)]
+    return report
+
+
+def _metrics_report_load_records(root: pathlib.Path) -> tuple[list[dict], dict]:
+    """Read only bounded, standalone snapshot files from the metrics store."""
+    skipped = {"read_errors": 0, "malformed": 0, "unknown_schema": 0, "duplicate_id": 0}
+    snapshots = root / "runs"
+    try:
+        if root.is_symlink() or snapshots.is_symlink() or not snapshots.is_dir():
+            return [], skipped
+        paths = sorted(snapshots.iterdir())
+    except OSError:
+        skipped["read_errors"] += 1
+        return [], skipped
+    records: list[dict] = []
+    for path in paths:
+        try:
+            if path.is_symlink() or path.suffix != ".json" or not path.is_file():
+                continue
+            with path.open("rb") as handle:
+                raw = handle.read(_METRICS_REPORT_FILE_MAX_BYTES + 1)
+            if len(raw) > _METRICS_REPORT_FILE_MAX_BYTES:
+                skipped["read_errors"] += 1
+                continue
+            payload = json.loads(raw.decode("utf-8"))
+        except OSError:
+            skipped["read_errors"] += 1
+            continue
+        except (UnicodeError, json.JSONDecodeError, RecursionError):
+            skipped["malformed"] += 1
+            continue
+        if not isinstance(payload, dict):
+            skipped["malformed"] += 1
+            continue
+        if payload.get("schema_version") != 1 or payload.get("kind") != "duet.metrics.run":
+            skipped["unknown_schema"] += 1
+            continue
+        records.append(payload)
+    return records, skipped
+
+
+def _print_metrics_human(report: dict) -> None:
+    counts = report["records"]
+    if not counts["total"]:
+        print("[duet] no metrics snapshots found.")
+        if sum(report["skipped"].values()):
+            print(f"  skipped snapshots: {sum(report['skipped'].values())}; "
+                  "see --json for read, schema, and validation counts.")
+        return
+    print("[duet] metrics: "
+          f"{counts['recorded_live']} recorded live, {counts['dry_run']} dry-run, "
+          f"{counts['test']} test, {counts['legacy']} legacy, {counts['unknown']} unknown")
+    if counts["incomplete"]:
+        print(f"  incomplete live snapshots: {counts['incomplete']}")
+    skipped = report["skipped"]
+    skipped_total = sum(skipped.values())
+    if skipped_total:
+        print(f"  skipped snapshots: {skipped_total} (read {skipped['read_errors']}, "
+              f"malformed {skipped['malformed']}, schema {skipped['unknown_schema']}, "
+              f"duplicate {skipped['duplicate_id']})")
+    if not counts["performance_records"]:
+        print("  no recorded live performance data yet.")
+        return
+    wall = report["wall_elapsed_s"]
+    median = "?" if wall["median"] is None else f"{wall['median']:.1f}s"
+    print(f"  terminal wall time: median {median} ({wall['reported_runs']}/"
+          f"{wall['terminal_runs']} reported)")
+    _print_metrics_outcomes_and_cost(report)
+    verify = report["verification"]
+    print(f"  verification: {verify['passed']} passed, {verify['failed']} failed, "
+          f"{verify['attempts']} attempts")
+    for group in report["agent_groups"][:8]:
+        profile = group["profile"]
+        requested = profile["model_requested"] or "default"
+        reported = profile["model_reported"] or ",".join(profile["models_reported"]) or "unreported"
+        version = profile["cli_version"] or "version?"
+        effort = profile["reasoning_effective"] or "native-default"
+        timing = group["timing"]["agent_elapsed_s"]
+        median = "?" if timing["median"] is None else f"{timing['median']:.1f}s"
+        print(f"  {profile['slot']} {profile['backend'] or '?'} {requested} → {reported} "
+              f"({version}, effort={effort}, {profile['reasoning_transport'] or 'transport?'}): "
+              f"{group['turn_count']} turns, median {median} "
+              f"({timing['reported_turns']}/{timing['total_turns']} measured)")
+    remaining = len(report["agent_groups"]) - 8
+    if remaining > 0:
+        print(f"  … {remaining} more agent groups in --json output")
+
+
+def _print_metrics_outcomes_and_cost(report: dict) -> None:
+    outcomes: dict[str, int] = {}
+    for pair in report["pair_groups"]:
+        for reason, count in pair["outcomes"].items():
+            outcomes[reason] = outcomes.get(reason, 0) + count
+    print("  run outcomes: " + ", ".join(f"{key}={outcomes[key]}" for key in sorted(outcomes)))
+    costs = [group["reported_cost_usd"] for group in report["agent_groups"]]
+    reported = sum(cost["reported_turns"] for cost in costs)
+    total = sum(cost["total_turns"] for cost in costs)
+    amount = sum(cost["total"] for cost in costs if cost["total"] is not None)
+    value = f"${amount:.4f}" if reported else "unknown"
+    print(f"  provider-reported cost: {value} ({reported}/{total} turns reported)")
+
+
+def print_metrics_report(json_output: bool = False) -> int:
+    """Print central, read-only metrics. Snapshot problems never make this fail."""
+    records, skipped = _metrics_report_load_records(_metrics_root())
+    report = build_metrics_report(records, skipped=skipped)
+    if json_output:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        _print_metrics_human(report)
+    return 0
+
+
 def _default_list_paths() -> list[pathlib.Path]:
     """Where `duet --list` looks when no PATH is given. Order = display order."""
     paths: list[pathlib.Path] = []
@@ -4786,7 +6013,7 @@ def build_continue_config(run_arg: str,
         run_dir, state, agents[next_idx], user_note, worktree_path
     )
     runs_dir = choose_runs_dir(args.runs_dir, cwd)
-    return DuetConfig(
+    cfg = DuetConfig(
         cwd=cwd,
         agents=agents,
         task=state.get("task"),
@@ -4827,6 +6054,8 @@ def build_continue_config(run_arg: str,
         continue_from=str(run_dir),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
+    _apply_metrics_options(cfg, args, state)
+    return cfg
 
 
 def _humanize_age(seconds: int) -> str:
@@ -4973,6 +6202,68 @@ def _add_control_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+_METRICS_REFRESH_DEFAULT = "__defaults__"
+
+
+def _add_metrics_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add read-only reporting and per-run collection controls."""
+    parser.add_argument("--stats", action="store_true",
+                        help="print aggregate central metrics and exit")
+    parser.add_argument("--refresh", metavar="RUNS_DIR", nargs="?",
+                        const=_METRICS_REFRESH_DEFAULT, default=None,
+                        help="with --stats, import legacy state.json records first; "
+                             "omit RUNS_DIR to use the default run roots")
+    parser.add_argument("--no-metrics", action="store_false", dest="metrics_enabled",
+                        default=None, help="disable central metrics collection for this run")
+    parser.add_argument("--metrics-kind", choices=("live", "test"), default=None,
+                        help="classify this run's metrics (default: live)")
+
+
+def _apply_metrics_options(cfg: DuetConfig, args: argparse.Namespace,
+                           saved: Optional[dict] = None) -> None:
+    """Apply CLI overrides, then saved/config values, without old-Namespace assumptions."""
+    enabled = getattr(args, "metrics_enabled", None)
+    kind = getattr(args, "metrics_kind", None)
+    if enabled is not None:
+        cfg.metrics_enabled = enabled
+    elif saved is not None and "metrics_enabled" in saved:
+        cfg.metrics_enabled = saved["metrics_enabled"]
+    if kind is not None:
+        cfg.metrics_kind = kind
+    elif saved is not None and "metrics_kind" in saved:
+        cfg.metrics_kind = saved["metrics_kind"]
+
+
+def _maybe_print_metrics(args: argparse.Namespace,
+                         parser: argparse.ArgumentParser) -> Optional[int]:
+    """Run the metrics-only mode, rejecting options that would start/control a run."""
+    stats = bool(getattr(args, "stats", False))
+    refresh = getattr(args, "refresh", None)
+    if refresh is not None and not stats:
+        parser.error("--refresh requires --stats")
+    if not stats:
+        return None
+    conflicts = (
+        "recipe", "resume_claude", "resume_codex", "task", "kickoff", "task_from_cmd",
+        "partner", "lead", "lead_model", "partner_model", "cwd", "turns", "sentinel",
+        "timeout", "on_turn_timeout", "verify_cmd", "runs_dir", "run_info_file",
+        "sandbox", "permission_mode", "config", "continue_run", "stop", "immediate",
+        "status", "list_runs", "worktree", "require_worktree", "worktree_for",
+        "worktree_path", "worktree_root", "add_dirs", "reasoning", "codex_fast",
+        "trust_state", "recap", "dry_run", "metrics_enabled", "metrics_kind",
+    )
+    tri_state = {"worktree", "require_worktree", "codex_fast", "recap", "metrics_enabled"}
+    if any((getattr(args, name, None) is not None if name in tri_state
+            else getattr(args, name, None) not in (None, False)) for name in conflicts):
+        parser.error("--stats cannot be combined with run or control options")
+    if refresh is not None:
+        summary = refresh_metrics(None if refresh == _METRICS_REFRESH_DEFAULT else refresh)
+        print("[duet] metrics refresh: "
+              f"{summary['imported']} imported, {summary['unchanged']} unchanged, "
+              f"{summary['skipped']} skipped", file=sys.stderr)
+    return print_metrics_report(json_output=bool(getattr(args, "json_output", False)))
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
@@ -4986,6 +6277,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--resume-codex", metavar="SESSION_ID",
                     help="(advanced) seed codex with an existing session id.")
     _add_control_arguments(ap)
+    _add_metrics_arguments(ap)
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
     ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
@@ -5104,7 +6396,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "~/.duet/runs/*/). Exit codes: 0=terminal, 1=running, "
                          "2=stuck/crashed, 3=error.")
     ap.add_argument("--json", action="store_true", dest="json_output",
-                    help="with --status, emit the stable schema-v1 JSON snapshot")
+                    help="with --status or --stats, emit stable schema-v1 JSON")
     ap.add_argument("--list", metavar="PATH", nargs="?", const="__defaults__",
                     default=None, dest="list_runs",
                     help="don't run a duet — instead list runs found under "
@@ -5305,6 +6597,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         resume_claude=args.resume_claude,
         resume_codex=args.resume_codex,
     )
+    _apply_metrics_options(cfg, args, raw)
     return cfg
 
 
@@ -5348,7 +6641,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         resume_codex=args.resume_codex,
         rename_slots=True,
     )
-    return DuetConfig(
+    cfg = DuetConfig(
         cwd=cfg_cwd,
         agents=agents,
         task=task,
@@ -5382,6 +6675,8 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         ),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
+    _apply_metrics_options(cfg, args)
+    return cfg
 
 
 def _warn_codex_fast_scope(cfg: DuetConfig) -> None:
@@ -5496,13 +6791,17 @@ def main() -> int:
     ap = _build_arg_parser()
     args = ap.parse_args()
 
+    metrics_exit = _maybe_print_metrics(args, ap)
+    if metrics_exit is not None:
+        return metrics_exit
+
     if args.immediate and args.stop is None:
         ap.error("--immediate is only valid with --stop")
     if args.stop is not None:
         if args.status or args.list_runs is not None or args.continue_run:
             ap.error("--stop cannot be combined with --status, --list, or --continue")
         if args.json_output:
-            ap.error("--json is only valid with --status")
+            ap.error("--json is only valid with --status or --stats")
         return request_run_stop(args.stop, immediate=args.immediate)
 
     # `--status` is read-only: print run health and exit. Skip everything below.
@@ -5510,7 +6809,7 @@ def main() -> int:
         return print_run_status_safe(args.status, json_output=args.json_output)
 
     if args.json_output:
-        ap.error("--json is only valid with --status")
+        ap.error("--json is only valid with --status or --stats")
 
     # `--list` is read-only: print the run-dir table and exit.
     if args.list_runs is not None:

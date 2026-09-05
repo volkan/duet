@@ -1806,5 +1806,40 @@ cat > "$SYNTH_OLD/state.json" <<JSON
 JSON
 expect "no duet_pid (old run) -> exit 2"      2 "$DUET" --status "$SYNTH_OLD"
 
+# Central stats exercise the actual CLI and survive deletion of raw artifacts.
+expect "central metrics CLI durability" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+duet, raw = sys.argv[1:]
+root = pathlib.Path(raw)
+env = dict(os.environ, DUET_METRICS="1")
+def command(*args):
+    result = subprocess.run([duet, *args], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    return result.stdout
+def stats(*args):
+    return json.loads(command("--stats", "--json", *args))
+before = stats()
+run_root = root / "metrics-smoke"
+command("--task", "private-metrics-task", "--dry-run", "--recap", "--cwd", raw,
+        "--runs-dir", str(run_root))
+after = stats()
+assert after["records"]["dry_run"] == before["records"]["dry_run"] + 1
+assert after["records"]["performance_records"] == before["records"]["performance_records"]
+assert "private-metrics-task" not in json.dumps(after)
+refreshed = stats("--refresh", str(run_root))
+assert refreshed == after
+command("--task", "disabled", "--dry-run", "--recap", "--cwd", raw,
+        "--runs-dir", str(run_root), "--no-metrics")
+assert stats() == after
+shutil.rmtree(run_root)
+assert stats() == after
+PY
+
 echo "---"; echo "smoke: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
