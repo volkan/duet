@@ -48,6 +48,25 @@ The demonstration should let a developer reproduce the check, inspect the
 evidence, and understand the remaining uncertainty. Use no workplace code,
 original project or folder names, or raw private audit excerpts.
 
+### Which demo to show first
+
+Lead with one clickable preview of the review workflow in the README, beside
+the brief explanation and quick start. It shows the developer's result: a
+supported finding, a refuted concern, and a question that remains unresolved.
+Keep the real work cases available for context and identify the recording's
+public toy fixture explicitly.
+
+Retain `duet-deck.gif` as a secondary link in the demo guide for readers who
+want an explanation of roles, memory, and agreement. Its older implementation
+details make it unsuitable as the primary reference. Avoid embedding both
+media in the README. A static preview lets readers choose when to play;
+controllable playback also follows [W3C guidance on pausing moving content](https://www.w3.org/WAI/WCAG22/Understanding/pause-stop-hide.html).
+
+This ordering is a design hypothesis. During the pilot, ask a first-time
+reader to explain what Duet produces, what an unresolved finding means, and
+how to start one review. Record confusion and whether the overview helped;
+clicks or completed playback alone do not establish understanding.
+
 ## Small pilot
 
 The CLI now supports optional `--feedback RUN --usefulness ... --decision ...`

@@ -223,9 +223,11 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 All commits in this repository must use Conventional Commits (`type: summary`, for example `docs: update commit guidance`).
 
-Keep `README.md` brief: purpose, one real example, quick start, and links. Put
-new flags, recipes, screenshots, and detailed limitations in the relevant
-guide under `docs/` instead of expanding the README.
+Keep `README.md` brief: purpose, one real example, quick start, and links.
+Use at most one static preview linking to the primary demo; link additional
+media from `docs/demos/README.md`. Put new flags, recipes, screenshots, and
+detailed limitations in the relevant guide under `docs/` instead of expanding
+the README.
 
 Every change to `duet.py` (or anything else under this repo) must update the related documents in the **same commit**. Drift between code and docs is the dominant failure mode here — there's no CI, no schema validation, just these files. Use this table as a checklist before you commit:
 

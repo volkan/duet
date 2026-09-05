@@ -1,8 +1,12 @@
-# Review evidence demo
+# Duet demos
 
 For examples from actual project work, start with the
-[anonymized cases](../REAL_CASES.md). This separate toy-fixture demo shows how
-to inspect findings and continue an unresolved review.
+[anonymized cases](../REAL_CASES.md). The [review workflow demo](#review-workflow-demo)
+below shows how to inspect findings and continue an unresolved review using a
+public toy fixture. The [earlier GIF overview](#earlier-loop-overview) explains
+the two-agent mechanism.
+
+## Review workflow demo
 
 [![Watch the edited 80-second review demo](finding-review.png)](finding-review.mp4)
 
@@ -127,3 +131,14 @@ The [storyboard](../launch/demo-script.md) tracks the seven scenes. To change
 the recorded evidence, manually inspect a new public capture and update its
 metadata, captions, and narrative together; never relabel a run to match an
 expected outcome.
+
+## Earlier loop overview
+
+The original [39-second GIF overview](../assets/duet-deck.gif) explains
+alternating turns, separate session memory, agreement, and the optional
+verification gate. It is a slide presentation, not a recorded agent run.
+
+Keep it as optional background after the workflow demo. It predates finding
+reports and contains older implementation details, including the line-count
+estimate. Use the [usage guide](../USAGE.md) for current behavior. Agreement
+alone does not establish correctness.

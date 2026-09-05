@@ -9,6 +9,10 @@ and you get a saved transcript to inspect.
 Claude and Codex are the default pair. Gemini, Copilot, OpenCode, and two
 agents from the same backend are also supported.
 
+[![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
+
+An edited replay using a public toy fixture. [Playback and source](https://github.com/volkan/duet/blob/main/docs/demos/README.md).
+
 ## A real example
 
 A supplied work audit describes a proposed fix that accidentally stopped
