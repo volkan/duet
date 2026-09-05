@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "name": "lead",
+      "backend": "opencode",
+      "role": "reviewer",
+      "model": "opencode/big-pickle"
+    },
+    {
+      "name": "partner",
+      "backend": "opencode",
+      "role": "reviewer",
+      "model": "opencode/big-pickle"
+    }
+  ],
+  "task": "Review only: do not modify any files. Read initial-review.md and toy.py. Run python3 check_fixture.py. Its exit zero means expected demonstrations including an intentional defect, not correctness. Assess each existing claim L1, L2, L3 explicitly in every structured finding update, preserving IDs. Inspect concrete evidence. Do not invent the missing production requirement for L3. You can agree to end the review with L3 still explicitly unresolved because the supplied evidence is insufficient; do not invent evidence to achieve agreement.",
+  "max_turns": 4,
+  "per_turn_timeout": 180,
+  "recap": true,
+  "finding_reports": true,
+  "metrics_kind": "test",
+  "worktree": false,
+  "cwd": "examples/review-evidence",
+  "metrics_enabled": false
+}

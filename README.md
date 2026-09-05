@@ -8,7 +8,16 @@ also supported, and you can pair two agents from the same backend. One agent
 plans or reviews while the other implements; each keeps its own session memory
 across turns, and every run leaves a transcript you can inspect.
 
-![duet — how it works, in 40 seconds](./docs/assets/duet-deck.gif?raw=true)
+[![Watch the 80-second Duet review demo: a real defect, a false concern, and an unresolved requirement](./docs/demos/finding-review.png)](./docs/demos/finding-review.mp4)
+
+**[Watch the 80-second review demo](./docs/demos/finding-review.mp4)** ·
+[Replay it offline and inspect the source](./docs/demos/README.md) ·
+[How the agent loop works (GIF)](./docs/assets/duet-deck.gif)
+
+The demo replays saved findings from a public toy fixture, including an
+unresolved requirement after a focused follow-up. Its expected answers were
+visible to the agents: this demonstrates the workflow, not blind bug discovery
+or comparative performance.
 
 ## Use it four ways
 

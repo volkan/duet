@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Duet — Verify the review. Keep the evidence.</title>
+<style>
+:root { --ink:#172d37; --muted:#536771; --paper:#f4f2eb; --line:#d7dfdb; --green:#197754; --purple:#6a56a6; --amber:#896013; }
+* { box-sizing:border-box; }
+body { margin:0; background:#e7ebe6; color:var(--ink); font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+button,input,a { -webkit-tap-highlight-color:transparent; }
+button { font:inherit; cursor:pointer; }
+button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible { outline:3px solid #3676c1; outline-offset:4px; }
+.shell { max-width:1280px; margin:36px auto; box-shadow:0 18px 70px #172d3718; }
+.stage { background:var(--paper); width:100%; height:720px; padding:36px 48px 28px; display:flex; flex-direction:column; overflow:hidden; }
+.brandbar,.footer,.controls,.badge-line { display:flex; align-items:center; justify-content:space-between; gap:18px; }
+.wordmark { font-size:30px; line-height:1; letter-spacing:-1.5px; font-weight:800; }
+.wordmark i { color:var(--green); font-style:normal; }
+.edition { color:var(--muted); font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.08em; text-transform:uppercase; }
+.eyebrow { margin:28px 0 5px; color:var(--green); font-size:12px; letter-spacing:.16em; text-transform:uppercase; font-weight:750; }
+h1 { font-size:44px; line-height:1.1; letter-spacing:-1.7px; margin:0 0 12px; max-width:1100px; }
+.subtitle { font-size:20px; line-height:1.4; margin:0; color:var(--muted); max-width:1050px; min-height:56px; }
+.workspace { display:grid; grid-template-columns:340px minmax(0,1fr); gap:24px; margin:24px 0 18px; flex:1; min-height:0; }
+.claims { display:flex; flex-direction:column; gap:10px; }
+.claim { background:#fff9; border:1px solid var(--line); border-radius:12px; padding:14px 16px; flex:1; transition:background .15s; }
+.claim.active { border-color:var(--ink); background:#fff; box-shadow:0 3px 0 #172d370c; }
+.claim.dim { opacity:.6; }
+.claim-name { margin:9px 0 0; font-size:17px; line-height:1.3; }
+.claim-id { font:700 13px ui-monospace,SFMono-Regular,Consolas,monospace; }
+.badge { border-radius:20px; padding:3px 9px; font-size:11px; letter-spacing:.07em; text-transform:uppercase; font-weight:750; white-space:nowrap; background:#e9edef; color:var(--muted); }
+.supported { background:#deeee3; color:var(--green); }
+.refuted { background:#eee9f7; color:var(--purple); }
+.unresolved { background:#f7eacb; color:var(--amber); }
+.terminal { border-radius:14px; background:#142c35; color:#edf4ee; padding:22px 26px; display:flex; flex-direction:column; min-width:0; }
+.terminal-top { color:#b6c9cc; font:12px ui-monospace,SFMono-Regular,Consolas,monospace; display:flex; justify-content:space-between; gap:12px; padding-bottom:14px; border-bottom:1px solid #38515a; }
+.dots { letter-spacing:4px; color:#83b69b; }
+.command { color:#a2dfb7; font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; margin:17px 0 12px; }
+.output { font:18px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
+.terminal-note { margin:auto 0 0; padding-top:14px; color:#b7cbd0; font-size:13px; line-height:1.5; }
+.footer { border-top:1px solid var(--line); padding-top:15px; font-size:12px; line-height:1.5; color:var(--muted); }
+.footer strong { color:var(--ink); }
+.footer span:last-child { white-space:nowrap; }
+.controls { padding:18px 24px; background:#fff; border-bottom:1px solid var(--line); }
+.play { color:#fff; background:var(--ink); border:0; border-radius:8px; padding:9px 17px; min-width:125px; }
+input[type=range] { flex:1; accent-color:var(--green); min-width:80px; }
+.time { font:13px ui-monospace,SFMono-Regular,Consolas,monospace; white-space:nowrap; }
+.steps { display:flex; flex-wrap:wrap; gap:8px; padding:16px 24px; background:#fff; }
+.steps button { background:none; border:1px solid var(--line); border-radius:6px; padding:6px 10px; color:var(--muted); font-size:13px; }
+.steps button[aria-current=true] { background:var(--ink); color:white; border-color:var(--ink); }
+.evidence { background:#fff; padding:14px 32px 32px; }
+.evidence p { max-width:1000px; }
+.evidence a { color:#225d8c; }
+.evidence h2 { margin:20px 0 10px; font-size:23px; }
+.meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:20px 0; }
+.meta div { border:1px solid var(--line); padding:14px; border-radius:8px; }
+.meta small { display:block; color:var(--muted); margin-bottom:4px; }
+details { padding:14px 0; border-top:1px solid var(--line); }
+summary { cursor:pointer; font-weight:650; }
+details pre { font:13px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; overflow-wrap:anywhere; background:#f2f5f2; padding:18px; border-radius:8px; }
+.links { display:flex; flex-wrap:wrap; gap:18px; }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+@media(min-width:1000px) and (max-width:1279px) { .stage { padding-left:30px; padding-right:30px; } .workspace { grid-template-columns:300px minmax(0,1fr); } h1 { font-size:40px; } .output { font-size:16px; } }
+@media(max-width:999px) { .shell { margin:0; } .stage { height:auto; min-height:720px; padding:26px 22px; } .brandbar { align-items:flex-start; } .edition { text-align:right; font-size:10px; } h1 { font-size:34px; } .subtitle { font-size:18px; min-height:0; } .workspace { grid-template-columns:1fr; gap:14px; } .claims { flex-direction:row; gap:6px; } .claim { padding:10px; min-width:0; } .badge-line { align-items:flex-start; flex-direction:column; gap:5px; } .badge { font-size:9px; padding:2px 6px; } .claim-name { font-size:13px; } .terminal { min-height:300px; padding:18px; } .output { font-size:15px; } .command { font-size:12px; } .footer { align-items:flex-start; font-size:10px; } .footer span:last-child { white-space:normal; text-align:right; } .controls { padding:15px; gap:10px; } .play { min-width:94px; padding:8px; font-size:14px; } .meta { grid-template-columns:1fr; } .evidence { padding:12px 22px 28px; } }
+@media(prefers-reduced-motion:reduce) { * { transition:none!important; scroll-behavior:auto!important; } }
+</style>
+</head>
+<body>
+<main class="shell">
+  <section class="stage" id="stage" aria-labelledby="title">
+    <div class="brandbar"><div class="wordmark">duet<i>.</i></div><div class="edition">Public toy fixture / 05 Sep 2026<br>Edited replay · 80 seconds</div></div>
+    <p class="eyebrow" id="eyebrow"></p>
+    <h1 id="title"></h1>
+    <p class="subtitle" id="subtitle"></p>
+    <div class="workspace">
+      <div class="claims" aria-label="Finding assessments" id="claims"></div>
+      <div class="terminal">
+        <div class="terminal-top"><span id="panel-label"></span><span class="dots" aria-hidden="true">● ●</span></div>
+        <pre class="command" id="command"></pre>
+        <pre class="output" id="output"></pre>
+        <p class="terminal-note" id="note"></p>
+      </div>
+    </div>
+    <div class="footer"><span><strong>Real saved findings. Edited presentation.</strong><br>Authored expectations were visible to the agents. This is a workflow demo.</span><span>Agent agreement ≠ proof<br><strong id="counter"></strong></span></div>
+  </section>
+  <div class="controls" aria-label="Playback controls">
+    <button type="button" class="play" id="play">Play 80s demo</button>
+    <label for="progress" class="sr-only">Playback position in seconds</label>
+    <input id="progress" type="range" min="0" max="80" value="0" step="0.1">
+    <output class="time" id="time" for="progress">0:00 / 1:20</output>
+  </div>
+  <nav class="steps" id="steps" aria-label="Demo chapters"></nav>
+  <section class="evidence" aria-labelledby="evidence-title">
+    <h2 id="evidence-title">Inspect what this demo is based on</h2>
+    <p>This is an edited replay of finding reports from a real OpenCode review and its continuation, not a terminal screen recording. The initial review and expected output already expose the intended assessments. It demonstrates the workflow; it does not measure blind discovery, accuracy, human usefulness, or time saved.</p>
+    <div class="meta" id="metadata"></div>
+    <p id="check-scope"></p>
+    <div class="links"><a id="download" download="finding-review.source.json" href="#">Download source snapshot</a><a href="https://github.com/volkan/duet/tree/fff1709/examples/review-evidence" rel="noreferrer">Reproduce the public fixture</a><a href="https://github.com/volkan/duet/blob/main/docs/FINDINGS.md" rel="noreferrer">Use the finding workflow</a></div>
+    <details><summary>Full finding reports and recorded run metadata</summary><pre id="source"></pre></details>
+    <details><summary>Captured fixture source and separate deterministic check</summary><pre id="fixture"></pre></details>
+    <noscript><p>Enable JavaScript for playback. The source snapshot and reproduction instructions are also available beside this HTML file.</p></noscript>
+  </section>
+</main>
+<script id="demo-data" type="application/json">__DEMO_DATA__</script>
+<script>
+'use strict';
+const data = JSON.parse(document.getElementById('demo-data').textContent);
+const [review, continuation] = data.runs;
+const byID = (run, id) => run.report.findings.find(f => f.id === id);
+const scenes = [
+  {duration:9, name:'Three claims', eyebrow:'01 / Start with the review', title:'Verify the review. Keep the evidence.', subtitle:'One real defect. One false concern. One question the code cannot answer.', label:'Authored initial claims · excerpt', command:'$ cat initial-review.md', output:'L1  A partial batch is counted as full.\nL2  Sorting mutates the caller’s list.\nL3  Production needs natural ID ordering.', note:'These are deliberately authored cases, with expected assessments visible in the fixture.', focus:null, assessed:false},
+  {duration:11, name:'Two agents', eyebrow:'02 / The captured run', title:'Two agents inspect the same claims.', subtitle:'Each reply keeps the claim IDs and cites evidence. Both slots use OpenCode.', label:'Saved run metadata · editorial summary', command:'$ python3 duet.py --config REVIEW_CONFIG', output:'partner → lead\n2 turns used / 4 allowed\nRequested model: opencode/big-pickle\nReasoning: native default', note:'Actual review elapsed: '+review.wall_elapsed_s.toFixed(1)+' seconds. Model revision and effective native reasoning were not reported. Config path is a placeholder.', focus:null, assessed:false},
+  {duration:12, name:'Real defect', eyebrow:'03 / L1 · Supported by both agents', title:'The batch count breaks its contract.', subtitle:'Five items at capacity two contain two full batches. The implementation returns three.', label:'Separately rerun deterministic fixture check', command:'$ python3 examples/review-evidence/check_fixture.py', output:'observed_full_batches: 3\nrequired_full_batches: 2\ntoy_correctness: known_defect_reproduced', note:'Exit 0 confirms the authored demonstration, including the intentional defect. It does not mean the implementation is correct.', focus:'L1', assessed:true},
+  {duration:12, name:'False concern', eyebrow:'04 / L2 · Refuted by both agents', title:'This comment does not justify a fix.', subtitle:'The code uses sorted(), which creates a new list. The caller’s list stays unchanged.', label:'Saved L2 assessment · lead, turn 2', command:'$ duet --report REVIEW', output:byID(review,'L2').assessments.find(a=>a.slot==='lead').evidence[0], note:'Separate fixture result: caller_list_unchanged = true. “Refuted” is the recorded agent assessment; the code and check are inspectable.', focus:'L2', assessed:true},
+  {duration:12, name:'Missing requirement', eyebrow:'05 / L3 · Unresolved', title:'An unknown requirement stays unknown.', subtitle:'Lexical order is observable. Whether production needs natural order is not supplied.', label:'Saved finding report · editorial summary', command:'$ duet --report REVIEW', output:'L1  supported\nL2  refuted\nL3  unresolved\n\nExecuted harness checks: none recorded', note:'Evidence cited by an agent is separate from a harness execution record. The deterministic check in this demo was rerun separately.', focus:'L3', assessed:true},
+  {duration:14, name:'Focused follow-up', eyebrow:'06 / A bounded continuation', title:'Revisit L3. Keep the missing evidence visible.', subtitle:'The follow-up preserves the finding IDs and uses its two-turn default.', label:'Saved continuation · editorial summary', command:'$ duet --continue REVIEW --resolve L3', output:'Focus: L3\n2 turns used / 2 allowed\nStop reason: '+continuation.report.finished_reason+'\nL3: '+byID(continuation,'L3').disposition, note:'Actual follow-up elapsed: '+continuation.wall_elapsed_s.toFixed(1)+' seconds. The agents agreed to stop; the production ordering requirement is still missing.', focus:'L3', assessed:true},
+  {duration:10, name:'Try the fixture', eyebrow:'07 / Inspect it for yourself', title:'A review trail you can act on.', subtitle:'Inspect the defect. Retract the unsupported concern. Obtain the missing requirement.', label:'Reproduce with Python · no agent CLI needed', command:'$ python3 examples/review-evidence/check_fixture.py', output:'github.com/volkan/duet\nexamples/review-evidence\n\nSource, reports and model metadata included.', note:'One authored fixture and two related real runs. No human outcome, model comparison, or time-savings claim is implied.', focus:null, assessed:true}
+];
+const $ = id => document.getElementById(id);
+const total = scenes.reduce((sum,s)=>sum+s.duration,0);
+let position=0, playing=false, lastFrame=null, sceneIndex=-1, frameRequest=null;
+const starts=scenes.map((s,i)=>scenes.slice(0,i).reduce((sum,v)=>sum+v.duration,0));
+const format = seconds => Math.floor(seconds/60)+':'+String(Math.floor(seconds%60)).padStart(2,'0');
+const titles={L1:'Partial batch counted as full',L2:'Caller’s list changed in place',L3:'Natural ordering required'};
+function render(index) {
+  if (index===sceneIndex) return;
+  sceneIndex=index; const scene=scenes[index];
+  for (const [id,key] of [['eyebrow','eyebrow'],['title','title'],['subtitle','subtitle'],['panel-label','label'],['command','command'],['output','output'],['note','note']]) $(id).textContent=scene[key];
+  $('counter').textContent=String(index+1).padStart(2,'0')+' / 07';
+  $('claims').replaceChildren(...review.report.findings.map(f=>{
+    const card=document.createElement('div'); card.className='claim'+(scene.focus===f.id?' active':scene.focus?' dim':'');
+    const row=document.createElement('div'); row.className='badge-line';
+    const id=document.createElement('span'); id.className='claim-id'; id.textContent=f.id;
+    const badge=document.createElement('span'); badge.className='badge'+(scene.assessed?' '+f.disposition:''); badge.textContent=scene.assessed?f.disposition:'Initial claim';
+    row.append(id,badge); const claim=document.createElement('p'); claim.className='claim-name'; claim.textContent=titles[f.id]; card.append(row,claim); return card;
+  }));
+  for (const [i,button] of [...$('steps').children].entries()) button.setAttribute('aria-current',String(i===index));
+}
+function seek(seconds) {
+  position=Math.max(0,Math.min(total,seconds));
+  const index=starts.findIndex((start,i)=>position>=start && (i===scenes.length-1 || position<starts[i+1]));
+  render(index); $('progress').value=position; $('time').textContent=format(position)+' / '+format(total);
+}
+function pause() { playing=false; lastFrame=null; if(frameRequest!==null) cancelAnimationFrame(frameRequest); frameRequest=null; $('play').textContent=position>=total?'Replay demo':'Play demo'; }
+function tick(now) {
+  if(!playing) return;
+  if(lastFrame!==null) seek(position+(now-lastFrame)/1000);
+  lastFrame=now;
+  if(position>=total) {pause(); return;}
+  frameRequest=requestAnimationFrame(tick);
+}
+function play() { if(position>=total) seek(0); playing=true; lastFrame=null; $('play').textContent='Pause'; frameRequest=requestAnimationFrame(tick); }
+$('play').addEventListener('click',()=>playing?pause():play());
+$('progress').addEventListener('input',e=>{pause();seek(Number(e.target.value));});
+document.addEventListener('visibilitychange',()=>{if(document.hidden) pause();});
+scenes.forEach((scene,index)=>{const button=document.createElement('button');button.type='button';button.textContent=scene.name;button.addEventListener('click',()=>{pause();seek(starts[index]);});$('steps').append(button);});
+const meta=[['Captured pairing','OpenCode 1.18.12 × 2'],['Requested model','opencode/big-pickle'],['Actual elapsed','Review '+review.wall_elapsed_s.toFixed(1)+'s · follow-up '+continuation.wall_elapsed_s.toFixed(1)+'s'],['Model revision','Not reported'],['Reasoning','Native default; effective value unknown'],['Implementation reference',data.source_commit+' · development '+review.duet_version]];
+meta.forEach(([label,value])=>{const box=document.createElement('div');const small=document.createElement('small');small.textContent=label;box.append(small,document.createTextNode(value));$('metadata').append(box);});
+$('check-scope').textContent=data.separate_fixture_check.scope;
+$('source').textContent=JSON.stringify({presentation:data.presentation,scope:data.scope,privacy:data.privacy,source_commit:data.source_commit,source_revision_note:data.source_revision_note,merged_as:data.merged_as,runs:data.runs},null,2);
+$('fixture').textContent=JSON.stringify({fixture_sha256:data.fixture_sha256,fixture_sources:data.fixture_sources,separate_fixture_check:data.separate_fixture_check},null,2);
+$('download').href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}));
+window.demo={scenes,total,seekScene:index=>{pause();seek(starts[index]);},getPosition:()=>position};
+seek(0);
+</script>
+</body>
+</html>

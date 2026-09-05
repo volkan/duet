@@ -1,0 +1,36 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:09.000
+Verify the review. Keep the evidence.
+One real defect. One false concern. One question the code cannot answer.
+
+2
+00:00:09.000 --> 00:00:20.000
+Two agents inspect the same claims.
+Each reply keeps the claim IDs and cites evidence. Both slots use OpenCode.
+
+3
+00:00:20.000 --> 00:00:32.000
+The batch count breaks its contract.
+Five items at capacity two contain two full batches. The implementation returns three.
+
+4
+00:00:32.000 --> 00:00:44.000
+This comment does not justify a fix.
+The code uses sorted(), which creates a new list. The caller’s list stays unchanged.
+
+5
+00:00:44.000 --> 00:00:56.000
+An unknown requirement stays unknown.
+Lexical order is observable. Whether production needs natural order is not supplied.
+
+6
+00:00:56.000 --> 00:01:10.000
+Revisit L3. Keep the missing evidence visible.
+The follow-up preserves the finding IDs and uses its two-turn default.
+
+7
+00:01:10.000 --> 00:01:20.000
+A review trail you can act on.
+Inspect the defect. Retract the unsupported concern. Obtain the missing requirement.

@@ -1,170 +1,81 @@
-# asciinema demo script — duet reviews its own packaging branch
+# Review evidence demo storyboard (80 seconds)
 
-Goal: a final cast under 90 seconds showing duet doing a real review of the
-branch that adds `pyproject.toml` (the package this demo gets installed
-from). Codex is the reviewer (partner, speaks first), Claude is the coder
-(lead, edits in a worktree), `make ci` is the mechanical convergence gate.
-The verify command runs inside the worktree (`effective_verify_cwd` prefers
-the worktree path), so the gate checks the edited tree, not the host
-checkout.
+This edited recording uses the public `examples/review-evidence/` fixture and a
+real OpenCode toy review followed by a focused continuation. It demonstrates
+how Duet keeps review claims, cited evidence, any executed checks, and
+unresolved requirements visible. The fixture is a teaching example with one
+intentional defect; it is not a performance benchmark or a claim about model
+quality.
+
+The playback artifacts are `docs/demos/finding-review.html`,
+`docs/demos/finding-review.mp4`, `docs/demos/finding-review.png`, and
+`docs/demos/finding-review.vtt`. The capture
+metadata should record the source snapshot, review/continuation labels, state
+file SHA256 values, backend/model, commands, and date. Do not publish raw run
+directories or session paths. This is an edited replay from saved reports, not
+a whole-screen recording or automatic exact source attestation.
 
 ## Pre-flight (off camera)
 
-```bash
-cd ~/workspace/agent2agent/duet
-git switch feat/p0-distribution       # the packaging branch (PR #11)
-make ci                               # the gate must be able to pass
-uvx --from . duet --help              # pre-warm uv's build cache
-claude --version && codex --version   # both CLIs on PATH and logged in
-export PS1='$ '                       # plain prompt
-clear
+From the repository root, verify the public fixture and have the OpenCode CLI
+available. Preserve the complete raw run artifacts. The source snapshot and
+real run metadata belong in the capture record, not in this storyboard.
+The fixture’s `initial-review.md` and `expected.json` intentionally disclose
+the expected assessments, so introduce the recording as a workflow and
+evidence-boundary demonstration rather than blind finding discovery.
+
+```sh
+python3 examples/review-evidence/check_fixture.py
 ```
 
-- Terminal 100x28, large font, dark theme. Resize *before* recording —
-  asciinema bakes in the initial geometry.
-- The packaging change must be committed at `HEAD`: fresh worktrees start
-  from committed `HEAD`, so uncommitted work would be invisible to the coder.
-- If the branch has multiple commits, swap the kickoff command below for
-  `git diff --stat --patch --no-ext-diff main...HEAD`.
+## Storyboard and narration
 
-## Record
-
-```bash
-asciinema rec duet-packaging-review.cast --idle-time-limit 2 --cols 100 --rows 28
-```
-
-`--idle-time-limit 2` collapses think-time automatically; `--recap` already
-suppresses the verbose stderr mirror, so most dead air is the redrawn
-`running [mm:ss]` line — cheap to cut later.
-
-## The script, beat by beat
-
-Target timeline is for the *edited* cast; the raw recording will run
-5–15 minutes.
-
-| beat | on screen | target |
+| time | screen | narration |
 |---|---|---|
-| 1 | context: branch + commit | 0:00–0:06 |
-| 2 | the one command | 0:06–0:20 |
-| 3 | turn 1 — codex reviewer critiques | 0:20–0:35 |
-| 4 | turn 2 — claude coder fixes in worktree | 0:35–0:50 |
-| 5 | verify gate: `make ci` runs, passes | 0:50–1:05 |
-| 6 | pair convergence + force> Enter + outro | 1:05–1:25 |
+| 0:00–0:09 | Scene 1: Fixture README and `initial-review.md`; show claim IDs L1, L2, L3. | “This public fixture gives us three review questions: an intentional batching defect, a plausible concern the code refutes, and a requirement the code cannot answer.” |
+| 0:09–0:20 | Scene 2: Saved review metadata; show two OpenCode agents, 2 turns used of 4 allowed, and the requested model. | “Two agents inspect the same claims, preserve their IDs, and cite what the repository can show.” |
+| 0:20–0:32 | Scene 3: Separately rerun `check_fixture.py`; highlight L1. | “Five items at capacity two are counted as three full batches, but only two are full. Exit zero confirms the authored demonstration, including the intentional defect.” |
+| 0:32–0:44 | Scene 4: Saved L2 assessment; show `--report` editorial replay. | “The code uses `sorted()`, so the caller’s list stays unchanged. Refuted is the recorded assessment; the code and separate check remain inspectable.” |
+| 0:44–0:56 | Scene 5: Saved report; show L1 supported, L2 refuted, L3 unresolved, and `Executed harness checks: none recorded`. | “No harness check was recorded in these runs because no verify command was configured. Agent agreement is evidence to inspect, not proof.” |
+| 0:56–1:10 | Scene 6: Saved continuation replay; show `duet --continue REVIEW --resolve L3`, two turns used of two allowed. | “The continuation focuses on L3. It preserves the missing production requirement instead of turning an unknown into a verdict.” |
+| 1:10–1:20 | Scene 7: Show the reproduction command and public fixture location; the HTML source panel below includes metadata and hashes. | “This is one authored fixture and two saved real runs, replayed and edited for pace. It demonstrates the workflow, not blind discovery, accuracy, human usefulness, or time saved.” |
 
-### Beat 1 — context (0:00–0:06)
+## Commands shown on camera
 
-```bash
-git log --oneline -2
+Use the repository script and the portable config to repeat the captured
+public task and agent settings. Directory and collection-setting differences
+are documented in the [demo record](../demos/README.md):
+
+```sh
+python3 duet.py --config examples/review-evidence/opencode-review.json
 ```
 
-Shows the packaging commit at `HEAD`. One command, no narration needed — the
-commit message ("feat: package duet-cli for PyPI" or similar) is the setup.
+The saved run commands, shown as editorial labels rather than raw paths, are:
 
-### Beat 2 — the one command (0:06–0:20)
-
-Type it (typing reads better than pasting at 1x; keep it brisk):
-
-```bash
-uvx --from . duet --recap \
-    --task-from-cmd 'git show --stat --patch --no-ext-diff HEAD' \
-    --lead claude:coder \
-    --partner codex:reviewer \
-    --worktree --worktree-for lead \
-    --verify-cmd 'make ci' \
-    --turns 6
+```sh
+python3 duet.py --report REVIEW
+python3 duet.py --continue REVIEW --resolve L3
 ```
 
-`uvx --from .` is the flourish: the duet reviewing this branch is running
-from the package the branch creates. If uv misbehaves on camera, fall back to
-`./duet.py` with identical flags — the demo still lands.
+If the first report does not mark L3 unresolved, show the actual report and do
+not force the continuation. The final frame must reflect the real disposition.
 
-KEEP: the run banner (run dir, agents, worktree path, verify cmd echo).
-That's the frame for everything that follows.
+## Editing and evidence boundaries
 
-### Beat 3 — turn 1, codex reviewer (0:20–0:35)
-
-What appears:
-
-```text
-Turn 01 | codex-partner (reviewer) · running [00:14]
-```
-
-…then the line is replaced by the recap block:
-
-```text
-Turn 01 | codex-partner (reviewer) · 96s · 1.8KB · 43 lines
-RECAP:  Flagged pyproject gaps: classifier set, script name vs package name.
-FILES:  pyproject.toml, README.md
-STATUS: requesting-changes · convergence: no
-```
-
-CUT: everything between ~3s after the command starts and ~2s before the
-recap block lands. Keep a couple of timer redraws (e.g. `[00:14]` →
-`[01:02]`) so viewers see liveness, then jump-cut to the block.
-
-### Beat 4 — turn 2, claude coder in the worktree (0:35–0:50)
-
-Same shape: running line, then recap block with `STATUS: ready-for-review`.
-KEEP the `FILES:` line — it shows real edits happening in `runs/<id>/wt/`,
-not the host checkout. If duet prints the worktree handoff/diff summary
-notice here, keep one line of it.
-
-CUT: the wait, same rule as beat 3.
-
-### Beat 5 — the verify gate (0:50–1:05)
-
-This is the money shot. When a reply carries the sentinel + rationale, duet
-prints:
-
-```text
-[duet] verify turn 03: make ci (cwd=.../runs/<id>/wt)
-```
-
-KEEP: that line, a beat of `make ci` output scrolling, and the success
-block. The story in one frame: *agents agreeing is not enough; the test
-suite has to agree too.* If `make ci` happens to fail on camera, even
-better — keep the failure block being handed to the next turn, then cut to
-the retry passing. An honest red-then-green beats a staged all-green.
-
-### Beat 6 — pair convergence and outro (1:05–1:25)
-
-KEEP:
-
-- the second back-to-back LGTM turn summary (`convergence: yes`),
-- the `force>` prompt — press Enter after ~2s (shows the human stays in the
-  loop without making the viewer wait),
-- the final summary: run dir, transcript path, and the printed worktree
-  merge/review/drop commands.
-
-Optional, only if under budget (~5s):
-
-```bash
-duet --status <run-id>
-```
-
-`finished_reason: converged` plus the recap path is a clean closing frame.
-End the recording (`exit` or Ctrl-D).
-
-## Post-processing
-
-1. Raw cast will be minutes long even with `-i 2`. Trim with
-   `asciinema-edit cut --start <t1> --end <t2>` per the CUT notes above
-   (the `.cast` file is NDJSON of timestamped events — hand-editing works
-   too, just keep timestamps monotonic).
-2. Sanity-check total length < 90s; beats 3–4 are the first place to
-   tighten (one timer redraw each is enough).
-3. `asciinema upload duet-packaging-review.cast`, set the title to
-   "duet: Codex reviews, Claude fixes, make ci gates convergence".
-4. Paste the link into `docs/launch/showhn.md`'s placeholder line.
-
-## Failure modes while recording
-
-- **Agents converge on turn 2–3 without drama** — fine, shorter demo; skip
-  the beat-4 tightening.
-- **Loop hits `--turns 6` without converging** — the `force>` prompt still
-  appears; type one line of steering feedback on camera (it's a real
-  feature) or re-record.
-- **Codex sandbox blocks something network-y** — expected; the review task
-  is diff-only on purpose. Don't add network flags for the demo.
-- **A turn stalls** — `duet --status` from a second terminal is the
-  diagnostic, but don't show a stall in the launch cast; re-record.
+Keep an edited replay of the saved review and continuation reports, the claim
+IDs, the literal “No executed harness checks recorded” line, the separately
+rerun deterministic check, and the focused continuation. The published replay
+is assembled from saved reports rather than a terminal screen capture. Cut
+waiting and repeated redraws, but label review and continuation outputs clearly
+and do not splice them into a synthetic run. Publish only review/continuation
+labels, state SHA256 values, and relevant backend/model metadata; omit raw run
+directories and session paths. The fixture’s `initial-review.md` and
+`expected.json` disclose the expected assessments, so say that this
+demonstrates the workflow and evidence boundaries, not blind finding discovery.
+The source snapshot records fixture bytes and state digests directly. The runs
+used a development working tree later committed as `60d0d86`, but runtime did
+not save a git revision; that commit is an implementation reference, not a
+run-attested source revision. Do not present it as exact source attestation.
+Do not show or claim a human feedback outcome; `--feedback` is optional and
+only records a person’s own experience after the run. Do not describe the
+fixture as a benchmark.

@@ -37,6 +37,13 @@ the full fixture and commands linked beside it. Include unresolved findings and
 unsuccessful runs in the accompanying record. A fixture demonstrates behavior;
 its handpicked cases do not estimate a real-world error rate.
 
+The [80-second edited demo](../demos/README.md) now includes offline playback,
+a shareable MP4, both captured finding reports, model and reasoning metadata,
+and the public fixture source. Its expected assessments were visible to the
+agents. It demonstrates the workflow and makes no claim about blind discovery
+or comparative quality. The next validation step is the small pilot below;
+no participants have been enrolled by this work.
+
 The demonstration should let a developer reproduce the check, inspect the
 evidence, and understand the remaining uncertainty. Use no workplace code,
 original project or folder names, or raw private audit excerpts.
