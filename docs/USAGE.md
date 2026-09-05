@@ -13,6 +13,7 @@ layout, `--status` mode, force prompt, and session memory.
 - [Plugin entry points](#plugin-entry-points)
 - [Real loop test](#real-loop-test)
 - [Same-backend peering](#same-backend-peering)
+- [Codex-only review](#codex-only-review)
 - [CLI flags](#cli-flags)
 - [Output layout and status mode](#output-layout-and-status-mode)
 - [How session memory works](#how-session-memory-works)
@@ -509,6 +510,62 @@ dry-run matrix — do not silently skip it and call the change verified.
 
 ## Same-backend peering
 
+The backend is the CLI Duet invokes; the model is a choice inside that CLI.
+Two Codex sessions can use different models with the same sign-in. A second
+CLI or a Claude account is not required for that pairing.
+
+### Codex-only review
+
+The `codex-review` recipe starts a Codex reviewer, then hands its findings to
+a Codex coder in a separate worktree. It reviews the latest committed `HEAD`,
+uses up to six turns, and writes recap and finding reports. There is no
+separate kickoff agent. Explicit task, model, turn, and worktree flags override
+the defaults; existing `--resume-*` handoffs retain their normal speaking order.
+
+Check `duet --help` for this recipe. If your installed release does not list
+it, use the current checkout as shown below or install that checkout with
+`make install`. The published 0.2.12 package predates this recipe.
+
+From this Duet checkout, select two models available to your account:
+
+```bash
+python3 duet.py --recipe codex-review --cwd /path/to/your/project \
+    --lead-model gpt-5.6-sol --partner-model gpt-5.6-luna \
+    --reasoning medium
+```
+
+Here Sol reviews first and Luna implements supported fixes. The pairing is an
+example, not a measured quality recommendation. Omit both model flags to use
+Codex's configured default in two separate sessions, or provide other exact
+model IDs. Use Codex's `/model` picker to check your available choices.
+
+Codex supports [ChatGPT subscription sign-in](https://learn.chatgpt.com/docs/auth)
+for local CLI use; `codex login status` shows the active method. Duet reuses
+that sign-in, without a separate API key. Both sessions use the account's
+usage allowance. [Model availability](https://learn.chatgpt.com/docs/models)
+depends on account, rollout, and client; Duet does not bypass those limits.
+
+For two opinions without implementation, use reviewer roles for both slots
+and a read-only sandbox. This explicit form also works without the new recipe:
+
+```bash
+duet --lead codex:reviewer --partner codex:reviewer \
+    --lead-model gpt-5.6-sol --partner-model gpt-5.6-luna \
+    --sandbox read-only --turns 4 \
+    --task "Review the latest commit without editing files. Compare findings, cite evidence, and keep unresolved questions visible."
+```
+
+The explicit form starts with the partner, so Luna reviews first here. Add
+`--finding-reports` on builds that support reports. Separate sessions and model
+names do not establish independent correctness; use project checks and inspect
+the evidence. These are collaborative turns, not a controlled model benchmark.
+
+The `review` recipe remains the Claude + Codex workflow. Changing only its
+`--lead` and `--partner` flags still leaves its Claude `/review` kickoff in
+place; use `codex-review` or an explicit task as above to avoid that dependency.
+
+### Other pairings
+
 `--lead` and `--partner` may use the same backend when you want role separation.
 Use `--lead-model` and `--partner-model` when those roles should use different
 models:
@@ -556,13 +613,14 @@ worktree gated by `verify_cmd`.
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
 | `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review --model sonnet`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
+| `--recipe codex-review` | two Codex sessions: lead reviewer speaks first, partner coder works in a strict worktree, latest committed `HEAD` task, six turns, recap, finding reports, and timeout continuation. No separate kickoff agent; model flags are optional. Explicit flags win; resume handoffs retain their normal order |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
 | `--stop RUN_DIR_OR_ID` | request a graceful stop for one live run. The argument resolves like `--status`. Duet validates the exact supervisor PID and saved process-start identity, then signals only that PID. The active child turn can finish before the run records `force_stop` |
 | `--immediate` | with `--stop`, ask that supervisor to terminate its active child process group and record `force_stop` without waiting for the turn to finish. It does not signal another run or a broad supervisor process group |
 | `--task "…"`, `--task @file`, `--task @-` | task description, used if no resume seed and no kickoff |
-| `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message to send to the partner agent |
+| `--kickoff "…"`, `--kickoff @file`, `--kickoff @-` | explicit first message for the opening speaker: normally the partner, or the lead reviewer for `codex-review` |
 | `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
@@ -591,7 +649,7 @@ worktree gated by `verify_cmd`.
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
 | `--json` | with `--status`, `--stats`, or `--report`, emit the corresponding schema-v1 JSON document |
-| `--finding-reports` | request structured claim assessments and write local `review.md`; enabled by `--recipe review`; YAML key `finding_reports:` |
+| `--finding-reports` | request structured claim assessments and write local `review.md`; enabled by both review recipes; YAML key `finding_reports:` |
 | `--no-finding-reports` | disable finding reports, including recipe, config, or continued-run settings |
 | `--report RUN_DIR_OR_ID` | render saved finding assessments and executed checks as Markdown, or JSON with `--json`; read-only; exit 0 for readable state (including unavailable findings), 3 for read/format errors |
 | `--resolve FINDING_ID` | with `--continue`, focus on a currently unresolved finding; repeat for multiple IDs. Defaults to two turns; explicit `--turns` must be at least two |
@@ -608,7 +666,7 @@ worktree gated by `verify_cmd`.
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--recap` | compact per-turn debug view; suppresses the live `│`-mirror and writes `recap.md` next to `transcript.md` |
 | `--no-recap` | disable recap mode, including the review recipe default |
-| `--dry-run` | don't call CLIs, fake replies — sanity check the harness |
+| `--dry-run` | preview without agent, kickoff, or verification commands; always enables preview even with `--config` containing `dry_run: false`. With recap enabled, no fake turn blocks are written |
 
 ---
 

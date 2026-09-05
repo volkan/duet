@@ -27,7 +27,7 @@ runs_dir: runs
 # finding_reports: false
 sandbox: workspace-write
 permission_mode: acceptEdits
-dry_run: false
+dry_run: false                # CLI --dry-run always enables preview, even when false here
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
 # Optional reasoning effort for both agents:

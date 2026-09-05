@@ -77,6 +77,13 @@ Proposed initial scope: five to ten developers over two weeks. These are plannin
 targets, not existing users or evidence thresholds. Let each participant bring
 an appropriate review task and keep its contents locally.
 
+Include developers who have only one supported CLI or subscription. The
+[Codex-only workflow](../USAGE.md#codex-only-review) supports two different
+models through Codex; requiring both Claude and Codex would exclude that path.
+Before recruitment, publish a release containing the new recipe, finding
+reports, and the config preview fix so the documented installation reaches
+the intended workflow.
+
 Collect an optional short outcome record for each task:
 
 | Observation | What it helps assess |

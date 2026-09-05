@@ -47,8 +47,23 @@ printf "fix typo\n" > "$TMPD/stdin-task.txt"
 expect "task @-"                            0 "$DUET" --task @- --dry-run --cwd "$TMPD" < "$TMPD/stdin-task.txt"
 echo "from file" > "$TMPD/t.txt"
 expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --dry-run --cwd "$TMPD"
-expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
-expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
+expect_stdout "task-from-cmd preview"        0 "dry-run: task_from_cmd not executed" "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
+expect "task-from-cmd preview cannot write"  0 bash -c '
+  "$1" --task-from-cmd "touch unexpected-kickoff; printf seed" --dry-run --cwd "$2" || exit
+  test ! -e "$2/unexpected-kickoff"
+' _ "$DUET_ABS" "$TMPD"
+expect "task-from-cmd cwd and stdout"        0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("duet_under_test", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+root = pathlib.Path(sys.argv[2]).resolve()
+assert m.run_task_from_cmd("pwd -P", root, 10, root).strip() == str(root)
+PY
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
 CONTROL_DIR="$TMPD/control"
 mkdir -p "$CONTROL_DIR"
@@ -215,6 +230,18 @@ expect "same-backend codex dry-run slots"   0 bash -c '
     || { echo "missing codex lead turn"; echo "$out"; exit 1; }
   exit 0
 ' _ "$DUET_ABS" "$TMPD"
+expect "codex-review starts reviewer and preserves model slots" 0 bash -c '
+  out=$("$1" --recipe codex-review --dry-run --no-recap --no-worktree \
+         --turns 2 --cwd "$2" --lead-model reviewer-model --partner-model coder-model)
+  echo "$out" | grep -q "Turn 1 :: codex-lead (codex/reviewer)" \
+    || { echo "missing initial Codex review"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: codex-partner (codex/coder)" \
+    || { echo "missing Codex implementation turn"; echo "$out"; exit 1; }
+  if echo "$out" | grep -q "claude -p"; then
+    echo "unexpected Claude kickoff"; exit 1
+  fi
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
 expect "same-backend claude dry-run slots"   0 bash -c '
   out=$("$1" --task "x" --turns 2 --dry-run --cwd "$2" \
          --lead claude:planner --partner claude:reviewer)
@@ -256,7 +283,7 @@ head -c 524289 /dev/zero > "$TMPD/large.txt"
 expect "task too large -> error"             2 "$DUET" --task @"$TMPD/large.txt" --dry-run --cwd "$TMPD"
 KICKOFF_INFO="$CONTROL_DIR/kickoff-failure.json"
 expect "from-cmd nonzero -> durable error"   1 "$DUET" --task-from-cmd 'false' \
-  --dry-run --cwd "$TMPD" --run-info-file "$KICKOFF_INFO"
+  --no-metrics --cwd "$TMPD" --run-info-file "$KICKOFF_INFO"
 expect "from-cmd failure persisted"          0 python3 - "$KICKOFF_INFO" <<'PY'
 import json
 import pathlib
@@ -267,7 +294,7 @@ state = json.loads(pathlib.Path(info["state_path"]).read_text())
 assert state["finished_reason"] == "kickoff_error", state
 assert state["phase"] == "finished", state
 PY
-expect "from-cmd empty stdout -> error"      1 "$DUET" --task-from-cmd 'true' --dry-run --cwd "$TMPD"
+expect "from-cmd empty stdout -> error"      1 "$DUET" --task-from-cmd 'true' --no-metrics --cwd "$TMPD"
 echo keep > "$CONTROL_DIR/existing.json"
 expect "run-info refuses overwrite"          2 "$DUET" --task "x" --dry-run \
   --cwd "$TMPD" --run-info-file "$CONTROL_DIR/existing.json"

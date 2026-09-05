@@ -128,6 +128,133 @@ class TestReviewRecipe(unittest.TestCase):
             self.assertFalse(cfg.require_worktree)
 
 
+class TestCodexReviewRecipe(unittest.TestCase):
+    def _cfg(self, *argv: str) -> duet.DuetConfig:
+        parser = duet._build_arg_parser()
+        args = parser.parse_args(["--recipe", "codex-review", *argv])
+        duet._validate_run_arguments(args, parser)
+        return duet._build_cfg_from_cli(args, parser, {})
+
+    def test_defaults_need_only_two_codex_sessions_and_review_first(self) -> None:
+        cfg = self._cfg()
+        self.assertEqual(
+            [(a.backend, a.role, a.model) for a in cfg.agents],
+            [("codex", "reviewer", None), ("codex", "coder", None)],
+        )
+        self.assertEqual(cfg.start_speaker_idx, 0)
+        self.assertIsNone(cfg.task_from_cmd)
+        self.assertIn("latest commit (HEAD)", cfg.task)
+        self.assertEqual(cfg.max_turns, 6)
+        self.assertTrue(cfg.worktree)
+        self.assertTrue(cfg.require_worktree)
+        self.assertEqual(cfg.worktree_for, "partner")
+        self.assertTrue(cfg.recap)
+        self.assertTrue(cfg.finding_reports)
+        self.assertEqual(cfg.on_turn_timeout, "continue")
+
+    def test_model_and_workflow_overrides_are_preserved(self) -> None:
+        cfg = self._cfg(
+            "--lead-model", "review-model", "--partner-model", "coding-model",
+            "--turns", "4", "--reasoning", "medium", "--no-worktree",
+            "--no-recap", "--no-finding-reports", "--on-turn-timeout", "stop",
+        )
+        self.assertEqual([a.model for a in cfg.agents], ["review-model", "coding-model"])
+        self.assertEqual(cfg.max_turns, 4)
+        self.assertEqual(cfg.reasoning, "medium")
+        self.assertFalse(cfg.worktree)
+        self.assertFalse(cfg.require_worktree)
+        self.assertFalse(cfg.recap)
+        self.assertFalse(cfg.finding_reports)
+        self.assertEqual(cfg.on_turn_timeout, "stop")
+
+    def test_explicit_seeds_replace_the_default_task(self) -> None:
+        for flag, field in (("--task", "task"), ("--kickoff", "kickoff"),
+                            ("--task-from-cmd", "task_from_cmd")):
+            with self.subTest(flag=flag):
+                cfg = self._cfg(flag, "custom seed")
+                self.assertEqual(getattr(cfg, field), "custom seed")
+                if field != "task":
+                    self.assertIsNone(cfg.task)
+                self.assertEqual(cfg.start_speaker_idx, 0)
+
+    def test_reused_worktree_keeps_strict_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            cfg = self._cfg("--worktree-path", raw)
+            self.assertEqual(cfg.worktree_path, pathlib.Path(raw).resolve())
+            self.assertFalse(cfg.worktree)
+            self.assertTrue(cfg.require_worktree)
+
+    def test_two_reviewers_can_share_a_read_only_checkout(self) -> None:
+        cfg = self._cfg("--partner", "codex:reviewer", "--no-worktree",
+                        "--sandbox", "read-only")
+        self.assertEqual([a.role for a in cfg.agents], ["reviewer", "reviewer"])
+        self.assertEqual(cfg.sandbox, "read-only")
+        self.assertFalse(cfg.worktree)
+        self.assertEqual(cfg.start_speaker_idx, 0)
+
+    def test_explicit_resume_keeps_the_existing_handoff_order(self) -> None:
+        session_id = "019e16c2-635e-7802-83e8-400e93533d2f"
+        cfg = self._cfg("--resume-codex", session_id, "--task", "continue the plan")
+        self.assertEqual(cfg.start_speaker_idx, 1)
+        self.assertEqual(cfg.agents[1].session_id, session_id)
+        self.assertIsNone(cfg.task_from_cmd)
+
+    def test_dry_run_records_reviewer_then_coder_and_distinct_models(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._cfg(
+                "--cwd", str(root), "--runs-dir", str(root / "runs"),
+                "--dry-run", "--no-worktree", "--no-recap", "--no-metrics", "--turns", "2",
+                "--lead-model", "review-model", "--partner-model", "coding-model",
+            )
+            with mock.patch.object(duet, "_run", side_effect=AssertionError("unexpected CLI")), \
+                    mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+            self.assertEqual(
+                [turn["agent"] for turn in state["history"]],
+                ["codex-lead", "codex-partner"],
+            )
+            self.assertEqual(
+                [agent["model"] for agent in state["agents"]],
+                ["review-model", "coding-model"],
+            )
+
+
+class TestConfigDryRun(unittest.TestCase):
+    def test_cli_preview_cannot_be_disabled_by_config(self) -> None:
+        for configured, recap in ((value, recap) for value in (None, False, True)
+                                  for recap in (False, True)):
+            with self.subTest(configured=configured, recap=recap), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw).resolve()
+                config = {
+                    "cwd": str(root), "runs_dir": str(root / "runs"),
+                    "agents": [{"name": "reviewer", "backend": "codex", "role": "reviewer"},
+                               {"name": "coder", "backend": "codex", "role": "coder"}],
+                    "task_from_cmd": "printf seed",
+                    "verify_cmd": "printf checked",
+                    "max_turns": 2,
+                    "recap": recap,
+                }
+                if configured is not None:
+                    config["dry_run"] = configured
+                path = root / "config.json"
+                path.write_text(json.dumps(config), encoding="utf-8")
+                parser = duet._build_arg_parser()
+                args = parser.parse_args(["--config", str(path), "--dry-run", "--no-metrics"])
+                cfg = duet._build_cfg_from_yaml(args, parser, {})
+                with mock.patch.object(duet, "_run", side_effect=AssertionError("preview executed a command")) as command, \
+                        mock.patch.object(duet, "_register_run_in_home_index"), \
+                        contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    state = duet.run_duet(cfg)
+                self.assertTrue(cfg.dry_run)
+                self.assertTrue(state["dry_run"])
+                command.assert_not_called()
+                self.assertEqual(state["finished_reason"], "dry_run" if recap else "converged")
+
+
 class TestRunInfoAndLaunchFailures(unittest.TestCase):
     def _cfg(self, root: pathlib.Path, info: pathlib.Path, **kwargs) -> duet.DuetConfig:
         return duet.DuetConfig(
@@ -143,15 +270,29 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
             root = pathlib.Path(raw).resolve()
             info = root / "control" / "run.json"
             info.parent.mkdir()
-            command = f"test -s {duet.shlex.quote(str(info))} && printf seed"
+            command = "printf seed"
             cfg = self._cfg(
-                root, info, task_from_cmd=command, dry_run=True, recap=True
+                root, info, task_from_cmd=command, max_turns=2, metrics_enabled=False
             )
-            with mock.patch.object(duet, "_register_run_in_home_index"), \
+            def kickoff(cmd, cwd, timeout, run_dir):
+                payload = json.loads(info.read_text(encoding="utf-8"))
+                self.assertEqual(pathlib.Path(payload["run_dir"]), run_dir)
+                self.assertEqual(cwd, root)
+                saved = json.loads(pathlib.Path(payload["state_path"]).read_text())
+                self.assertEqual(saved["phase"], "kickoff_running")
+                return "seed"
+
+            with mock.patch.object(duet, "run_task_from_cmd", side_effect=kickoff) as kickoff_call, \
+                    mock.patch.object(duet, "call_agent", return_value=(
+                        "LGTM rationale: the requested review is complete and no issues remain.\n"
+                        + duet.DEFAULT_SENTINEL
+                    )), \
+                    mock.patch.object(duet, "_register_run_in_home_index"), \
                     contextlib.redirect_stdout(io.StringIO()), \
                     contextlib.redirect_stderr(io.StringIO()):
                 state = duet.run_duet(cfg)
 
+            kickoff_call.assert_called_once()
             payload = json.loads(info.read_text(encoding="utf-8"))
             self.assertEqual(set(payload), {
                 "schema_version", "kind", "duet_version", "run_id",
@@ -161,7 +302,8 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
             self.assertEqual(payload["kind"], "duet.run")
             self.assertEqual(payload["duet_version"], duet.__version__)
             self.assertTrue(pathlib.Path(payload["run_dir"]).is_absolute())
-            self.assertEqual(state["finished_reason"], "dry_run")
+            self.assertEqual(state["finished_reason"], "converged")
+            self.assertEqual(state["task"], "seed")
             self.assertNotIn(command, json.dumps(state))
 
     def test_existing_run_info_is_refused(self) -> None:

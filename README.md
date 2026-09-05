@@ -6,8 +6,8 @@ Duet runs two coding agents in alternating turns: one reviews or plans, the
 other implements or challenges the result. Each keeps its own conversation,
 and you get a saved transcript to inspect.
 
-Claude and Codex are the default pair. Gemini, Copilot, OpenCode, and two
-agents from the same backend are also supported.
+Pair Claude and Codex, or use **two models through one CLI**. Gemini,
+Copilot, and OpenCode are also supported.
 
 [![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
 
@@ -23,8 +23,9 @@ both the code and a test that had accepted the incorrect output.
 
 ## Quick start
 
-You need Python 3.9+ and installed, signed-in Claude Code and Codex CLIs.
-Run this from a Git repository:
+You need Python 3.9+ and the CLIs for your chosen pair, installed and signed in.
+**Only have Codex?** [Run two Codex models](https://github.com/volkan/duet/blob/main/docs/USAGE.md#codex-only-review).
+For the Claude + Codex pair, run this from a Git repository:
 
 ```bash
 pipx install duet-cli

@@ -28,7 +28,8 @@ make build              # sdist+wheel into dist/ (needs: python3 -m pip install 
 make uninstall
 
 ./duet.py --dry-run --task "x" --cwd /tmp        # quickest end-to-end smoke
-./duet.py --recipe review                         # canonical harness/plugin launch
+./duet.py --recipe review                         # Claude review + Codex coder
+./duet.py --recipe codex-review                   # Codex reviewer first + Codex coder
 ./duet.py --config examples/hello.yaml           # 2-turn real run, no edits to disk
 ./duet.py --status runs/<id>/ --json             # stable machine-readable health probe
 ./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
@@ -96,9 +97,26 @@ The full how-to and the per-change matrix live in `docs/USAGE.md`
 
 `run_duet()` is the loop. `_prepare_run` owns allocation, initial phase state, atomic run-info publication, worktree setup, and deferred kickoff before handing control to it. `_execute_turn`, `_derive_seed_or_failure`, `_dry_run_recap_state`, and `ask_force` own later phases; every payload still comes from `_build_run_state`. `build_run_status` builds the secret-minimized status schema and both human/JSON renderers consume it. `main()` delegates validation/config construction to named helpers. Keep this decomposition: the complexity gate fails when branch-heavy setup/status logic is inlined into `run_duet` or `main`.
 
+### Named review recipes and previews
+
+`_apply_recipe_args` fills only omitted flags for `review` and `codex-review`.
+Both enable six turns, recap, finding reports, strict partner worktree isolation,
+and timeout continuation. The existing `review` recipe keeps its Claude
+`/review` kickoff even with explicit non-Claude slot overrides; an explicit
+seed suppresses that kickoff. `codex-review` defaults to two Codex sessions and
+an ordinary latest-commit task, with no separate kickoff process.
+`_recipe_start_speaker` starts its lead reviewer before the coder; explicit
+resume handoffs preserve their historical speaking order. Model choices remain
+optional and are passed through per slot. The Codex plugin selects this recipe
+for an explicit Codex-only request; plain `$duet` retains `review`.
+
+CLI `--dry-run` always enables preview on the YAML/JSON config path, including
+when the file says `dry_run: false`. It must never execute a configured kickoff,
+verification command, or agent. `TestConfigDryRun` guards that boundary.
+
 ### Finding reports and feedback
 
-`finding_reports` is enabled by the review recipe and opt-in elsewhere.
+`finding_reports` is enabled by both review recipes and opt-in elsewhere.
 `call_agent` appends a literal JSON protocol addendum; successful loop and forced
 replies store `finding_updates` in history before publication. Failed replies
 and seed/kickoff extraction cannot establish assessments. `parse_finding_updates`,
@@ -159,7 +177,7 @@ Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently con
 
 ### Continue mode
 
-`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; normal runs keep the default partner-first value of `1`. Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
+`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; the `codex-review` recipe also uses it to start with the lead reviewer (`0`). Other fresh runs and explicit `--resume-*` handoffs keep the partner-first value (`1`). Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
 
 ### Resume flag normalization
 

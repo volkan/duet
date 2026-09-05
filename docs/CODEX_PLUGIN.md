@@ -42,6 +42,20 @@ on your PATH.
    `codex:coder` in a worktree. If you pass a custom partner or config, install
    whichever backend that recipe needs instead.
 
+   For a Codex-only review, Claude is not required. Check the narrower set of
+   dependencies instead:
+
+   ```bash
+   command -v git
+   command -v codex
+   command -v duet
+   codex login status
+   ```
+
+   The Codex CLI can use an existing ChatGPT subscription sign-in, so this path
+   does not require an API key. Both sessions use the same account limits; two
+   models do not establish correctness.
+
 4. Add and install the plugin marketplace in Codex.
 
    From a local checkout:
@@ -86,6 +100,39 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 It continues past one non-final automatic-turn timeout. Explicit flags
 override recipe values.
 
+Codex-only review:
+
+```text
+Use Codex-only Duet review with --recipe codex-review.
+```
+
+The Codex-only recipe starts with `codex:reviewer`, then hands its findings to
+`codex:coder` in a strict worktree, using up to six turns. It enables recap and
+finding reports, continues after
+one non-final automatic-turn timeout, reviews the latest committed `HEAD`, and
+then asks for focused fixes supported by the findings. It has no separate
+Claude or upstream reviewer process. The plain `$duet` request keeps using the
+Claude-plus-Codex `review` recipe. A request that says “I don't have Claude,”
+“two Codex models,” or “Codex only” selects `codex-review`.
+
+`--lead-model` and `--partner-model` are optional for `codex-review`; if they
+are omitted, the CLI defaults apply. Preserve exact model IDs and never
+silently substitute or force a model. For example:
+
+```text
+Use two Codex models for review: --lead-model gpt-5.6-sol and --partner-model gpt-5.6-luna.
+```
+
+Model availability depends on the account, rollout, and client. Both sessions
+use the same account limits; two models do not establish correctness. See
+OpenAI's [ChatGPT sign-in documentation](https://learn.chatgpt.com/docs/auth)
+and [model availability documentation](https://learn.chatgpt.com/docs/models).
+
+The `codex-review` recipe may not yet be present in the current PyPI release.
+Run `duet --help` first; if `codex-review` is absent, use this checkout with
+`make install` (or the checkout's Python entry point) rather than passing the
+unsupported published flag.
+
 The recipe also enables local finding reports in `review.md`.
 `duet --report RUN` renders them from state; `--no-finding-reports` opts out.
 See [FINDINGS.md](FINDINGS.md) for unresolved-ID continuation and optional human
@@ -97,6 +144,9 @@ For the default `claude:reviewer` lead and `codex:coder` partner, named models
 map directly to `--lead-model` and `--partner-model`. Claude defaults to the
 stable `sonnet` alias, and the recipe automatically pins its separate
 `/review` kickoff to the same default or a Claude lead-model override.
+
+For `codex-review`, both slots are Codex and the exact IDs supplied by the user
+are preserved. Omitted model flags use the CLI defaults.
 
 For example:
 
@@ -204,7 +254,7 @@ end of the run.
 | `codex plugin add duet@volkan-duet` cannot find the marketplace | Run `codex plugin marketplace list` and confirm `volkan-duet` is listed. Add the local checkout or GitHub repo with `codex plugin marketplace add` if it is missing. |
 | Codex does not invoke the skill after install | Start a new thread or restart Codex so the plugin's bundled skills are loaded. |
 | The Duet skill says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Codex's shell can resolve `command -v duet`. |
-| The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
+| The default recipe says `claude` is not on PATH | The missing binary is `claude`; install or authenticate Claude Code for the default `/review` recipe, or explicitly choose `--recipe codex-review` for the Codex-only path. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
 | No run metadata appears | Check the original duet process. A valid launch atomically creates the requested run-info file before `/review`; never scrape banners as a fallback. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |

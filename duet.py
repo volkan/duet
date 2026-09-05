@@ -73,6 +73,14 @@ DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
 DEFAULT_CLAUDE_MODEL = "sonnet"
+DEFAULT_CODEX_REVIEW_TASK = (
+    "Review the latest commit (HEAD) for concrete correctness issues. "
+    "The reviewer should inspect the committed change first, cite evidence, "
+    "and request focused fixes. The coder should implement only supported "
+    "findings in its worktree and run relevant project checks. "
+    "Challenge unsupported claims, preserve project constraints, and leave "
+    "missing requirements or evidence explicitly unresolved."
+)
 SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
 SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
@@ -443,7 +451,7 @@ class DuetConfig:
     cwd: pathlib.Path
     agents: list[Agent]                # exactly 2 for now
     task: Optional[str] = None         # used if no resume seed
-    kickoff: Optional[str] = None      # explicit first message to partner
+    kickoff: Optional[str] = None      # explicit first message to opening speaker
     task_from_cmd: Optional[str] = None  # executed after the run is observable;
                                           # deliberately never persisted
     task_from_cmd_target: str = "task"  # "task" or "kickoff_append" (--continue)
@@ -3251,6 +3259,15 @@ def _requested_stop_state(
     return state
 
 
+def _apply_kickoff_output(cfg: DuetConfig, output: str) -> None:
+    """Route a kickoff result (or preview placeholder) to its configured seed."""
+    if cfg.task_from_cmd_target == "kickoff_append":
+        suffix = f"\n\nHuman continuation instruction:\n{output}"
+        cfg.kickoff = (cfg.kickoff or "") + suffix
+    else:
+        cfg.task = output
+
+
 def _run_kickoff_command(
     cfg: DuetConfig,
     *,
@@ -3266,6 +3283,10 @@ def _run_kickoff_command(
 ) -> Optional[dict]:
     """Execute deferred task_from_cmd; return terminal state on failure."""
     if cfg.task_from_cmd is None:
+        return None
+    if cfg.dry_run:
+        _apply_kickoff_output(cfg, "[dry-run: command output not collected]")
+        print("[duet] dry-run: task_from_cmd not executed.")
         return None
     running = _build_run_state(
         cfg,
@@ -3326,11 +3347,7 @@ def _run_kickoff_command(
             wt_path=wt_path,
             wt_branch=wt_branch,
         )
-    if cfg.task_from_cmd_target == "kickoff_append":
-        suffix = f"\n\nHuman continuation instruction:\n{output}"
-        cfg.kickoff = (cfg.kickoff or "") + suffix
-    else:
-        cfg.task = output
+    _apply_kickoff_output(cfg, output)
     ready = _build_run_state(
         cfg,
         turns_used=0,
@@ -3846,8 +3863,8 @@ def run_duet(cfg: DuetConfig) -> dict:
     last_msg = seed
 
     # Partner (agent[1]) normally speaks first in the loop, replying to the seed.
-    # `--continue` may set this to the other agent so the next speaker matches
-    # the previous run's last completed turn.
+    # `codex-review` starts with the lead reviewer. `--continue` selects the
+    # next speaker from the previous run's last completed turn.
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
     previous_convergence_proposal = False
@@ -6900,9 +6917,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
     ap.add_argument("--version", action="version", version=f"duet {__version__}")
-    ap.add_argument("--recipe", choices=["review"], default=None,
+    ap.add_argument("--recipe", choices=["review", "codex-review"], default=None,
                     help="apply a canonical launch profile; explicit flags override "
-                         "recipe values (currently: review)")
+                         "recipe values (review: Claude + Codex; "
+                         "codex-review: two Codex sessions)")
     ap.add_argument("--resume-claude", metavar="SESSION_ID",
                     help="resume an existing Claude session id; harness will pull "
                          "its latest message and feed it to the partner agent.")
@@ -6914,7 +6932,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
     ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
-                                      "to send to the partner agent")
+                                      "to send to the opening speaker")
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default=None,
@@ -7052,13 +7070,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="disable recap mode, including a recipe default",
     )
     ap.set_defaults(recap=None)
-    ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
+    ap.add_argument("--dry-run", action="store_true", help="preview without agent, "
+                    "kickoff, or verification commands, including with --config")
     return ap
 
 
 def _apply_recipe_args(args: argparse.Namespace) -> None:
     """Fill omitted CLI values from a named recipe; explicit flags win."""
-    if args.recipe != "review":
+    if args.recipe not in ("review", "codex-review"):
         return
     if args.cwd is None:
         args.cwd = str(pathlib.Path.cwd())
@@ -7066,7 +7085,9 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
     if args.runs_dir is None:
         args.runs_dir = str(recipe_cwd / ".duet" / "runs")
     if args.lead is None:
-        args.lead = "claude:reviewer"
+        args.lead = (
+            "codex:reviewer" if args.recipe == "codex-review" else "claude:reviewer"
+        )
     if args.partner is None:
         args.partner = "codex:coder"
     lead_backend = (args.lead or "").partition(":")[0]
@@ -7098,6 +7119,9 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.continue_run is not None,
     ))
     if not explicit_seed:
+        if args.recipe == "codex-review":
+            args.task = DEFAULT_CODEX_REVIEW_TASK
+            return
         command = "claude -p /review"
         kickoff_model = (
             args.lead_model
@@ -7106,6 +7130,13 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         )
         command += f" --model {shlex.quote(kickoff_model)}"
         args.task_from_cmd = command
+
+
+def _recipe_start_speaker(args: argparse.Namespace) -> int:
+    """Codex-only reviews start with the reviewer; resume handoffs stay intact."""
+    if args.recipe == "codex-review" and not (args.resume_claude or args.resume_codex):
+        return 0
+    return 1
 
 
 def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
@@ -7144,7 +7175,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
                          stdin_cache: dict) -> DuetConfig:
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
-    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
+    flags (dry_run, runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
     on_turn_timeout) override or combine with file values; --resume-* still
     apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
@@ -7196,7 +7227,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             args.permission_mode
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE,
         ),
-        dry_run=bool(raw.get("dry_run", False)),
+        dry_run=bool(args.dry_run or raw.get("dry_run", False)),
         recap=bool(raw.get("recap", False)) or bool(args.recap),
         verify_cmd=verify_cmd,
         worktree=bool(raw.get("worktree", False)) or bool(args.worktree),
@@ -7293,6 +7324,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE
         ),
         dry_run=args.dry_run,
+        start_speaker_idx=_recipe_start_speaker(args),
         recap=bool(args.recap),
         verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
         worktree=bool(args.worktree),
