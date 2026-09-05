@@ -158,8 +158,8 @@ End the recording with `exit` or Ctrl-D.
 2. Keep the final cast under 90 seconds. The first place to tighten is model
    wait time between `/duet` and the first run-dir line.
 3. Upload with `asciinema upload duet-plugin-demo.cast`.
-4. Paste the ID into the commented placeholders in `README.md` and
-   `docs/CLAUDE_CODE_PLUGIN.md`, then uncomment those embed snippets.
+4. Add the recording link to `docs/CLAUDE_CODE_PLUGIN.md` and the demo index
+   at `docs/demos/README.md`. Keep the README focused on the quick start.
 5. Update `docs/launch/showhn.md` if this cast replaces the existing launch
    demo placeholder.
 

@@ -139,7 +139,7 @@ These break easily if you only update one place.
 
 ### Convergence: fenced-code-aware, rationale-backed, pair-approved
 
-`convergence_proposed()` does a line-by-line scan tracking whether it's inside a markdown code fence (` ``` ` or `~~~`, length-matched closing). The sentinel only counts on its own line *outside* a fence, and the same reply must include an `LGTM rationale:` / `Rationale:` outside a fence. The loop only stops after two back-to-back agent turns propose convergence, so one agent can reject the other's rationale by omitting the sentinel and asking for another round. An agent quoting "the sentinel is `<<<LGTM>>>`" inline won't false-positive; an agent showing an example code block containing the sentinel won't either. Don't replace this with a regex over the whole text — README's "Limits" section explicitly calls this out as the deliberate trade-off.
+`convergence_proposed()` does a line-by-line scan tracking whether it's inside a markdown code fence (` ``` ` or `~~~`, length-matched closing). The sentinel only counts on its own line *outside* a fence, and the same reply must include an `LGTM rationale:` / `Rationale:` outside a fence. The loop only stops after two back-to-back agent turns propose convergence, so one agent can reject the other's rationale by omitting the sentinel and asking for another round. An agent quoting "the sentinel is `<<<LGTM>>>`" inline won't false-positive; an agent showing an example code block containing the sentinel won't either. Don't replace this with a regex over the whole text; `docs/USAGE.md` documents these rules under "Stop conditions and force prompt".
 
 ### Subprocess plumbing (`_run`)
 
@@ -223,29 +223,35 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 
 All commits in this repository must use Conventional Commits (`type: summary`, for example `docs: update commit guidance`).
 
+Keep `README.md` brief: purpose, one real example, quick start, and links.
+Use at most one static preview linking to the primary demo; link additional
+media from `docs/demos/README.md`. Put new flags, recipes, screenshots, and
+detailed limitations in the relevant guide under `docs/` instead of expanding
+the README.
+
 Every change to `duet.py` (or anything else under this repo) must update the related documents in the **same commit**. Drift between code and docs is the dominant failure mode here — there's no CI, no schema validation, just these files. Use this table as a checklist before you commit:
 
 | change in `duet.py` | also update |
 |---|---|
-| new / renamed / changed CLI flag | `docs/USAGE.md` flag table; `README.md` "Best recipes" if the flag shows up in a canonical recipe; `duet.example.yaml` if there's a corresponding YAML key; `scripts/smoke.sh` if the flag has dry-run-able exit-code semantics |
+| new / renamed / changed CLI flag | `docs/USAGE.md` flag table; `README.md` "Quick start" if its example changes; `duet.example.yaml` if there's a corresponding YAML key; `scripts/smoke.sh` if the flag has dry-run-able exit-code semantics |
 | new / changed YAML config key | `duet.example.yaml` (commented example with default); `docs/USAGE.md` only if it warrants user-facing prose beyond the flag table |
 | new / changed exit code or `--status` output | `docs/USAGE.md` exit-code table; add an `expect` line in `scripts/smoke.sh` |
 | new / changed reasoning level or backend mapping | rerun `scripts/check_reasoning_levels.py` and update its `EXPECTED` dict if values shift; extend `tests/test_duet.py::TestReasoningHelpers` for the data side; `docs/USAGE.md` `--reasoning` row |
 | new / changed pure helper covered by `tests/test_duet.py` (convergence detector, codex session-id parser, copilot JSONL parser, opencode JSONL parser, recap header parser, file-path heuristic, partner spec parser, markdown fence sizer, age formatter, status/state coercion or trust helper) | add a case to `tests/test_duet.py` describing the new behavior in the same commit |
-| new / changed Codex fast-mode behavior (`cfg.codex_fast`) | `docs/USAGE.md` `--codex-fast` flag-table row + "Codex fast mode" subsection; `duet.example.yaml` `codex_fast:` line; `README.md` "deep planner, fast coder" recipe; `scripts/smoke.sh` `codex-fast` expect lines |
+| new / changed Codex fast-mode behavior (`cfg.codex_fast`) | `docs/USAGE.md` `--codex-fast` flag-table row + "Codex fast mode" subsection; `duet.example.yaml` `codex_fast:` line; `scripts/smoke.sh` `codex-fast` expect lines |
 | new / changed output-dir layout (per-turn files, run dirs, worktree placement) | `docs/USAGE.md` "Output layout" block; `scripts/smoke.sh` side-effect assertions (the `[[ -d ... ]]` / `[[ -f ... ]]` / `grep -q` checks at the bottom); `README.md` if user-visible |
-| new / changed central metrics fields, collection controls, or stats/import behavior | `README.md` metrics recipe/link; `docs/USAGE.md` "Central metrics" and CLI flag table; `docs/METRICS.md`; `duet.example.yaml` metrics comments |
+| new / changed central metrics fields, collection controls, or stats/import behavior | `README.md` metrics link if its destination changes; `docs/USAGE.md` "Central metrics" and CLI flag table; `docs/METRICS.md`; `duet.example.yaml` metrics comments |
 | new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `duet.example.yaml`'s `extra_args` example if users copy that pattern |
 | new role or new ROLE_PROMPT entry | `ROLE_PROMPTS` in `duet.py`; the "Roles ship with" line in `docs/USAGE.md` |
-| stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` "What duet does" numbered list if user-visible |
+| stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` overview if its behavior summary changes |
 | change to the `/duet` slash-command recipe | `plugins/duet-claude/commands/duet.md` (the plugin command) and `docs/CLAUDE_CODE_PLUGIN.md` (install/use/troubleshooting); keep `docs/USAGE.md` as the concise reference link/summary; `plugins/duet-claude/.claude-plugin/plugin.json` description if the behavior summary shifts (the root `marketplace.json` deliberately carries only a short listing blurb, so it rarely needs the same edit) |
 | change to the Codex `$duet` skill recipe | `plugins/duet/skills/duet/SKILL.md` and `docs/CODEX_PLUGIN.md`; keep `docs/USAGE.md` as the concise reference link/summary; `plugins/duet/.codex-plugin/plugin.json` description if the behavior summary shifts |
-| change to the OpenCode `/duet` command recipe | `plugins/duet-opencode/command/duet.md` and `docs/OPENCODE_PLUGIN.md`; keep the `docs/USAGE.md` "Plugin entry points" OpenCode subsection + `README.md` "Inside OpenCode" section in sync; update `scripts/check_distribution_metadata.py`'s `_assert_opencode_command_metadata` required-text list if the recipe's command/flags change |
-| packaging / plugin metadata change (`duet.__version__`, `pyproject.toml` dynamic version/console script/extras; plugin manifests/marketplaces) | `README.md` install section; plugin guides and `docs/USAGE.md` if behavior changes; keep both plugin manifest versions matching `duet.__version__` |
+| change to the OpenCode `/duet` command recipe | `plugins/duet-opencode/command/duet.md` and `docs/OPENCODE_PLUGIN.md`; keep the `docs/USAGE.md` "Plugin entry points" OpenCode subsection in sync; retain the OpenCode guide link in `README.md`; update `scripts/check_distribution_metadata.py`'s `_assert_opencode_command_metadata` required-text list if the recipe's command/flags change |
+| packaging / plugin metadata change (`duet.__version__`, `pyproject.toml` dynamic version/console script/extras; plugin manifests/marketplaces) | `README.md` "Quick start"; plugin guides and `docs/USAGE.md` if behavior changes; keep both plugin manifest versions matching `duet.__version__` |
 | function grows past the complexity/length budget | extract a named helper (single-file: never a new module); re-run `make complexity`; if the budget itself moves, update `scripts/check_complexity.py` defaults and the merge gates paragraph |
 | new CI job / changed check name | `.github/workflows/ci.yml`; the required-check names in `.github/BRANCH_PROTECTION.md`; the merge gates paragraph |
 | new / changed release or bump workflow (`release.yml`, `bump-version.yml`, `scripts/bump_release_version.py`) | `docs/RELEASING.md` runbook; the release/bump sentences in the merge-gates paragraph; `tests/test_bump_release_version.py` when the bump logic changes |
-| breaking semantics or limit change | `README.md` "Limits / future" |
+| breaking semantics or limit change | relevant `docs/USAGE.md` section; `README.md` if its overview or quick start changes |
 
 If a change is worth doing, it's worth a smoke case. `scripts/smoke.sh` is the executable part of the docs — drift between it and `duet.py` is the failure mode hardest to spot. Add the `expect` line in the same commit as the code, not later. For the pure helpers listed in the table row above, add the corresponding `tests/test_duet.py` case in the same commit too — unit tests catch contract drift that a `--dry-run` exit code can't see.
 

@@ -161,6 +161,38 @@ construction is required because argparse rejects mutually exclusive flags;
 putting an override later is not sufficient. Custom commands also do not
 pre-add `--recap`, so `--no-recap` remains valid.
 
+## Autonomous handoff walkthrough
+
+Claude Code can hand a multi-step implementation plan to `/duet`, ask the
+agents to review the plan at high reasoning effort, and then continue through
+implementation and review. The handoff exposes the generated shell command in
+Claude Code's auto-mode details:
+
+![Claude Code handoff using duet](assets/claude-duet-workflow.png?raw=true)
+
+![Claude Code auto mode shell status](assets/claude-duet-auto-mode.png?raw=true)
+
+![Claude Code shell details running duet](assets/claude-duet-shell-details.png?raw=true)
+
+Copy-ready example:
+
+```text
+/loop /goal Create a temporary todo.md from the plan above and the remaining
+tasks in todo_codex.md.
+
+1. Use /duet:duet with max reasoning to confirm the plan.
+2. After the plan is confirmed, implement it.
+3. Once the first implementation is done, use /duet:duet with max reasoning
+   for code review.
+4. Use /duet:duet with max reasoning to review the second plan, then implement
+   it.
+5. When the process is complete and all checks are green, merge the approved
+   changes.
+
+P.S. I will not be around, so handle decisions without me. If you need another
+opinion, use /duet:duet to discuss it with Codex.
+```
+
 ## Runtime Expectations
 
 Duet writes the requested run-info JSON immediately after allocation and the

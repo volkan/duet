@@ -1,12 +1,13 @@
 # duet — usage guide
 
 Companion reference to the [README](../README.md). The README has the
-human-oriented overview and common recipes; this file has the full reference:
-flag details, sandbox/network rules, worktree mode, output layout, `--status`
-mode, force prompt, and session memory.
+overview and quick start; this file has installation options, recipes, and the
+full reference: flag details, sandbox/network rules, worktree mode, output
+layout, `--status` mode, force prompt, and session memory.
 
 ## Contents
 
+- [Installation](#installation)
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
 - [Plugin entry points](#plugin-entry-points)
@@ -21,6 +22,34 @@ mode, force prompt, and session memory.
 - [After a run finishes](#after-a-run-finishes)
 
 ---
+
+## Installation
+
+Duet requires Python 3.9+ and the CLI tools for your selected agents, installed
+and authenticated. The default pairing uses Claude Code and Codex. Install
+the `duet-cli` package with `pipx` to put the `duet` command on PATH:
+
+```bash
+pipx install duet-cli
+```
+
+Equivalent persistent options are `uv tool install duet-cli`,
+`python3 -m pip install --user duet-cli`, or `make install` from a clone.
+The package name is `duet-cli`; bare `duet` on PyPI is Google's async library.
+
+For YAML configs, install the optional extra: `pipx install 'duet-cli[yaml]'`,
+`uv tool install 'duet-cli[yaml]'`, or
+`python3 -m pip install --user 'duet-cli[yaml]'`. JSON configs work with the
+stdlib-only install.
+
+For a one-shot run without a persistent installation:
+
+```bash
+uvx --from duet-cli duet --task "Fix the failing test" --cwd ~/code/myrepo
+```
+
+This does not put `duet` on PATH. The `/duet` and `$duet` plugins need one of
+the persistent installations above; see [Plugin entry points](#plugin-entry-points).
 
 ## Other ways to start
 
@@ -201,6 +230,45 @@ To adapt:
 - Need network for `gh`/`curl` inside codex's sandbox: codex's `workspace-write` blocks outbound network by default. The default `--partner codex:coder` doesn't pass the override. For configs that need it, prefer YAML (`extra_args: ["-c", "sandbox_workspace_write.network_access=true"]`); see [Codex sandbox and network access](#codex-sandbox-and-network-access).
 - Default `--turns` is 2 (one codex pass + one claude review). Bump to 6–10 for multi-step fixes; the `force>` prompt at the end of the loop lets you push more rounds without restarting.
 
+### More recipes
+
+Keep Claude's planning effort high while Codex coder turns use low effort:
+
+```bash
+duet --reasoning high --codex-fast --task "Fix the issue"
+```
+
+Use `--no-codex-fast` to override a config or continued run that enabled it.
+See [Codex fast mode](#codex-fast-mode) for role restrictions.
+
+Require a passing project check before a convergence proposal counts:
+
+```bash
+duet --task "Fix the issue" \
+    --lead claude:coder --partner codex:reviewer \
+    --verify-cmd 'make test' --worktree --worktree-for lead
+```
+
+Replace `make test` with your project's check command. A failed check feeds
+back into the next turn.
+
+Hand a Codex planning session to the loop, with Codex implementing and Claude
+reviewing:
+
+```bash
+duet --resume-codex <codex-session-id> --worktree --reasoning max \
+    --task "Implement the plan from your Codex planning session."
+```
+
+Reusable configs live under [`examples/`](../examples/): `pr-review.yaml`
+reviews `HEAD`, and `codex-test-fix.yaml` pairs a Codex planner with a Codex
+coder to fix failing checks. From a clone, run
+`duet --config examples/pr-review.yaml` after installing the YAML extra.
+
+For automation, use `--run-info-file` to discover the run and
+`duet --status RUN_DIR --json` to poll it without parsing terminal prose.
+See the [status and launch schemas](#output-layout-and-status-mode).
+
 ### Edge cases
 
 | situation | result |
@@ -220,9 +288,9 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 
 Plain `/duet` runs Claude Code's real `/review` through duet, while still
 letting you pass any other upstream command. Some Claude Code installs expose
-the namespaced form `/duet:duet`. The README's
-[Quick Start](../README.md#inside-claude-code-duet) leads with this Claude
-Code flow; this section is the concise command reference.
+the namespaced form `/duet:duet`. The
+[Claude Code guide](CLAUDE_CODE_PLUGIN.md) has the full installation and
+handoff walkthrough; this section is the concise command reference.
 
 The primary install path is the plugin shipped in this repo:
 

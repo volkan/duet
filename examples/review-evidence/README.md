@@ -9,6 +9,10 @@ They are not measured agent results, a benchmark, or the finding-report output
 schema. Supported/refuted/unresolved are review assessments justified by the
 available evidence, not universal truth labels.
 
+The [80-second demo and inspectable source](../../docs/demos/README.md) replay
+an actual OpenCode review of this fixture and its focused continuation. The
+authored expectations were available to both agents; it is not a blind test.
+
 ## Run the deterministic checks
 
 From the repository root, using Python 3.9 or newer:
@@ -29,6 +33,19 @@ the actual lexical ordering without inventing a production requirement for
 natural ordering. Resolving L3 requires that missing requirement.
 
 ## Exercise Duet's review workflow
+
+To use the captured demo's OpenCode pairing from the repository root:
+
+```sh
+python3 duet.py --config examples/review-evidence/opencode-review.json
+```
+
+This requires OpenCode and access to the configured model. The config uses the
+recorded public task, reviewer roles, four-turn limit, 180-second timeout, and
+native reasoning defaults. It points at this fixture and disables central
+metrics for the reproduction. New model responses can differ. The
+[demo record](../../docs/demos/README.md) explains the captured settings and
+how to inspect or continue your new run.
 
 The following optional commands use the repository's own `duet.py`. They need
 the configured agent CLIs and their normal authentication. Actual responses

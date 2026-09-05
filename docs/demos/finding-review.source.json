@@ -1,0 +1,683 @@
+{
+  "schema_version": 1,
+  "kind": "duet.public.demo",
+  "title": "Verify the review. Keep the evidence.",
+  "source_commit": "60d0d86",
+  "merged_as": "fff1709",
+  "recorded_on": "2026-09-05",
+  "presentation": "Edited replay from two saved real OpenCode runs; not a terminal screen recording. Scene timing is editorial and does not represent agent latency.",
+  "scope": "One deliberately authored fixture. The initial review and expected.json expose the expected assessments to the agents; this is a workflow demonstration, not a blind evaluation or performance benchmark.",
+  "privacy": "Manually inspected public toy finding reports and allowlisted metadata only. Raw state, prompts, session IDs, process IDs, project IDs, local directory names and full transcripts are not included.",
+  "fixture_sha256": {
+    "toy.py": "49cd1f702f51f9a0f1e409f25859c1f0625bc4bbd31d4c810f5b254b2005ed1b",
+    "check_fixture.py": "1e587a5efa4b2411318bffac530d707516458de5c1de01187de99f4473be734d",
+    "initial-review.md": "ec8aeee0ff684e52b42013b84992181dd252d78115e98a7a88b9140b587fc0f9",
+    "expected.json": "080206b00c8066b3b7c28a7d4a7859a7cbac894cd8676a6d1638537acfbe42f2"
+  },
+  "fixture_sources": {
+    "toy.py": "\"\"\"Invented review fixture with an intentional batch-count defect.\n\nThis module is demonstration code, not a production batching utility.\nThe production requirements for ordering item identifiers are unspecified.\n\"\"\"\n\n\ndef plan_batches(item_ids: list[str], capacity: int) -> dict:\n    \"\"\"Count full batches and preview up to capacity sorted item identifiers.\n\n    A full batch contains exactly ``capacity`` items. A partial final batch\n    must not contribute to ``full_batches``. The caller's list is preserved.\n    \"\"\"\n    if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:\n        raise ValueError(\"capacity must be a positive integer\")\n    ordered = sorted(item_ids)\n    return {\n        # Intentional defect: this counts a partial final batch as full.\n        \"full_batches\": (len(ordered) + capacity - 1) // capacity,\n        \"first_batch\": ordered[:capacity],\n    }\n",
+    "check_fixture.py": "\"\"\"Verify expected review evidence, including reproduction of a known defect.\n\nExit zero means the demonstration behaved as authored. It does not mean the\nintentionally buggy implementation is correct. No agent CLI is required.\n\"\"\"\n\nimport json\nimport pathlib\n\nfrom toy import plan_batches\n\n\ndef main() -> None:\n    item_ids = [\"item-2\", \"item-10\", \"item-1\", \"item-3\", \"item-4\"]\n    before = list(item_ids)\n    plan = plan_batches(item_ids, 2)\n\n    # Five items contain two complete pairs and one leftover item.\n    required_full_batches = 2\n    if plan[\"full_batches\"] != 3 or plan[\"full_batches\"] == required_full_batches:\n        raise AssertionError(\"L1: expected to reproduce the intentional count defect\")\n    if item_ids != before:\n        raise AssertionError(\"L2: the caller's list unexpectedly changed\")\n    if plan[\"first_batch\"] != [\"item-1\", \"item-10\"]:\n        raise AssertionError(\"L3: lexical ordering demonstration changed\")\n\n    evidence = {\n        \"fixture_kind\": \"illustrative_review_evidence\",\n        \"fixture_checks\": \"passed_expected_demonstrations\",\n        \"toy_correctness\": \"known_defect_reproduced\",\n        \"findings\": [\n            {\"id\": \"L1\", \"assessment\": \"supported\",\n             \"observed_full_batches\": plan[\"full_batches\"],\n             \"required_full_batches\": required_full_batches},\n            {\"id\": \"L2\", \"assessment\": \"refuted\", \"caller_list_unchanged\": item_ids == before},\n            {\"id\": \"L3\", \"assessment\": \"unresolved\",\n             \"observed_first_batch\": plan[\"first_batch\"],\n             \"missing_evidence\": \"production item-ID ordering requirement\"},\n        ],\n    }\n    expected_path = pathlib.Path(__file__).resolve().with_name(\"expected.json\")\n    expected = json.loads(expected_path.read_text(encoding=\"utf-8\"))\n    if evidence != expected:\n        raise AssertionError(\"Observed evidence differs from the illustrative expected fixture\")\n    print(json.dumps(evidence, indent=2))\n\n\nif __name__ == \"__main__\":\n    main()\n",
+    "initial-review.md": "# Illustrative initial review\n\nThese are authored review claims for the invented `toy.py` fixture. They are\nnot output from an agent run or evidence of agent performance. The assessment\nlabels in `expected.json` are the assessments a reviewer can justify from this\nfixture's evidence; they are not independent universal truth labels.\n\n## L1 — A partial batch is incorrectly counted as full\n\nAssessment: supported.\n\n`plan_batches` promises to count only complete batches, but its ceiling-division\nexpression returns three for five items at capacity two. Only two complete\nbatches fit. Run `check_fixture.py` to reproduce the mismatch. A scoped fix is\n`len(ordered) // capacity` for `full_batches`.\n\n## L2 — Sorting changes the caller's list in place\n\nAssessment: refuted.\n\nThis is a deliberately plausible initial concern to check, not an established\ndefect. The implementation calls `sorted(item_ids)`, which creates a separate\nlist. The fixture passes an unsorted list, retains its original order, and\nchecks that it is unchanged after the call. A reviewer should retract this\ncomment; changing the implementation to address it is unnecessary.\n\n## L3 — Production requires natural item-ID order instead of lexical order\n\nAssessment: unresolved.\n\nThe fixture can establish that `item-10` sorts before `item-2`. It cannot\nestablish whether production requires lexical order, natural numeric order,\nor another ordering policy: no production requirements or downstream consumer\nare supplied. Obtain that acceptance criterion before calling the ordering a\ndefect or proposing a change. The deterministic check records the missing\nevidence; it does not adjudicate the external requirement.\n",
+    "expected.json": "{\n  \"fixture_kind\": \"illustrative_review_evidence\",\n  \"fixture_checks\": \"passed_expected_demonstrations\",\n  \"toy_correctness\": \"known_defect_reproduced\",\n  \"findings\": [\n    {\n      \"id\": \"L1\",\n      \"assessment\": \"supported\",\n      \"observed_full_batches\": 3,\n      \"required_full_batches\": 2\n    },\n    {\n      \"id\": \"L2\",\n      \"assessment\": \"refuted\",\n      \"caller_list_unchanged\": true\n    },\n    {\n      \"id\": \"L3\",\n      \"assessment\": \"unresolved\",\n      \"observed_first_batch\": [\"item-1\", \"item-10\"],\n      \"missing_evidence\": \"production item-ID ordering requirement\"\n    }\n  ]\n}\n"
+  },
+  "separate_fixture_check": {
+    "captured_on": "2026-09-06",
+    "command": "python3 examples/review-evidence/check_fixture.py",
+    "exit_code": 0,
+    "output": {
+      "fixture_kind": "illustrative_review_evidence",
+      "fixture_checks": "passed_expected_demonstrations",
+      "toy_correctness": "known_defect_reproduced",
+      "findings": [
+        {
+          "id": "L1",
+          "assessment": "supported",
+          "observed_full_batches": 3,
+          "required_full_batches": 2
+        },
+        {
+          "id": "L2",
+          "assessment": "refuted",
+          "caller_list_unchanged": true
+        },
+        {
+          "id": "L3",
+          "assessment": "unresolved",
+          "observed_first_batch": [
+            "item-1",
+            "item-10"
+          ],
+          "missing_evidence": "production item-ID ordering requirement"
+        }
+      ]
+    },
+    "scope": "Separately rerun during demo preparation; not an executed harness check from either recorded agent run. Exit zero confirms the expected demonstration, including the intentional defect."
+  },
+  "runs": [
+    {
+      "label": "review",
+      "state_sha256": "66ad79f202d88f5b312fce25427c06b6fbb779d6841bbd6cef3f508d55c392c0",
+      "duet_version": "0.2.12",
+      "started_at": "2026-09-05T20:34:25.023+00:00",
+      "wall_elapsed_s": 86.489886166004,
+      "turns_used": 2,
+      "max_turns": 4,
+      "run_kind": "test",
+      "finding_focus": [],
+      "agents": [
+        {
+          "slot": "lead",
+          "backend": "opencode",
+          "role": "reviewer",
+          "model_requested": "opencode/big-pickle",
+          "cli_version": "1.18.12",
+          "reasoning_requested": null,
+          "reasoning_effective": null,
+          "reasoning_transport": "native_default",
+          "model_reported": null,
+          "model_version_reported": null
+        },
+        {
+          "slot": "partner",
+          "backend": "opencode",
+          "role": "reviewer",
+          "model_requested": "opencode/big-pickle",
+          "cli_version": "1.18.12",
+          "reasoning_requested": null,
+          "reasoning_effective": null,
+          "reasoning_transport": "native_default",
+          "model_reported": null,
+          "model_version_reported": null
+        }
+      ],
+      "turns": [
+        {
+          "turn": 1,
+          "agent": "partner",
+          "elapsed_s": 50.21306829100649,
+          "call_mode": "fresh"
+        },
+        {
+          "turn": 2,
+          "agent": "lead",
+          "elapsed_s": 36.08132670799387,
+          "call_mode": "fresh"
+        }
+      ],
+      "report": {
+        "schema_version": 1,
+        "kind": "duet.finding.report",
+        "enabled": true,
+        "available": true,
+        "phase": "finished",
+        "finished_reason": "converged",
+        "events": [
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling-division expression returns 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: full batch holds exactly capacity items, partial final batch must not contribute",
+              "check_fixture.py:20-21; ran check_fixture.py (exit 0): observed full_batches == 3 vs required_full_batches == 2"
+            ],
+            "objection": "Scoped fix len(ordered)//capacity yields 2, but no tests were changed to lock in the corrected count",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate the argument",
+              "check_fixture.py:22-23; ran check_fixture.py (exit 0): caller_list_unchanged == true"
+            ],
+            "objection": null,
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; check_fixture.py:24 observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement is supplied anywhere in the fixture: toy.py:3-5, initial-review.md:29-35, README.md:1-10 all state the requirement is unspecified"
+            ],
+            "objection": "Cannot adjudicate external acceptance criterion from repository evidence; needs the production item-ID ordering requirement",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+              "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2",
+              "direct probe: len(items)//2 == 2 (correct scoped fix)"
+            ],
+            "objection": "No regression test locks in the corrected count, but this is by design: README.md:24-25 expects the reproduction check to fail after a fix until fixture expectations are deliberately updated",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+              "ran check_fixture.py (exit 0): caller_list_unchanged == true",
+              "direct probe: caller list identical before/after plan_batches call"
+            ],
+            "objection": null,
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement supplied anywhere: toy.py:3-5, initial-review.md:29-35, README.md:1-10 and 27-29 all state the requirement is unspecified"
+            ],
+            "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          }
+        ],
+        "findings": [
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L1",
+                "claim": "A partial batch is incorrectly counted as full",
+                "disposition": "supported",
+                "evidence": [
+                  "toy.py:19 ceiling-division expression returns 3 for 5 items at capacity 2",
+                  "toy.py:11-12 contract: full batch holds exactly capacity items, partial final batch must not contribute",
+                  "check_fixture.py:20-21; ran check_fixture.py (exit 0): observed full_batches == 3 vs required_full_batches == 2"
+                ],
+                "objection": "Scoped fix len(ordered)//capacity yields 2, but no tests were changed to lock in the corrected count",
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L1",
+                "claim": "A partial batch is incorrectly counted as full",
+                "disposition": "supported",
+                "evidence": [
+                  "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+                  "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+                  "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2",
+                  "direct probe: len(items)//2 == 2 (correct scoped fix)"
+                ],
+                "objection": "No regression test locks in the corrected count, but this is by design: README.md:24-25 expects the reproduction check to fail after a fix until fixture expectations are deliberately updated",
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": null
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L2",
+                "claim": "Sorting changes the caller's list in place",
+                "disposition": "refuted",
+                "evidence": [
+                  "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate the argument",
+                  "check_fixture.py:22-23; ran check_fixture.py (exit 0): caller_list_unchanged == true"
+                ],
+                "objection": null,
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L2",
+                "claim": "Sorting changes the caller's list in place",
+                "disposition": "refuted",
+                "evidence": [
+                  "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+                  "ran check_fixture.py (exit 0): caller_list_unchanged == true",
+                  "direct probe: caller list identical before/after plan_batches call"
+                ],
+                "objection": null,
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": null
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L3",
+                "claim": "Production requires natural item-ID order instead of lexical order",
+                "disposition": "unresolved",
+                "evidence": [
+                  "toy.py:16 sorts lexically; check_fixture.py:24 observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+                  "No production ordering requirement is supplied anywhere in the fixture: toy.py:3-5, initial-review.md:29-35, README.md:1-10 all state the requirement is unspecified"
+                ],
+                "objection": "Cannot adjudicate external acceptance criterion from repository evidence; needs the production item-ID ordering requirement",
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L3",
+                "claim": "Production requires natural item-ID order instead of lexical order",
+                "disposition": "unresolved",
+                "evidence": [
+                  "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+                  "No production ordering requirement supplied anywhere: toy.py:3-5, initial-review.md:29-35, README.md:1-10 and 27-29 all state the requirement is unspecified"
+                ],
+                "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement",
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement"
+          }
+        ],
+        "summary": {
+          "supported": 1,
+          "refuted": 1,
+          "unresolved": 1
+        },
+        "structured_turns": {
+          "ok": 2,
+          "missing": 0,
+          "malformed": 0,
+          "failed": 0
+        },
+        "executed_checks": [],
+        "truncated": false
+      }
+    },
+    {
+      "label": "continuation",
+      "state_sha256": "abe33d7ec5c17c2a742e6b44656e7cd0486e8fcd5bc552263a217b553d1f5d66",
+      "duet_version": "0.2.12",
+      "started_at": "2026-09-05T20:38:36.537+00:00",
+      "wall_elapsed_s": 60.38626770800329,
+      "turns_used": 2,
+      "max_turns": 2,
+      "run_kind": "test",
+      "finding_focus": [
+        "L3"
+      ],
+      "agents": [
+        {
+          "slot": "lead",
+          "backend": "opencode",
+          "role": "reviewer",
+          "model_requested": "opencode/big-pickle",
+          "cli_version": "1.18.12",
+          "reasoning_requested": null,
+          "reasoning_effective": null,
+          "reasoning_transport": "native_default",
+          "model_reported": null,
+          "model_version_reported": null
+        },
+        {
+          "slot": "partner",
+          "backend": "opencode",
+          "role": "reviewer",
+          "model_requested": "opencode/big-pickle",
+          "cli_version": "1.18.12",
+          "reasoning_requested": null,
+          "reasoning_effective": null,
+          "reasoning_transport": "native_default",
+          "model_reported": null,
+          "model_version_reported": null
+        }
+      ],
+      "turns": [
+        {
+          "turn": 1,
+          "agent": "partner",
+          "elapsed_s": 27.340398208994884,
+          "call_mode": "resume"
+        },
+        {
+          "turn": 2,
+          "agent": "lead",
+          "elapsed_s": 32.836910375001025,
+          "call_mode": "resume"
+        }
+      ],
+      "report": {
+        "schema_version": 1,
+        "kind": "duet.finding.report",
+        "enabled": true,
+        "available": true,
+        "phase": "finished",
+        "finished_reason": "converged",
+        "events": [
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling-division expression returns 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: full batch holds exactly capacity items, partial final batch must not contribute",
+              "check_fixture.py:20-21; ran check_fixture.py (exit 0): observed full_batches == 3 vs required_full_batches == 2"
+            ],
+            "objection": "Scoped fix len(ordered)//capacity yields 2, but no tests were changed to lock in the corrected count",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": true
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate the argument",
+              "check_fixture.py:22-23; ran check_fixture.py (exit 0): caller_list_unchanged == true"
+            ],
+            "objection": null,
+            "slot": "partner",
+            "turn": 1,
+            "inherited": true
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; check_fixture.py:24 observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement is supplied anywhere in the fixture: toy.py:3-5, initial-review.md:29-35, README.md:1-10 all state the requirement is unspecified"
+            ],
+            "objection": "Cannot adjudicate external acceptance criterion from repository evidence; needs the production item-ID ordering requirement",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": true
+          },
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+              "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2",
+              "direct probe: len(items)//2 == 2 (correct scoped fix)"
+            ],
+            "objection": "No regression test locks in the corrected count, but this is by design: README.md:24-25 expects the reproduction check to fail after a fix until fixture expectations are deliberately updated",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": true
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+              "ran check_fixture.py (exit 0): caller_list_unchanged == true",
+              "direct probe: caller list identical before/after plan_batches call"
+            ],
+            "objection": null,
+            "slot": "lead",
+            "turn": 2,
+            "inherited": true
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement supplied anywhere: toy.py:3-5, initial-review.md:29-35, README.md:1-10 and 27-29 all state the requirement is unspecified"
+            ],
+            "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": true
+          },
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+              "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2"
+            ],
+            "objection": "Corrected count len(ordered)//capacity is not locked by a test, but README.md:24-25 documents that the reproduction check is expected to fail post-fix until fixture expectations are updated; low-risk, no-action",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+              "ran check_fixture.py (exit 0): caller_list_unchanged == true"
+            ],
+            "objection": null,
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement supplied in fixture: toy.py:3-5, initial-review.md:27-34, README.md:27-29",
+              "Confirmed beyond fixture this turn: repo-wide grep of all *.md and *.py under duet/ finds item-ID ordering criterion only in the fixture, and always stating it is unspecified; other matches concern CLI flags/natural language only"
+            ],
+            "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement, obtainable only from outside the repo",
+            "slot": "partner",
+            "turn": 1,
+            "inherited": false
+          },
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "evidence": [
+              "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+              "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+              "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2"
+            ],
+            "objection": "Corrected count len(ordered)//capacity is not locked by a test, but README.md:24-25 documents that the reproduction check is expected to fail post-fix until fixture expectations are updated; low-risk, no-action",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "evidence": [
+              "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+              "ran check_fixture.py (exit 0): caller_list_unchanged == true"
+            ],
+            "objection": null,
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "evidence": [
+              "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+              "No production ordering requirement supplied in fixture: toy.py:3-5, initial-review.md:27-34, README.md:27-29",
+              "Independent repo-wide rg (item-10|natural order|ordering|\\bnatural\\b|item.?id|plan_batches) over all .py/.md under duet/: item-ID/plan_batches hits exist only in examples/review-evidence/ (plus this run copy); all other hits are CLI flag reordering (plugins/duet*.md), output ordering (docs/USAGE.md:312), test-order comments (tests/test_duet.py:185,558), PR-star ordering (docs/launch/awesome-prs.md:75-78), or natural-language mentions (docs/USAGE.md:259,713, docs/CODEX_PLUGIN.md:66, duet.py:254); tests/test_finding_reports.py:14 is a finding-report helper, not ordering policy"
+            ],
+            "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement, obtainable only from outside the repo",
+            "slot": "lead",
+            "turn": 2,
+            "inherited": false
+          }
+        ],
+        "findings": [
+          {
+            "id": "L1",
+            "claim": "A partial batch is incorrectly counted as full",
+            "disposition": "supported",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L1",
+                "claim": "A partial batch is incorrectly counted as full",
+                "disposition": "supported",
+                "evidence": [
+                  "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+                  "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+                  "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2"
+                ],
+                "objection": "Corrected count len(ordered)//capacity is not locked by a test, but README.md:24-25 documents that the reproduction check is expected to fail post-fix until fixture expectations are updated; low-risk, no-action",
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L1",
+                "claim": "A partial batch is incorrectly counted as full",
+                "disposition": "supported",
+                "evidence": [
+                  "toy.py:19 ceiling division (len(ordered)+capacity-1)//capacity = 3 for 5 items at capacity 2",
+                  "toy.py:11-12 contract: partial final batch must not contribute to full_batches",
+                  "ran check_fixture.py (exit 0): observed_full_batches == 3 vs required_full_batches == 2"
+                ],
+                "objection": "Corrected count len(ordered)//capacity is not locked by a test, but README.md:24-25 documents that the reproduction check is expected to fail post-fix until fixture expectations are updated; low-risk, no-action",
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": null
+          },
+          {
+            "id": "L2",
+            "claim": "Sorting changes the caller's list in place",
+            "disposition": "refuted",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L2",
+                "claim": "Sorting changes the caller's list in place",
+                "disposition": "refuted",
+                "evidence": [
+                  "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+                  "ran check_fixture.py (exit 0): caller_list_unchanged == true"
+                ],
+                "objection": null,
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L2",
+                "claim": "Sorting changes the caller's list in place",
+                "disposition": "refuted",
+                "evidence": [
+                  "toy.py:16 uses sorted(item_ids), which returns a new list and does not mutate its argument",
+                  "ran check_fixture.py (exit 0): caller_list_unchanged == true"
+                ],
+                "objection": null,
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": null
+          },
+          {
+            "id": "L3",
+            "claim": "Production requires natural item-ID order instead of lexical order",
+            "disposition": "unresolved",
+            "assessment_basis": "agent_assessment",
+            "assessments": [
+              {
+                "id": "L3",
+                "claim": "Production requires natural item-ID order instead of lexical order",
+                "disposition": "unresolved",
+                "evidence": [
+                  "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+                  "No production ordering requirement supplied in fixture: toy.py:3-5, initial-review.md:27-34, README.md:27-29",
+                  "Confirmed beyond fixture this turn: repo-wide grep of all *.md and *.py under duet/ finds item-ID ordering criterion only in the fixture, and always stating it is unspecified; other matches concern CLI flags/natural language only"
+                ],
+                "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement, obtainable only from outside the repo",
+                "slot": "partner",
+                "turn": 1,
+                "inherited": false
+              },
+              {
+                "id": "L3",
+                "claim": "Production requires natural item-ID order instead of lexical order",
+                "disposition": "unresolved",
+                "evidence": [
+                  "toy.py:16 sorts lexically; ran check_fixture.py: observed first_batch == ['item-1', 'item-10'], i.e. item-10 before item-2",
+                  "No production ordering requirement supplied in fixture: toy.py:3-5, initial-review.md:27-34, README.md:27-29",
+                  "Independent repo-wide rg (item-10|natural order|ordering|\\bnatural\\b|item.?id|plan_batches) over all .py/.md under duet/: item-ID/plan_batches hits exist only in examples/review-evidence/ (plus this run copy); all other hits are CLI flag reordering (plugins/duet*.md), output ordering (docs/USAGE.md:312), test-order comments (tests/test_duet.py:185,558), PR-star ordering (docs/launch/awesome-prs.md:75-78), or natural-language mentions (docs/USAGE.md:259,713, docs/CODEX_PLUGIN.md:66, duet.py:254); tests/test_finding_reports.py:14 is a finding-report helper, not ordering policy"
+                ],
+                "objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement, obtainable only from outside the repo",
+                "slot": "lead",
+                "turn": 2,
+                "inherited": false
+              }
+            ],
+            "missing_evidence_slots": [],
+            "last_open_objection": "Positive claim about an external acceptance criterion cannot be adjudicated from repository evidence; requires the production item-ID ordering requirement, obtainable only from outside the repo"
+          }
+        ],
+        "summary": {
+          "supported": 1,
+          "refuted": 1,
+          "unresolved": 1
+        },
+        "structured_turns": {
+          "ok": 2,
+          "missing": 0,
+          "malformed": 0,
+          "failed": 0
+        },
+        "executed_checks": [],
+        "truncated": false
+      }
+    }
+  ],
+  "source_revision_note": "The fixture bytes and state digests are captured directly. The runs used a development working tree later committed in 60d0d86 and merged as fff1709; the runtime did not record a git revision. The commit is an implementation reference, not a run-attested revision. Its version string was 0.2.12, which does not imply the published 0.2.12 release contained these features."
+}
