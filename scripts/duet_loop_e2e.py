@@ -594,6 +594,7 @@ def build_config(
     partner_backend: str = "codex",
     lead_model: Optional[str] = None,
     partner_model: Optional[str] = None,
+    finding_reports: bool = False,
 ) -> dict:
     lead_agent = {
         "name": f"{lead_backend}-reviewer",
@@ -625,6 +626,7 @@ def build_config(
         "recap": True,
         "task": scenario.task,
         "agents": [lead_agent, partner_agent],
+        "finding_reports": finding_reports,
     }
     if reasoning:
         cfg["reasoning"] = reasoning
@@ -966,6 +968,8 @@ def main() -> int:
         help="optional duet reasoning level for all scenarios",
     )
     ap.add_argument("--timeout", type=int, default=900, help="per-turn timeout seconds")
+    ap.add_argument("--finding-reports", action="store_true",
+                    help="exercise structured finding reports during the live scenarios")
     args = ap.parse_args()
 
     duet_path = pathlib.Path(args.duet).expanduser().resolve()
@@ -1049,6 +1053,7 @@ def main() -> int:
                 partner_backend=args.partner_backend,
                 lead_model=args.lead_model,
                 partner_model=args.partner_model,
+                finding_reports=args.finding_reports,
             )
             write_text(config_path, json.dumps(cfg, indent=2) + "\n")
 

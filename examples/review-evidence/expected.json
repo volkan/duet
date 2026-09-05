@@ -1,0 +1,24 @@
+{
+  "fixture_kind": "illustrative_review_evidence",
+  "fixture_checks": "passed_expected_demonstrations",
+  "toy_correctness": "known_defect_reproduced",
+  "findings": [
+    {
+      "id": "L1",
+      "assessment": "supported",
+      "observed_full_batches": 3,
+      "required_full_batches": 2
+    },
+    {
+      "id": "L2",
+      "assessment": "refuted",
+      "caller_list_unchanged": true
+    },
+    {
+      "id": "L3",
+      "assessment": "unresolved",
+      "observed_first_batch": ["item-1", "item-10"],
+      "missing_evidence": "production item-ID ordering requirement"
+    }
+  ]
+}

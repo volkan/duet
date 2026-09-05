@@ -96,6 +96,29 @@ The full how-to and the per-change matrix live in `docs/USAGE.md`
 
 `run_duet()` is the loop. `_prepare_run` owns allocation, initial phase state, atomic run-info publication, worktree setup, and deferred kickoff before handing control to it. `_execute_turn`, `_derive_seed_or_failure`, `_dry_run_recap_state`, and `ask_force` own later phases; every payload still comes from `_build_run_state`. `build_run_status` builds the secret-minimized status schema and both human/JSON renderers consume it. `main()` delegates validation/config construction to named helpers. Keep this decomposition: the complexity gate fails when branch-heavy setup/status logic is inlined into `run_duet` or `main`.
 
+### Finding reports and feedback
+
+`finding_reports` is enabled by the review recipe and opt-in elsewhere.
+`call_agent` appends a literal JSON protocol addendum; successful loop and forced
+replies store `finding_updates` in history before publication. Failed replies
+and seed/kickoff extraction cannot establish assessments. `parse_finding_updates`,
+`build_finding_report`, and `render_finding_report` validate and project local
+claim data. `_write_run_state` publishes best-effort atomic `review.md`; the
+read-only `--report` command can render it from state without agent calls.
+`--continue` inherits validated `finding_baseline` events; `--resolve` selects
+unresolved IDs with a two-turn default and refuses an incomplete ledger. None
+of these helpers changes convergence or promotes agent evidence to executed
+checks. Tests live in `test_finding_reports.py` and `test_finding_workflow.py`.
+
+`--feedback` writes the latest explicit human usefulness/decision labels per
+run to local `feedback.json`, with an optional curated copy in
+`~/.duet/metrics/feedback/`. Environment and saved collection opt-outs keep new
+feedback local. Stats aggregate fixed labels by run kind independently of
+performance data. Never put claim text, commands, paths, or free-text feedback
+in that central store. See `docs/FINDINGS.md` for protocol bounds and contracts.
+The live harness accepts `--finding-reports` in `LOOP_TEST_ARGS` to exercise the
+addendum against real backend output.
+
 ### Three invariants spread across multiple call sites
 
 These break easily if you only update one place.

@@ -86,6 +86,11 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 It continues past one non-final automatic-turn timeout. Explicit flags
 override recipe values.
 
+The recipe also enables local finding reports in `review.md`.
+`duet --report RUN` renders them from state; `--no-finding-reports` opts out.
+See [FINDINGS.md](FINDINGS.md) for unresolved-ID continuation and optional human
+feedback. Finding assessments do not replace the run's convergence status.
+
 ### Select models by name
 
 For the default `claude:reviewer` lead and `codex:coder` partner, named models
