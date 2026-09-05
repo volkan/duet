@@ -18,8 +18,10 @@ Test this message:
 
 Describe the result concretely: a report showing each claim, its evidence,
 corrections, and unresolved objections. Describe the two-agent mechanism after
-showing that result. Until structured finding reports are implemented, label any
-mock-up clearly and demonstrate the available transcript workflow accurately.
+showing that result. The [finding workflow](../FINDINGS.md) now produces a local
+report, and the [toy fixture](../../examples/review-evidence/README.md) supplies
+repeatable evidence. Label authored expectations and mock-ups clearly; show
+actual report output when demonstrating agent behavior.
 
 ## First deliverable
 
@@ -40,6 +42,10 @@ evidence, and understand the remaining uncertainty. Use no workplace code,
 original project or folder names, or raw private audit excerpts.
 
 ## Small pilot
+
+The CLI now supports optional `--feedback RUN --usefulness ... --decision ...`
+records without free text or code. This is collection infrastructure; no pilot
+participants, acceptance rates, or repeat-use outcomes are implied.
 
 Proposed initial scope: five to ten developers over two weeks. These are planning
 targets, not existing users or evidence thresholds. Let each participant bring

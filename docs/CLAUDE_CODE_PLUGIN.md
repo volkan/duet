@@ -127,6 +127,11 @@ strict worktree isolation, `claude -p /review --model sonnet`, Sonnet-defaulted
 Claude loop turns, and continuation past one non-final automatic-turn timeout.
 Explicit flags override it.
 
+The review recipe also writes local `review.md` with structured finding
+assessments. Use `duet --report RUN` to inspect it or pass
+`--no-finding-reports` to disable collection. Claims and unresolved objections
+are separate from recorded harness checks; see [FINDINGS.md](FINDINGS.md).
+
 Custom upstream command:
 
 ```text

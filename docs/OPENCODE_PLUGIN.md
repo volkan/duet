@@ -97,6 +97,11 @@ Plain `/duet` runs the default review recipe:
 duet --recipe review
 ```
 
+The recipe enables local `review.md` finding reports. Read them with
+`duet --report RUN`, or pass `--no-finding-reports` to opt out. The report keeps
+agent assessments, unresolved objections, and executed checks distinct; see
+[FINDINGS.md](FINDINGS.md).
+
 Pass an upstream command (and optional duet flags) as arguments — the first
 quoted token is the shell command duet seeds from, anything after is forwarded
 to duet:

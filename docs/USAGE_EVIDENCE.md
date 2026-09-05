@@ -99,28 +99,37 @@ Older sampled finding/refutation percentages are omitted because the sample
 membership, selection rule, and validation rubric could not be reconstructed.
 Recorded elapsed time is not interpreted as human time saved or billed cost.
 
-## Proposed product priorities
+## Product priorities and implementation status
 
-These are proposed follow-up changes, not features introduced by this note.
-The current CLI and continuation behavior are documented in [USAGE.md](USAGE.md).
+The audit motivated these priorities. The current implementation supplies the
+first report workflow; the [finding reference](FINDINGS.md) documents its
+contracts and limits. It does not establish adoption or downstream value.
 
 1. **Make the finding the unit of review.** Produce a concise Markdown report
    with a stable ID for each claim, its current disposition (supported, refuted,
    or unresolved), cited evidence, recorded check results, and the last open
    objection. Keep an agent's assessment distinguishable from executed evidence
    and a user's decision. Missing evidence should remain visible.
+   **Implemented:** local `review.md`, `--report`, stable IDs, separate agent
+   assessments and harness check records, and explicit coverage gaps.
 2. **Preserve disagreement at the turn limit.** List unresolved findings when a
    run ends, with a user-selected, bounded continuation for a response and
    confirmation. Keep the existing stop reason visible and retain the two-turn
    agreement rule. Late objections should remain inspectable even if the user
    chooses to stop.
+   **Implemented:** unresolved findings stay in the report; `--continue --resolve`
+   preserves their IDs and defaults to two additional turns in a new run.
 3. **Measure what happens after the report.** In an opt-in pilot, record whether
    a developer changed a review comment, accepted a useful finding, rejected an
    unhelpful one, or returned for another task. Keep acceptance separate from
    technical correctness, and allow participants to report outcomes without
    submitting private code or transcripts.
+   **Implemented foundation:** optional `--feedback` records fixed-choice
+   usefulness and decisions, with separate stats cohorts. Recruiting a pilot,
+   assessing outcomes, and measuring voluntary repeat use remain to be done.
 
-The first deliverable should be one inspectable review report and a public
-reproduction that shows how a disputed claim is checked. The
+The [public toy fixture](../examples/review-evidence/README.md) now provides
+repeatable checks for a defect, a refuted claim, and an unresolved requirement.
+The next deliverables are a recorded walkthrough and an opt-in pilot. The
 [validation and attention plan](launch/validation-plan.md) describes how to test
 that workflow with other developers before expanding the product's claims.

@@ -172,6 +172,22 @@ duet --reasoning high --codex-fast \
 
 Use `--no-codex-fast` to override a config or continued run that enabled it.
 
+**Inspect claims and disagreements** — the review recipe writes a local
+`review.md` with stable finding IDs, each agent's assessment, cited evidence,
+and unresolved objections. Agent agreement and executed checks are shown
+separately:
+
+```bash
+duet --report RUN_DIR_OR_ID
+duet --continue RUN_DIR_OR_ID --resolve L1 --turns 2  # unresolved IDs only
+duet --feedback RUN_DIR_OR_ID --usefulness useful --decision corrected_comment
+```
+
+Other tasks can enable this with `--finding-reports`. Feedback is optional and
+records your judgment, not verified correctness. See the
+[finding workflow](https://github.com/volkan/duet/blob/main/docs/FINDINGS.md) and
+[reproducible toy example](https://github.com/volkan/duet/tree/main/examples/review-evidence).
+
 **Inspect local performance data** — view curated metrics snapshots saved
 outside the project directory:
 
@@ -276,6 +292,9 @@ and worktree mode.
 [docs/METRICS.md](https://github.com/volkan/duet/blob/main/docs/METRICS.md)
 documents central metrics collection, the snapshot schema, refresh/import
 behavior, and the limits of comparisons.
+
+[docs/FINDINGS.md](https://github.com/volkan/duet/blob/main/docs/FINDINGS.md)
+documents finding reports, focused continuation, and optional human feedback.
 
 [Usage evidence and product direction](https://github.com/volkan/duet/blob/main/docs/USAGE_EVIDENCE.md) summarizes an
 anonymized audit of one developer's history across two computers, its limits,

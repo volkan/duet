@@ -114,6 +114,17 @@ records are likewise excluded from those comparisons.
 
 ## Reading comparisons responsibly
 
+Optional human outcomes are stored separately from run snapshots, under
+`~/.duet/metrics/feedback/<UUID>.json`, only after `--feedback`. Records contain
+an opaque ID, timestamp, run kind, and fixed-choice usefulness/decision labels.
+They contain no claim text or other private report content. `--stats --json`
+adds a `feedback` summary with separate `live`, `test`, `dry_run`, and `unknown`
+groups and skipped-file counts. Updating a run's feedback replaces its previous
+outcome. The human view shows live usefulness counts. These are optional
+self-reports, not correctness scores or an unbiased user-success rate.
+Collection opt-outs keep new feedback local; existing central records remain.
+See [FINDINGS.md](FINDINGS.md) for commands and interpretation.
+
 Reports exclude incomplete live runs from performance aggregates and group
 observations by versions, backends/models, effective reasoning, roles, turn
 kind, fresh/resume mode, usage scope, configured turn/time budgets, and

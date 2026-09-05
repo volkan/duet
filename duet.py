@@ -487,6 +487,9 @@ class DuetConfig:
         default_factory=lambda: os.environ.get("DUET_METRICS", "1") != "0")
     metrics_kind: str = "live"                # tests are excluded from performance comparisons
     _metrics_context: dict = dataclasses.field(default_factory=dict, repr=False)
+    finding_reports: bool = False
+    finding_baseline: list[dict] = dataclasses.field(default_factory=list, repr=False)
+    resolve_findings: list[str] = dataclasses.field(default_factory=list)
 
 
 def _resume_never_cwd_keyed(agent: Agent) -> bool:
@@ -550,6 +553,8 @@ def validate_config(cfg: DuetConfig,
         )
     if not isinstance(cfg.metrics_enabled, bool):
         _config_error("metrics_enabled must be a boolean", parser)
+    if not isinstance(cfg.finding_reports, bool):
+        _config_error("finding_reports must be a boolean", parser)
     if not isinstance(cfg.metrics_kind, str) or cfg.metrics_kind not in {"live", "test"}:
         _config_error("metrics_kind must be 'live' or 'test'", parser)
 
@@ -2324,6 +2329,8 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
     agent.last_call_metrics = {}
     metrics_enabled = getattr(cfg, "metrics_enabled", True)
     sys_prompt = agent.system_prompt(cfg.sentinel, recap=cfg.recap)
+    if cfg.finding_reports:
+        sys_prompt += "\n\n" + _finding_prompt_addendum(agent, cfg)
     if metrics_enabled:
         agent.last_call_metrics = metrics_agent_profile(agent, cfg)
         agent.last_call_metrics["system_prompt_bytes"] = len(sys_prompt.encode("utf-8"))
@@ -3153,12 +3160,16 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
     }
     if cfg.recap:
         state["recap_path"] = str(recap_path.resolve())
+    if cfg.finding_reports:
+        state.update(finding_reports=True, finding_baseline=cfg.finding_baseline,
+                     finding_focus=cfg.resolve_findings)
     return state
 
 
 def _write_run_state(path: pathlib.Path, state: dict) -> None:
     write_text_atomic(path, json.dumps(state, indent=2) + "\n")
     _persist_run_metrics(state, path)
+    _persist_finding_report(state, path)
 
 
 def _publish_run_info(cfg: DuetConfig, run_dir: pathlib.Path,
@@ -3475,6 +3486,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     history_entry["metrics"] = _record_turn_metrics(
         speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
+    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         # Bounded like the transcript block — a raw xhigh-codex stderr dump
@@ -4016,6 +4028,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
     history_entry["metrics"] = _record_turn_metrics(
         next_speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
+    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
@@ -5074,6 +5087,334 @@ _LIST_STATUS_FINISHED = {
 _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
 
 
+# ---------- structured finding reports ----------
+
+_FINDING_ID_RE = re.compile(r"\A[LP][1-9][0-9]{0,3}\Z")
+_FINDING_BLOCK_MAX_BYTES = 64 * 1024
+_FINDING_EVENT_LIMIT = 1000
+_FINDING_DISPOSITIONS = frozenset({"supported", "refuted", "unresolved"})
+
+
+def _finding_text(value: object, *, empty: bool = False) -> Optional[str]:
+    if not isinstance(value, str) or len(value) > 2000:
+        return None
+    value = value.strip()
+    if not value and not empty:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return None
+    return value
+
+
+def _finding_item(raw: object) -> Optional[dict]:
+    """Validate a complete assessment, discarding unrecognized fields."""
+    if not isinstance(raw, dict):
+        return None
+    identity = raw.get("id")
+    if not isinstance(identity, str) or not _FINDING_ID_RE.fullmatch(identity):
+        return None
+    claim = _finding_text(raw.get("claim"))
+    disposition = raw.get("disposition")
+    if claim is None or not isinstance(disposition, str):
+        return None
+    if disposition not in _FINDING_DISPOSITIONS:
+        return None
+    evidence = raw.get("evidence")
+    if not isinstance(evidence, list) or len(evidence) > 8:
+        return None
+    cited = [_finding_text(value, empty=True) for value in evidence]
+    if any(value is None for value in cited):
+        return None
+    objection = raw.get("objection")
+    if objection is not None:
+        objection = _finding_text(objection, empty=True)
+        if objection is None:
+            return None
+    return {"id": identity, "claim": claim, "disposition": disposition,
+            "evidence": [value for value in cited if value], "objection": objection or None}
+
+
+def _finding_items(raw: object) -> Optional[list[dict]]:
+    if not isinstance(raw, list) or len(raw) > 50:
+        return None
+    items = []
+    seen: set[str] = set()
+    for value in raw:
+        item = _finding_item(value)
+        if item is None or item["id"] in seen:
+            return None
+        seen.add(item["id"])
+        items.append(item)
+    return items
+
+
+def _finding_json_block(reply: str) -> tuple[str, Optional[str]]:
+    """Find one top-level exact duet-findings fence, respecting other fences."""
+    fence = ""
+    collecting = False
+    blocks: list[str] = []
+    lines: list[str] = []
+    size = 0
+    for line in reply.splitlines():
+        marker = re.match(r"^[ \t]*(`{3,}|~{3,})(.*)$", line)
+        if not fence:
+            if marker is None:
+                continue
+            fence = marker.group(1)
+            collecting = fence == "```" and marker.group(2).strip() == "duet-findings"
+            if collecting and blocks:
+                return "malformed", None
+        elif (marker is not None and marker.group(1)[0] == fence[0]
+              and len(marker.group(1)) >= len(fence) and not marker.group(2).strip()):
+            fence = ""
+            if collecting:
+                blocks.append("\n".join(lines))
+                collecting = False
+        elif collecting:
+            size += len(line.encode("utf-8")) + 1
+            if size > _FINDING_BLOCK_MAX_BYTES:
+                return "malformed", None
+            lines.append(line)
+    if collecting:
+        return "malformed", None
+    return ("ok", blocks[0]) if blocks else ("missing", None)
+
+
+def parse_finding_updates(reply: str) -> dict:
+    """Decode optional structured assessments; never infer findings from prose."""
+    if not isinstance(reply, str):
+        return {"status": "malformed", "items": []}
+    try:
+        status, block = _finding_json_block(reply)
+        if status != "ok":
+            return {"status": status, "items": []}
+        payload = json.loads(block)
+        items = _finding_items(payload.get("findings")) if isinstance(payload, dict) else None
+        if items is not None:
+            return {"status": "ok", "items": items}
+    except (ValueError, RecursionError, UnicodeError):
+        pass
+    return {"status": "malformed", "items": []}
+
+
+def _finding_slot_map(state: dict) -> dict[str, str]:
+    agents = state.get("agents")
+    if not isinstance(agents, list):
+        return {}
+    slots = {}
+    for slot, agent in zip(("lead", "partner"), agents[:2]):
+        if isinstance(agent, dict) and isinstance(agent.get("name"), str):
+            slots[agent["name"]] = slot
+    return slots
+
+
+def _finding_turn(value: object) -> Optional[int]:
+    turn = _metrics_nonnegative_int(value)
+    return turn if turn is not None and turn <= 1_000_000_000 else None
+
+
+def _finding_event(raw: object, *, inherited: bool) -> Optional[dict]:
+    item = _finding_item(raw)
+    if item is None:
+        return None
+    slot, turn = raw.get("slot"), _finding_turn(raw.get("turn"))
+    if not isinstance(slot, str) or slot not in {"lead", "partner"} or turn is None:
+        return None
+    return dict(item, slot=slot, turn=turn, inherited=inherited)
+
+
+def _finding_history_updates(entry: dict) -> tuple[str, list[dict]]:
+    updates = entry.get("finding_updates")
+    if updates is None:
+        return "missing", []
+    if not isinstance(updates, dict):
+        return "malformed", []
+    status = updates.get("status")
+    if status == "missing":
+        return "missing", []
+    if status != "ok":
+        return "malformed", []
+    items = _finding_items(updates.get("items"))
+    return ("ok", items) if items is not None else ("malformed", [])
+
+
+def _finding_check(entry: dict, slot: Optional[str]) -> Optional[dict]:
+    """Harness checks come exclusively from persisted verify results."""
+    verify = entry.get("verify")
+    if not isinstance(verify, dict):
+        return None
+    ok = verify.get("ok")
+    if not isinstance(ok, bool):
+        return None
+    exit_code = verify.get("exit_code")
+    if (not isinstance(exit_code, int) or isinstance(exit_code, bool)
+            or not -2**31 <= exit_code < 2**31):
+        exit_code = None
+    return {"turn": _finding_turn(entry.get("turn")), "slot": slot,
+            "forced": entry.get("forced") is True, "ok": ok, "exit_code": exit_code,
+            "timed_out": verify.get("timed_out") is True,
+            "command": _finding_text(verify.get("command")),
+            "log_path": _finding_text(verify.get("log_path")),
+            "scope": "run_check_not_individual_finding"}
+
+
+def _finding_collect_history(state: dict, events: list[dict]) -> tuple[dict, list, bool]:
+    coverage = {"ok": 0, "missing": 0, "malformed": 0, "failed": 0}
+    checks = []
+    history = state.get("history")
+    if not isinstance(history, list):
+        return coverage, checks, False
+    slots = _finding_slot_map(state)
+    truncated = len(history) > _FINDING_EVENT_LIMIT
+    for entry in history[:_FINDING_EVENT_LIMIT]:
+        if not isinstance(entry, dict):
+            continue
+        agent_name = entry.get("agent")
+        slot = slots.get(agent_name) if isinstance(agent_name, str) else None
+        check = _finding_check(entry, slot)
+        if check is not None:
+            checks.append(check)
+        if slot is None:
+            continue
+        if entry.get("finished_reason") is not None:
+            coverage["failed"] += 1
+            continue
+        turn = _finding_turn(entry.get("turn"))
+        if turn is None:
+            continue
+        status, items = _finding_history_updates(entry)
+        coverage[status] += 1
+        for item in items:
+            if len(events) >= _FINDING_EVENT_LIMIT:
+                truncated = True
+                break
+            events.append(dict(item, slot=slot, turn=turn, inherited=False))
+    return coverage, checks, truncated
+
+
+def _finding_current(events: list[dict]) -> list[dict]:
+    """Keep claim identity and latest assessment per slot in arrival order."""
+    findings: dict[str, dict] = {}
+    for event in events:
+        current = findings.setdefault(event["id"], {
+            "id": event["id"], "claim": event["claim"], "assessments": {},
+        })
+        # Reinsert so the assessment order also records the latest objection.
+        current["assessments"].pop(event["slot"], None)
+        current["assessments"][event["slot"]] = event
+    result = []
+    for current in findings.values():
+        assessments = list(current["assessments"].values())
+        dispositions = {event["disposition"] for event in assessments}
+        disposition = "unresolved"
+        if len(assessments) == 2 and len(dispositions) == 1:
+            disposition = next(iter(dispositions))
+        objections = [event["objection"] for event in assessments if event["objection"]]
+        missing = [slot for slot in ("lead", "partner")
+                   if not current["assessments"].get(slot, {}).get("evidence")]
+        result.append({"id": current["id"], "claim": current["claim"],
+                       "disposition": disposition, "assessment_basis": "agent_assessment",
+                       "assessments": assessments, "missing_evidence_slots": missing,
+                       "last_open_objection": objections[-1]
+                       if disposition == "unresolved" and objections else None})
+    return result
+
+
+def build_finding_report(state: dict) -> dict:
+    """Project local structured assessments without asserting their correctness."""
+    state = state if isinstance(state, dict) else {}
+    baseline = state.get("finding_baseline")
+    baseline = baseline if isinstance(baseline, list) else []
+    events = []
+    for raw in baseline[:_FINDING_EVENT_LIMIT]:
+        event = _finding_event(raw, inherited=True)
+        if event is not None:
+            events.append(event)
+    coverage, checks, truncated = _finding_collect_history(state, events)
+    findings = _finding_current(events)
+    summary = {value: 0 for value in ("supported", "refuted", "unresolved")}
+    for finding in findings:
+        summary[finding["disposition"]] += 1
+    return {"schema_version": 1, "kind": "duet.finding.report",
+            "enabled": state.get("finding_reports") is True,
+            "available": bool(events) or coverage["ok"] > 0,
+            "phase": _finding_text(state.get("phase")),
+            "finished_reason": _finding_text(state.get("finished_reason")),
+            "events": events, "findings": findings, "summary": summary,
+            "structured_turns": coverage, "executed_checks": checks,
+            "truncated": truncated or len(baseline) > _FINDING_EVENT_LIMIT}
+
+
+def _finding_code(value: object) -> str:
+    """Render arbitrary text as inert fenced code, including embedded fences."""
+    text = str(value) if value is not None else "unknown"
+    longest = max((len(match.group()) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}text\n{text}\n{fence}"
+
+
+def _render_finding(finding: dict) -> str:
+    parts = [f"## {finding['id']} — {finding['disposition']} (agent assessment)",
+             _finding_code(finding["claim"])]
+    for event in finding["assessments"]:
+        origin = "inherited" if event["inherited"] else "current run"
+        parts.append(f"### {event['slot']} — {event['disposition']} "
+                     f"(turn {event['turn']}, {origin})")
+        if event["claim"] != finding["claim"]:
+            parts.extend(["Latest wording (original claim retained above):", _finding_code(event["claim"])])
+        parts.append("Cited evidence (agent supplied):")
+        parts.extend(_finding_code(value) for value in event["evidence"])
+        if not event["evidence"]:
+            parts.append("No cited evidence supplied.")
+    missing = finding["missing_evidence_slots"]
+    if missing:
+        parts.append("Missing cited evidence: " + ", ".join(missing) + ".")
+    if finding["disposition"] == "unresolved":
+        parts.append("Last open objection:")
+        objection = finding["last_open_objection"]
+        parts.append(_finding_code(objection) if objection else "No explicit objection recorded; agreement is incomplete.")
+        parts.extend(["Bounded continuation example:", _finding_code(
+            f"duet --continue <run> --resolve {finding['id']} --turns 2")])
+    return "\n\n".join(parts)
+
+
+def render_finding_report(report: dict) -> str:
+    """Render a build_finding_report result as an inert local Markdown report."""
+    parts = ["# Finding report",
+             "Local report: this file may contain private code, paths, and review content. "
+             "Inspect it before sharing.",
+             "Dispositions record agent assessments and agreement, not proven facts or user acceptance.",
+             "Run phase:", _finding_code(report.get("phase")),
+             "Run stop reason:", _finding_code(report.get("finished_reason"))]
+    if not report["available"]:
+        parts.append("Structured findings unavailable. No claims were synthesized from prose.")
+    elif not report["findings"]:
+        parts.append("Structured output was supplied with no findings. This is not proof that the work is correct.")
+    counts = report["summary"]
+    parts.append(f"Agent assessment summary: {counts['supported']} supported, "
+                 f"{counts['refuted']} refuted, {counts['unresolved']} unresolved.")
+    coverage = report["structured_turns"]
+    parts.append(f"Structured turns: {coverage['ok']} valid, {coverage['missing']} missing, "
+                 f"{coverage['malformed']} malformed; {coverage['failed']} failed calls ignored.")
+    if report["truncated"]:
+        parts.append("The bounded event/history limit was reached. This report is incomplete.")
+    parts.extend(_render_finding(finding) for finding in report["findings"])
+    parts.extend(["## Executed harness checks",
+                  "These recorded run checks are separate from agent-supplied evidence. "
+                  "They do not establish the correctness of individual findings."])
+    for check in report["executed_checks"]:
+        outcome = "passed" if check["ok"] else "failed"
+        parts.append(f"Turn {check['turn']}: {outcome}; exit code {check['exit_code']}; "
+                     f"timed out: {check['timed_out']}.")
+        parts.extend(["Command:", _finding_code(check["command"]),
+                      "Recorded log path:", _finding_code(check["log_path"])])
+    if not report["executed_checks"]:
+        parts.append("No executed harness checks recorded. Agent claims of checks are not execution records.")
+    return "\n\n".join(parts) + "\n"
+
+
 # ---------- metrics reporting ----------
 
 _METRICS_REPORT_FILE_MAX_BYTES = 8 * 1024 * 1024
@@ -5599,10 +5940,12 @@ def print_metrics_report(json_output: bool = False) -> int:
     """Print central, read-only metrics. Snapshot problems never make this fail."""
     records, skipped = _metrics_report_load_records(_metrics_root())
     report = build_metrics_report(records, skipped=skipped)
+    report["feedback"] = _load_feedback_summary(_metrics_root())
     if json_output:
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
         _print_metrics_human(report)
+        _print_feedback_summary(report["feedback"])
     return 0
 
 
@@ -6063,6 +6406,7 @@ def build_continue_config(run_arg: str,
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
     _apply_metrics_options(cfg, args, state)
+    _apply_finding_options(cfg, args, parser, state)
     return cfg
 
 
@@ -6190,6 +6534,283 @@ def print_runs_list(explicit_path: Optional[pathlib.Path]) -> int:
     return 0
 
 
+# ---------- finding report integration and optional human feedback ----------
+
+_FINDING_REPORT_WARNED: set[str] = set()
+_FEEDBACK_USEFULNESS = ("useful", "mixed", "not_useful", "unknown")
+_FEEDBACK_DECISIONS = ("accepted_finding", "rejected_finding", "corrected_comment",
+                       "no_change", "not_applied")
+
+
+def _finding_prompt_addendum(agent: Agent, cfg: DuetConfig) -> str:
+    prefix = "L" if agent is cfg.agents[0] else "P"
+    return (
+        "Finding report format: after your normal reply, include exactly one fenced "
+        "block labeled duet-findings containing a JSON object with a findings array. "
+        'Each item has {"id":"' + prefix + '1","claim":"specific claim",'
+        '"disposition":"supported|refuted|unresolved","evidence":["file:line or '
+        'concrete check and result"],"objection":"remaining concern or null"}. '
+        "Use actual enum values, not the pipe-separated alternatives. Preserve IDs "
+        "from the prior conversation; allocate new IDs with your prefix " + prefix +
+        " and an unused positive integer. Reassess disputed findings explicitly. "
+        "Use unresolved when evidence is missing. Cite only evidence you inspected; "
+        "never invent executed checks or human acceptance. An empty findings array "
+        "means no finding updates, not proof that the review is correct. Keep recap "
+        "headers first when requested, and place LGTM rationale and the convergence "
+        "sentinel outside the fenced block. Existing convergence rules still apply."
+    )
+
+
+def _record_finding_updates(entry: dict, raw_reply: str,
+                            succeeded: bool, cfg: DuetConfig) -> None:
+    if cfg.finding_reports and succeeded:
+        entry["finding_updates"] = parse_finding_updates(raw_reply)
+
+
+def _persist_finding_report(state: dict, state_path: pathlib.Path) -> None:
+    if state.get("finding_reports") is not True:
+        return
+    try:
+        report = build_finding_report(state)
+        write_text_atomic(state_path.parent / "review.md", render_finding_report(report))
+    except (OSError, ValueError, TypeError, RuntimeError):
+        key = str(state_path)
+        if key not in _FINDING_REPORT_WARNED:
+            _FINDING_REPORT_WARNED.add(key)
+            print("[duet] review.md unavailable; use --report later to rebuild it "
+                  "from local state.", file=sys.stderr)
+
+
+def _announce_finding_report(state: dict) -> None:
+    if state.get("finding_reports") is True:
+        path = pathlib.Path(state["transcript_path"]).parent / "review.md"
+        report = build_finding_report(state)
+        unresolved = sum(item["disposition"] == "unresolved" for item in report["findings"])
+        print(f"[duet] finding report: {path} ({unresolved} unresolved)")
+
+
+def _apply_finding_options(cfg: DuetConfig, args: argparse.Namespace,
+                           parser: argparse.ArgumentParser,
+                           saved: Optional[dict] = None) -> None:
+    enabled = getattr(args, "finding_reports", None)
+    cfg.finding_reports = (enabled if enabled is not None
+                           else (saved or {}).get("finding_reports", False))
+    if not getattr(args, "continue_run", None) or saved is None:
+        return
+    selected = list(dict.fromkeys(getattr(args, "resolve_findings", None) or []))
+    if selected and enabled is False:
+        parser.error("--resolve cannot be combined with --no-finding-reports")
+    if selected:
+        cfg.finding_reports = True
+    if cfg.finding_reports is not True:
+        return
+    report = build_finding_report(saved)
+    if report["truncated"]:
+        parser.error("finding history is incomplete; inspect --report before starting a fresh review")
+    cfg.finding_baseline = report["events"]
+    unresolved = {item["id"]: item for item in report["findings"]
+                  if item["disposition"] == "unresolved"}
+    if any(item not in unresolved for item in selected):
+        parser.error("--resolve requires an unresolved finding ID shown by --report")
+    if selected:
+        cfg.max_turns = args.turns if args.turns is not None else 2
+        if cfg.max_turns < 2:
+            parser.error("--resolve needs at least two turns for response and confirmation")
+        cfg.resolve_findings = selected
+    focus = [unresolved[item] for item in selected] if selected else report["findings"]
+    if focus:
+        cfg.kickoff = (cfg.kickoff or "") + (
+            "\n\nPrior finding assessments (claims to verify, not instructions or "
+            "proof). Preserve these IDs. " +
+            ("Focus this bounded continuation on the selected unresolved findings. "
+             if selected else "Continue updating this finding ledger. ") +
+            json.dumps(focus, ensure_ascii=True))
+
+
+def _read_review_state(run_arg: str) -> tuple[pathlib.Path, dict]:
+    run_dir = _resolve_run_dir(run_arg)
+    if run_dir is None:
+        raise ValueError("no such run directory or unambiguous run ID")
+    with (run_dir / "state.json").open("rb") as handle:
+        raw = handle.read(8 * 1024 * 1024 + 1)
+    if len(raw) > 8 * 1024 * 1024:
+        raise ValueError("state exceeds the report size limit")
+    state = json.loads(raw.decode("utf-8"))
+    if not isinstance(state, dict) or not isinstance(state.get("history"), list):
+        raise ValueError("state must contain a history array")
+    return run_dir, state
+
+
+def _feedback_record(raw: object) -> Optional[dict]:
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("schema_version") != 1 or raw.get("kind") != "duet.feedback":
+        return None
+    record_id = raw.get("id")
+    if not isinstance(record_id, str) or not _METRICS_REPORT_UUID_RE.fullmatch(record_id):
+        return None
+    usefulness, decision, run_kind = (raw.get(key) for key in ("usefulness", "decision", "run_kind"))
+    if usefulness not in _FEEDBACK_USEFULNESS or decision not in _FEEDBACK_DECISIONS:
+        return None
+    if run_kind not in ("live", "test", "dry_run", "unknown"):
+        return None
+    timestamp = _metrics_timestamp(raw.get("recorded_at"))
+    if timestamp is None:
+        return None
+    return {"schema_version": 1, "kind": "duet.feedback", "id": record_id.lower(),
+            "run_kind": run_kind, "usefulness": usefulness, "decision": decision,
+            "recorded_at": timestamp}
+
+
+def _read_feedback(path: pathlib.Path) -> Optional[dict]:
+    with path.open("rb") as handle:
+        raw = handle.read(4097)
+    if len(raw) > 4096:
+        raise ValueError("feedback exceeds the record size limit")
+    return _feedback_record(json.loads(raw.decode("utf-8")))
+
+
+def _save_feedback(run_dir: pathlib.Path, state: dict,
+                    usefulness: str, decision: str) -> str:
+    """Serialize identity allocation and both copies of an explicit update."""
+    import fcntl
+
+    with (run_dir / ".feedback.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("another feedback update is in progress; retry") from None
+        return _save_feedback_locked(run_dir, state, usefulness, decision)
+
+
+def _save_feedback_locked(run_dir: pathlib.Path, state: dict,
+                           usefulness: str, decision: str) -> str:
+    """Save the latest explicit human outcome; never derive technical correctness."""
+    local = run_dir / "feedback.json"
+    previous = _read_feedback(local) if local.exists() else None
+    if local.exists() and previous is None:
+        raise ValueError("existing feedback.json is not a supported feedback record")
+    meta = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+    candidate = previous["id"] if previous else meta.get("id")
+    record_id = (candidate if isinstance(candidate, str)
+                 and _METRICS_REPORT_UUID_RE.fullmatch(candidate) else str(uuid.uuid4()))
+    record = {"schema_version": 1, "kind": "duet.feedback", "id": record_id.lower(),
+              "run_kind": _metrics_run_kind(state), "usefulness": usefulness,
+              "decision": decision, "recorded_at": _metrics_now()}
+    payload = json.dumps(record, indent=2, allow_nan=False) + "\n"
+    write_text_atomic(local, payload)
+    if state.get("metrics_enabled") is False or os.environ.get("DUET_METRICS") == "0":
+        return "saved locally; central collection is disabled"
+    try:
+        destination = _metrics_root() / "feedback"
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_text_atomic(destination / (record["id"] + ".json"), payload)
+    except OSError:
+        return "saved locally; central feedback storage is unavailable"
+    return "saved locally and in central metrics"
+
+
+def _load_feedback_summary(root: pathlib.Path) -> dict:
+    summary = {kind: {"records": 0, "usefulness": {}, "decisions": {}}
+               for kind in ("live", "test", "dry_run", "unknown")}
+    summary["skipped"] = 0
+    directory = root / "feedback"
+    seen: set[str] = set()
+    try:
+        if root.is_symlink() or directory.is_symlink() or not directory.is_dir():
+            return summary
+        paths = sorted(directory.iterdir())
+    except OSError:
+        summary["skipped"] += 1
+        return summary
+    for path in paths:
+        if path.suffix != ".json" or path.is_symlink():
+            continue
+        try:
+            if not path.is_file():
+                continue
+            record = _read_feedback(path)
+            if record is None or record["id"] in seen:
+                raise ValueError("invalid or duplicate feedback")
+            seen.add(record["id"])
+            group = summary[record["run_kind"]]
+            group["records"] += 1
+            for source, target in (("usefulness", "usefulness"), ("decision", "decisions")):
+                label = record[source]
+                group[target][label] = group[target].get(label, 0) + 1
+        except (OSError, ValueError, TypeError, RuntimeError):
+            summary["skipped"] += 1
+    return summary
+
+
+def _print_feedback_summary(summary: dict) -> None:
+    live = summary["live"]
+    if live["records"]:
+        labels = ", ".join(f"{key}={value}" for key, value in sorted(live["usefulness"].items()))
+        print(f"  human feedback (live): {live['records']} runs; {labels}")
+        print("  Feedback is self-reported usefulness, not verified correctness.")
+
+
+def _add_finding_arguments(parser: argparse.ArgumentParser) -> None:
+    toggles = parser.add_mutually_exclusive_group()
+    toggles.add_argument("--finding-reports", action="store_true", default=None,
+                         help="request structured findings and write local review.md")
+    toggles.add_argument("--no-finding-reports", action="store_false", dest="finding_reports",
+                         help="disable finding reports, including the review recipe default")
+    parser.add_argument("--report", metavar="RUN_DIR_OR_ID",
+                        help="render a saved run's finding report without running agents")
+    parser.add_argument("--resolve", dest="resolve_findings", metavar="FINDING_ID", action="append",
+                        help="with --continue, focus on an unresolved ID; repeatable, defaults to two turns")
+    parser.add_argument("--feedback", metavar="RUN_DIR_OR_ID",
+                        help="record optional human feedback for one run")
+    parser.add_argument("--usefulness", choices=_FEEDBACK_USEFULNESS)
+    parser.add_argument("--decision", choices=_FEEDBACK_DECISIONS)
+
+
+def _validate_finding_arguments(args: argparse.Namespace,
+                                 parser: argparse.ArgumentParser) -> None:
+    report, feedback = args.report, args.feedback
+    if args.resolve_findings and not args.continue_run:
+        parser.error("--resolve requires --continue")
+    if args.resolve_findings and (args.status or args.stop or args.stats or args.list_runs is not None):
+        parser.error("--resolve cannot be combined with status, stop, stats, or list")
+    if (args.usefulness or args.decision) and not feedback:
+        parser.error("--usefulness and --decision require --feedback")
+    if not report and not feedback:
+        return
+    if report and feedback:
+        parser.error("--report and --feedback are separate operations")
+    allowed = {"report", "json_output", "quiet"} if report else {
+        "feedback", "usefulness", "decision", "quiet"}
+    tri_state = {"finding_reports", "metrics_enabled", "worktree", "require_worktree", "codex_fast", "recap"}
+    if any(name not in allowed and (value is not None if name in tri_state
+                                    else value not in (None, False))
+           for name, value in vars(args).items()):
+        parser.error("--report/--feedback cannot be combined with run or other control options")
+    if feedback and (not args.usefulness or not args.decision):
+        parser.error("--feedback requires --usefulness and --decision")
+
+
+def _maybe_handle_findings(args: argparse.Namespace,
+                            parser: argparse.ArgumentParser) -> Optional[int]:
+    _validate_finding_arguments(args, parser)
+    report, feedback = args.report, args.feedback
+    if not report and not feedback:
+        return None
+    try:
+        run_dir, state = _read_review_state(report or feedback)
+        if report:
+            result = build_finding_report(state)
+            print(json.dumps(result, sort_keys=True, allow_nan=False) if args.json_output
+                  else render_finding_report(result), end="\n" if args.json_output else "")
+        else:
+            print("[duet] feedback " + _save_feedback(run_dir, state, args.usefulness, args.decision))
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        print(f"[duet] finding report/feedback error: {exc}", file=sys.stderr)
+        return 3
+    return 0
+
+
 def _add_control_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--continue", metavar="RUN_DIR_OR_ID", dest="continue_run",
@@ -6261,8 +6882,9 @@ def _maybe_print_metrics(args: argparse.Namespace,
         "status", "list_runs", "worktree", "require_worktree", "worktree_for",
         "worktree_path", "worktree_root", "add_dirs", "reasoning", "codex_fast",
         "trust_state", "recap", "dry_run", "metrics_enabled", "metrics_kind",
+        "finding_reports", "resolve_findings", "report", "feedback", "usefulness", "decision",
     )
-    tri_state = {"worktree", "require_worktree", "codex_fast", "recap", "metrics_enabled"}
+    tri_state = {"worktree", "require_worktree", "codex_fast", "recap", "metrics_enabled", "finding_reports"}
     if any((getattr(args, name, None) is not None if name in tri_state
             else getattr(args, name, None) not in (None, False)) for name in conflicts):
         parser.error("--stats cannot be combined with run or control options")
@@ -6287,6 +6909,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--resume-codex", metavar="SESSION_ID",
                     help="(advanced) seed codex with an existing session id.")
     _add_control_arguments(ap)
+    _add_finding_arguments(ap)
     _add_metrics_arguments(ap)
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
@@ -6406,7 +7029,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "~/.duet/runs/*/). Exit codes: 0=terminal, 1=running, "
                          "2=stuck/crashed, 3=error.")
     ap.add_argument("--json", action="store_true", dest="json_output",
-                    help="with --status or --stats, emit stable schema-v1 JSON")
+                    help="with --status, --stats, or --report, emit schema-v1 JSON")
     ap.add_argument("--list", metavar="PATH", nargs="?", const="__defaults__",
                     default=None, dest="list_runs",
                     help="don't run a duet — instead list runs found under "
@@ -6453,6 +7076,8 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.turns = 6
     if args.recap is None:
         args.recap = True
+    if getattr(args, "finding_reports", None) is None:
+        args.finding_reports = True
     if args.worktree is None:
         # An explicit reuse path selects the alternate worktree topology and
         # must suppress the recipe's fresh-worktree default.
@@ -6608,6 +7233,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
         resume_codex=args.resume_codex,
     )
     _apply_metrics_options(cfg, args, raw)
+    _apply_finding_options(cfg, args, ap, raw)
     return cfg
 
 
@@ -6686,6 +7312,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
     _apply_metrics_options(cfg, args)
+    _apply_finding_options(cfg, args, ap)
     return cfg
 
 
@@ -6801,6 +7428,9 @@ def main() -> int:
     ap = _build_arg_parser()
     args = ap.parse_args()
 
+    finding_exit = _maybe_handle_findings(args, ap)
+    if finding_exit is not None:
+        return finding_exit
     metrics_exit = _maybe_print_metrics(args, ap)
     if metrics_exit is not None:
         return metrics_exit
@@ -6811,7 +7441,7 @@ def main() -> int:
         if args.status or args.list_runs is not None or args.continue_run:
             ap.error("--stop cannot be combined with --status, --list, or --continue")
         if args.json_output:
-            ap.error("--json is only valid with --status or --stats")
+            ap.error("--json is only valid with --status, --stats, or --report")
         return request_run_stop(args.stop, immediate=args.immediate)
 
     # `--status` is read-only: print run health and exit. Skip everything below.
@@ -6819,7 +7449,7 @@ def main() -> int:
         return print_run_status_safe(args.status, json_output=args.json_output)
 
     if args.json_output:
-        ap.error("--json is only valid with --status or --stats")
+        ap.error("--json is only valid with --status, --stats, or --report")
 
     # `--list` is read-only: print the run-dir table and exit.
     if args.list_runs is not None:
@@ -6843,6 +7473,7 @@ def main() -> int:
     except RunSetupError as exc:
         print(f"[duet] setup failed: {exc}", file=sys.stderr)
         return 1
+    _announce_finding_report(state)
     if state.get("finished_reason") in {
         FINISHED_KICKOFF_ERROR,
         FINISHED_SETUP_ERROR,

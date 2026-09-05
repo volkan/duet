@@ -1905,5 +1905,66 @@ for snapshot in (root / "home" / ".duet" / "metrics" / "runs").glob("*.json"):
 assert all(path.read_text(encoding="utf-8") == text for path, text in originals.items())
 PY
 
+expect "report needs readable state" 3 "$DUET" --report "$TMPD/no-finding-run"
+expect "resolve requires continuation" 2 "$DUET" --resolve L1
+expect "finding report continuation and feedback CLI" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet, raw = sys.argv[1:]
+root = pathlib.Path(raw) / "finding-workflow"
+binary = root / "bin" / "opencode"
+binary.parent.mkdir(parents=True)
+binary.write_text('''#!/usr/bin/env python3
+import json, sys, uuid
+if "--version" in sys.argv:
+    print("1.2.3")
+else:
+    items = [{"id":"L1","claim":"private-claim-marker","disposition":"unresolved",
+              "evidence":[],"objection":"Missing requirement"}]
+    reply = "```duet-findings\\n" + json.dumps({"findings":items}) + "\\n```"
+    reply += "\\nLGTM rationale: this bounded review records the missing requirement explicitly.\\n<<<LGTM>>>"
+    sid = sys.argv[sys.argv.index("-s")+1] if "-s" in sys.argv else str(uuid.uuid4())
+    print(json.dumps({"type":"text","sessionID":sid,"part":{"id":"reply","type":"text","text":reply}}))
+''', encoding="utf-8")
+binary.chmod(0o755)
+env = dict(os.environ, HOME=str(root / "home"), DUET_METRICS="1",
+           PATH=str(binary.parent) + os.pathsep + os.environ["PATH"])
+def command(*args):
+    result = subprocess.run([duet, *args], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    return result.stdout
+info = root / "info.json"
+command("--finding-reports", "--lead", "opencode:reviewer", "--partner", "opencode:reviewer",
+        "--task", "private-task-marker", "--cwd", str(root), "--turns", "2", "--recap",
+        "--metrics-kind", "test", "--runs-dir", str(root / "runs"), "--run-info-file", str(info))
+run = pathlib.Path(json.loads(info.read_text())["run_dir"])
+report = json.loads(command("--report", str(run), "--json"))
+assert report["summary"]["unresolved"] == 1
+assert report["structured_turns"]["ok"] == 2
+assert "L1" in (run / "review.md").read_text()
+before = (run / "state.json").read_bytes()
+continued_info = root / "continued.json"
+command("--continue", str(run), "--resolve", "L1", "--dry-run", "--recap",
+        "--run-info-file", str(continued_info), "--runs-dir", str(root / "continued"))
+continued = pathlib.Path(json.loads(continued_info.read_text())["run_dir"])
+state = json.loads((continued / "state.json").read_text())
+assert state["max_turns"] == 2 and state["finding_focus"] == ["L1"]
+assert all(event["inherited"] for event in json.loads(command("--report", str(continued), "--json"))["events"])
+assert (run / "state.json").read_bytes() == before
+for usefulness in ("mixed", "useful"):
+    command("--feedback", str(run), "--usefulness", usefulness, "--decision", "corrected_comment")
+stats = json.loads(command("--stats", "--json"))
+assert stats["feedback"]["test"]["records"] == 1
+assert stats["feedback"]["test"]["usefulness"] == {"useful":1}
+assert stats["feedback"]["live"]["records"] == 0
+for path in (root / "home" / ".duet" / "metrics").rglob("*.json"):
+    text = path.read_text()
+    assert "private-claim-marker" not in text and "private-task-marker" not in text
+PY
+
 echo "---"; echo "smoke: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

@@ -522,7 +522,14 @@ worktree gated by `verify_cmd`.
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
 | `--status RUN_DIR_OR_ID` | print a one-shot health summary of an existing run and exit. Accepts a path or a bare run id (`20260507-082801`); see [Output layout and status mode](#output-layout-and-status-mode). Read-only |
-| `--json` | with `--status`, emit the stable schema-v1 `duet.status` document instead of the human view |
+| `--json` | with `--status`, `--stats`, or `--report`, emit the corresponding schema-v1 JSON document |
+| `--finding-reports` | request structured claim assessments and write local `review.md`; enabled by `--recipe review`; YAML key `finding_reports:` |
+| `--no-finding-reports` | disable finding reports, including recipe, config, or continued-run settings |
+| `--report RUN_DIR_OR_ID` | render saved finding assessments and executed checks as Markdown, or JSON with `--json`; read-only; exit 0 for readable state (including unavailable findings), 3 for read/format errors |
+| `--resolve FINDING_ID` | with `--continue`, focus on a currently unresolved finding; repeat for multiple IDs. Defaults to two turns; explicit `--turns` must be at least two |
+| `--feedback RUN_DIR_OR_ID` | explicitly save the latest human outcome for one run; requires both `--usefulness` and `--decision`; exit 0 on local success, 3 on failure |
+| `--usefulness useful\|mixed\|not_useful\|unknown` | optional human judgment used with `--feedback`, never inferred from agent agreement |
+| `--decision accepted_finding\|rejected_finding\|corrected_comment\|no_change\|not_applied` | self-reported review decision used with `--feedback`, separate from technical correctness |
 | `--stats` | read the central curated metrics store and print an aggregate report; does not inspect or modify raw run directories |
 | `--stats --json` | emit the stable `duet.metrics.report` JSON document |
 | `--stats --refresh [PATH]` | explicitly import discoverable older `state.json` files into central metrics, then report. With no `PATH`, uses the default roots and known home index; with a path, imports that runs root. Refresh never runs commands or edits originals; duplicates are ignored |
@@ -588,6 +595,23 @@ Invalid imported timestamps become unknown without aborting the refresh.
 
 See [docs/METRICS.md](METRICS.md) for the snapshot fields and limitations.
 
+## Finding reports
+
+The review recipe enables local finding reports; other runs opt in with
+`--finding-reports` or `finding_reports: true` in config. Each successful turn
+can publish stable claim IDs, supported/refuted/unresolved agent assessments,
+cited evidence, and objections. `duet --report RUN` rebuilds the report from
+saved state without running commands. Private claim text stays in the run
+directory, outside central metrics. Missing structured output remains visible.
+
+`duet --continue RUN --resolve L1` preserves inherited IDs and focuses a new,
+two-turn run on an unresolved finding. The original run and stop reason remain
+unchanged; ordinary convergence, timeout, and force controls still apply.
+`--feedback RUN --usefulness useful --decision corrected_comment` records an
+optional human outcome, with only fixed-choice labels eligible for central
+aggregation. See [FINDINGS.md](FINDINGS.md) for the schema, limitations, and
+all feedback choices.
+
 ## Output layout and status mode
 
 Each run produces:
@@ -597,6 +621,8 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
   20260506-194122/
     transcript.md                            # full conversation, human-readable
     recap.md                                 # compact per-turn debug view, if --recap
+    review.md                                # local claim assessments, if finding reports enabled
+    feedback.json                            # latest human outcome, only after --feedback
     state.json                               # task, agents, session_ids, history,
                                              # phase, finished_reason, duet_pid,
                                              # sentinel/sandbox/permissions/reasoning,
@@ -604,6 +630,7 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
                                              # verify_cmd/last_verify if present,
                                              # recap_path if --recap,
                                              # continue_from for --continue runs
+                                             # finding_reports/finding_baseline/finding_focus if enabled
     turn-01-codex-coder.stderr.log           # live stderr from each agent invocation
     turn-01-codex-coder.pid                  # PID file (only present while the turn runs)
     turn-01-verify.log                       # verify stdout/stderr and metadata, if --verify-cmd runs

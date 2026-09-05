@@ -22,6 +22,9 @@ runs_dir: runs
 # always reported separately. Accepted values: live | test.
 # metrics_kind: live
 # See docs/METRICS.md for refresh recovery and numeric reporting limits.
+# Local claim reports (enabled by --recipe review); independent of metrics.
+# Private findings remain in state.json/review.md. Human feedback is opt in.
+# finding_reports: false
 sandbox: workspace-write
 permission_mode: acceptEdits
 dry_run: false
