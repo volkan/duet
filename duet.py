@@ -2867,7 +2867,7 @@ def _metrics_timestamp(value: object) -> Optional[str]:
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed.astimezone(dt.timezone.utc).isoformat() if parsed.tzinfo else None
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -5298,7 +5298,12 @@ def _metrics_report_median(values: list[float]) -> Optional[float]:
         return None
     values = sorted(values)
     middle = len(values) // 2
-    return values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+    if len(values) % 2:
+        return values[middle]
+    # Validated timings are finite and nonnegative; their difference cannot
+    # overflow, even when adding the two middle values would.
+    lower, upper = values[middle - 1], values[middle]
+    return lower + (upper - lower) / 2
 
 
 def _metrics_report_coverage(measured: int, total: int) -> dict:
@@ -5357,7 +5362,7 @@ def _metrics_report_finish_group(group: dict) -> dict:
     }
     result["reported_cost_usd"] = {
         **_metrics_report_coverage(len(group["_costs"]), total),
-        "total": sum(group["_costs"]) if group["_costs"] else None,
+        "total": _metrics_nonnegative_amount(sum(group["_costs"])) if group["_costs"] else None,
     }
     return result
 
@@ -5582,8 +5587,11 @@ def _print_metrics_outcomes_and_cost(report: dict) -> None:
     costs = [group["reported_cost_usd"] for group in report["agent_groups"]]
     reported = sum(cost["reported_turns"] for cost in costs)
     total = sum(cost["total_turns"] for cost in costs)
-    amount = sum(cost["total"] for cost in costs if cost["total"] is not None)
-    value = f"${amount:.4f}" if reported else "unknown"
+    amount = _metrics_nonnegative_amount(
+        sum(cost["total"] for cost in costs if cost["total"] is not None))
+    overflow = amount is None or any(
+        cost["reported_turns"] and cost["total"] is None for cost in costs)
+    value = "unknown (overflow)" if overflow else (f"${amount:.4f}" if reported else "unknown")
     print(f"  provider-reported cost: {value} ({reported}/{total} turns reported)")
 
 
@@ -5592,7 +5600,7 @@ def print_metrics_report(json_output: bool = False) -> int:
     records, skipped = _metrics_report_load_records(_metrics_root())
     report = build_metrics_report(records, skipped=skipped)
     if json_output:
-        print(json.dumps(report, sort_keys=True))
+        print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
         _print_metrics_human(report)
     return 0

@@ -189,6 +189,8 @@ configuration metadata only, and never upload automatically. Use
 for the schema, privacy boundary, refresh rules, and interpretation limits.
 `DUET_METRICS=0` also overrides collection settings in config files and
 continued runs.
+Refresh tolerates invalid timestamps, and reports mark overflowing cost totals
+as unknown.
 
 **Verify gate** — a convergence proposal only counts if `make test` exits 0;
 any failure feeds back into the next turn:

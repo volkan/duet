@@ -155,6 +155,53 @@ class TestMetricsReportAggregation(unittest.TestCase):
 
 
 class TestMetricsReportStore(unittest.TestCase):
+    def test_extreme_finite_values_keep_stats_json_valid(self) -> None:
+        for value in (1e308, sys.float_info.max):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw)
+                runs = root / "runs"
+                runs.mkdir()
+                for number in (1, 2):
+                    record = _record(number, wall_elapsed_s=value, turns=[
+                        _turn("lead", agent_elapsed_s=value, verify_elapsed_s=value,
+                              usage_scope="invocation", cost_usd=value),
+                        _turn("partner", turn=2, usage_scope="invocation", cost_usd=0.25),
+                    ])
+                    (runs / f"{number}.json").write_text(json.dumps(record), encoding="utf-8")
+                with mock.patch.object(duet, "_metrics_root", return_value=root):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(duet.print_metrics_report(json_output=True), 0)
+
+                    def reject_constant(token):
+                        raise ValueError(f"non-JSON numeric constant: {token}")
+
+                    report = json.loads(output.getvalue(), parse_constant=reject_constant)
+                    human = io.StringIO()
+                    with contextlib.redirect_stdout(human):
+                        self.assertEqual(duet.print_metrics_report(), 0)
+                self.assertEqual(report["records"]["total"], 2)
+                self.assertEqual(report["wall_elapsed_s"]["median"], value)
+                lead = next(group for group in report["agent_groups"]
+                            if group["profile"]["slot"] == "lead")
+                for field in ("agent_elapsed_s", "verify_elapsed_s"):
+                    self.assertEqual(lead["timing"][field]["median"], value)
+                self.assertIsNone(lead["reported_cost_usd"]["total"])
+                self.assertEqual(lead["reported_cost_usd"]["reported_turns"], 2)
+                self.assertIn("provider-reported cost: unknown (overflow)", human.getvalue())
+
+    def test_human_cost_total_handles_overflow_across_finite_groups(self) -> None:
+        report = duet.build_metrics_report([_record(1, turns=[
+            _turn("lead", usage_scope="invocation", cost_usd=1e308),
+            _turn("partner", turn=2, usage_scope="invocation", cost_usd=1e308),
+        ])])
+        self.assertEqual([group["reported_cost_usd"]["total"]
+                          for group in report["agent_groups"]], [1e308, 1e308])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            duet._print_metrics_human(report)
+        self.assertIn("provider-reported cost: unknown (overflow)", output.getvalue())
+
     def test_skips_malformed_schema_and_duplicate_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)

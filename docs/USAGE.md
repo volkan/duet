@@ -568,6 +568,8 @@ prints schema `duet.metrics.report`, grouping observations by duet/backend
 versions, requested and reported models, reasoning values, roles, and paired
 agent profiles. It reports timing, verification, provider-usage coverage, and
 skipped malformed, unreadable, unknown-schema, or duplicate snapshots.
+Overflowing cost totals become `null` in JSON and `unknown (overflow)` in the
+human report; timing medians use arithmetic that avoids overflow.
 Legacy imports are counted separately and excluded from default live
 performance groups. Dry-run, test, unknown-kind, and incomplete snapshots are
 also excluded from those groups. Agreement between agents is an outcome signal
@@ -582,6 +584,7 @@ live-versus-dry classification remain unknown when the old state cannot prove
 them.
 Refresh also recovers missing or stale metrics from new-format states, without
 replacing a newer snapshot. The imported count includes recovered updates.
+Invalid imported timestamps become unknown without aborting the refresh.
 
 See [docs/METRICS.md](METRICS.md) for the snapshot fields and limitations.
 

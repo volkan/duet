@@ -197,6 +197,41 @@ class TestMetricsCollection(unittest.TestCase):
 
 
 class TestMetricsRefresh(unittest.TestCase):
+    def test_refresh_normalizes_out_of_range_timestamps_to_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            metrics_root = root / "metrics"
+            timestamps = (
+                "0001-01-01T00:00:00+23:00",
+                "9999-12-31T23:59:59-23:00",
+                "2026-01-01T00:00:00+00:00",
+            )
+            ids = []
+            for number, timestamp in enumerate(timestamps, start=1):
+                run = root / f"run-{number}"
+                run.mkdir()
+                snapshot_id = f"00000000-0000-4000-8000-{number:012d}"
+                ids.append(snapshot_id)
+                state = {
+                    "agents": [], "history": [],
+                    "metrics": {
+                        "id": snapshot_id, "project_id": "a" * 64,
+                        "started_at": timestamp, "updated_at": timestamp,
+                    },
+                }
+                (run / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            with mock.patch.object(duet, "_metrics_root", return_value=metrics_root):
+                result = duet.refresh_metrics(str(root))
+
+            self.assertEqual(result, {"imported": 3, "unchanged": 0, "skipped": 0})
+            for number, snapshot_id in enumerate(ids):
+                path = metrics_root / "runs" / f"{snapshot_id}.json"
+                snapshot = json.loads(path.read_text(encoding="utf-8"))
+                expected = timestamps[2] if number == 2 else None
+                self.assertEqual(snapshot["started_at"], expected)
+                self.assertEqual(snapshot["updated_at"], expected)
+
     def test_explicit_refresh_is_idempotent_and_preserves_legacy_unknowns(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)

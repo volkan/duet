@@ -21,6 +21,7 @@ runs_dir: runs
 # Label manual evaluations separately from ordinary live runs. Dry runs are
 # always reported separately. Accepted values: live | test.
 # metrics_kind: live
+# See docs/METRICS.md for refresh recovery and numeric reporting limits.
 sandbox: workspace-write
 permission_mode: acceptEdits
 dry_run: false

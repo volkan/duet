@@ -90,11 +90,18 @@ Malformed records include numeric JSON values rejected by Python's integer
 conversion limit; one such record does not prevent valid snapshots from being
 reported.
 
+Timing medians remain finite even for extreme numeric inputs. If a sum of
+reported costs exceeds the finite numeric range, its JSON `total` is `null`;
+coverage still counts the supplied measurements. The human report displays
+`unknown (overflow)` instead of an infinite or misleading partial total.
+
 `duet --stats --refresh` explicitly imports discoverable older `state.json`
 files, then reports. The no-argument form uses the normal default roots and
 known home index. `duet --stats --refresh PATH` imports one explicit runs root.
 Refresh does not execute task, verification, or agent commands and does not
 edit the original run directories. Imported records are deduplicated.
+Invalid timestamps, including timezone conversions outside the supported year
+range, become unknown without preventing other metrics from being imported.
 Refresh also repairs missing or stale snapshots from new-format states;
 the imported count includes these updates. It cannot reconstruct artifacts
 that were already deleted before metrics were collected.
