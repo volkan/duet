@@ -344,6 +344,10 @@ codex plugin marketplace add volkan/duet
 codex plugin add duet@volkan-duet
 ```
 
+If plugin installation reports `not found` while adding the marketplace reports
+`already added from a different source`, follow the cache recovery steps in the
+[Codex Plugin install checklist](CODEX_PLUGIN.md#install-checklist).
+
 Start a new Codex thread after installing so the bundled skill is loaded. The
 default skill recipe uses the same schema-checked launch:
 
