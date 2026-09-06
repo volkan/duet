@@ -1129,7 +1129,8 @@ first = calls[-1]
 assert first[:2] == ["opencode", "run"], first
 assert "--format" in first and "json" in first, first
 assert "--dir" in first, first
-assert "--dangerously-skip-permissions" in first, first
+assert "--auto" in first, first
+assert "--dangerously-skip-permissions" not in first, first
 assert "--variant" in first and first[first.index("--variant") + 1] == "max", first
 assert "-m" in first and "anthropic/claude-sonnet-4-6" in first, first
 assert "--agent" in first and "build" in first, first

@@ -8,6 +8,10 @@ description: Run the duet two-agent CLI harness from Codex. Use when asked to ru
 Use the installed `duet` CLI from the current project. This skill does not
 install `duet`, `claude`, `codex`, or any optional backend.
 
+Run and supervise the harness directly; do not delegate this workflow to
+subagents or launch extra agents alongside its two peers. Current Duet disables
+native delegation inside the peers; older releases may not include that policy.
+
 ## Prerequisites
 
 First run:

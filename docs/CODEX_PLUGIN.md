@@ -200,6 +200,10 @@ Use Duet to run `cat failing-log.txt` with --partner gemini:coder --turns 2 --pe
 
 ## Runtime Expectations
 
+Run and supervise Duet directly. The skill must not spawn helper agents, and
+current Duet disables native delegation inside its peers. See the
+[subagent policy](SUBAGENTS.md) for the controls and their limits.
+
 Duet atomically writes `DUET_RUN_INFO` immediately after allocating the run and
 writing initial `state.json`, before `/review` starts. The skill validates
 `schema_version == 1` and `kind == "duet.run"`, then monitors the absolute

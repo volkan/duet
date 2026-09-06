@@ -606,7 +606,8 @@ class TestAgentFinishReasons(unittest.TestCase):
             self.assertIn("--format", first)
             self.assertEqual(first[first.index("--format") + 1], "json")
             self.assertIn("--dir", first)
-            self.assertIn("--dangerously-skip-permissions", first)
+            self.assertIn("--auto", first)
+            self.assertNotIn("--dangerously-skip-permissions", first)
             self.assertIn("-m", first)
             self.assertEqual(first[first.index("-m") + 1], "anthropic/claude-sonnet-4-6")
             self.assertNotIn("-s", first)  # nothing to resume on turn 1

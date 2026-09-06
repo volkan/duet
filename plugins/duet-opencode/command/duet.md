@@ -9,6 +9,10 @@ Run the installed `duet` CLI to pair two CLI coding agents in a reviewed loop
 from the current project. This command does not install `duet`, `claude`, or
 `codex` — it shells out to the `duet` CLI on your PATH.
 
+Run and supervise the harness directly. Do not delegate this workflow to
+subagents or launch extra agents alongside its two peers. Current Duet disables
+native delegation inside the peers; older releases may not include that policy.
+
 ## Prerequisite check
 
 First confirm the `duet` CLI is on PATH:

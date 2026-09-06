@@ -97,6 +97,21 @@ The full how-to and the per-change matrix live in `docs/USAGE.md`
 
 `run_duet()` is the loop. `_prepare_run` owns allocation, initial phase state, atomic run-info publication, worktree setup, and deferred kickoff before handing control to it. `_execute_turn`, `_derive_seed_or_failure`, `_dry_run_recap_state`, and `ask_force` own later phases; every payload still comes from `_build_run_state`. `build_run_status` builds the secret-minimized status schema and both human/JSON renderers consume it. `main()` delegates validation/config construction to named helpers. Keep this decomposition: the complexity gate fails when branch-heavy setup/status logic is inlined into `run_duet` or `main`.
 
+### No native subagent delegation
+
+All adapter calls enforce the controls documented in `docs/SUBAGENTS.md`.
+`_delegation_safe_extra_args` merges tool exclusions without discarding user
+denials; Codex adds its disable overrides after extras on every resume path.
+`_agent_environment` supplies child-only environment overlays for Claude,
+OpenCode, and Gemini, and `_run` never mutates `os.environ`. Gemini copies
+existing system settings into a private temporary directory and cleans it up
+even on failure. Do not remove these controls on retries or continuations.
+The default Claude review kickoff must deny delegation tools too. Custom
+kickoff/verification shell commands remain explicit caller responsibility.
+
+`subagent_policy: "disabled"` in state/metrics describes the launch policy,
+not an observed child-agent count. Historical missing fields stay unknown.
+
 ### Named review recipes and previews
 
 `_apply_recipe_args` fills only omitted flags for `review` and `codex-review`.
@@ -234,7 +249,7 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 - **`opencode run` exits 0 even on errors.** A model-not-found, auth, or tool failure is emitted as a `{"type":"error","error":{...}}` event in the JSONL stream, *not* a nonzero exit code. `_parse_opencode_jsonl` scans for that event and `call_opencode` raises `agent_error` on it — never rely on the process rc for OpenCode error detection (rc only catches crashes/timeouts/`command not found`). This is the single biggest footgun; the unit test `test_opencode_error_event_maps_to_agent_error` pins it.
 - **JSONL `sessionID` is required and stable.** `opencode run --format json` emits a JSONL event stream on stdout; every event carries a top-level `sessionID`. duet collects reply text from `{"type":"text","part":{"type":"text","text":...}}` events (keyed by part id, last-write-wins, concatenated in arrival order so a tool-split reply isn't lost), and resumes with `opencode run -s <sessionID>`. Unlike Claude, OpenCode does **not** rotate the id across turns, so resume is robustly id-keyed and two OpenCode agents can share one cwd safely (`resume_is_cwd_keyed` stays the default `_resume_never_cwd_keyed`; the same-cwd peer guards in `run_duet` are automatic no-ops for OpenCode). A missing `sessionID` stops with `agent_error`.
 - **Non-JSON stdout lines are skipped, not fatal.** OpenCode prints a one-time DB-migration banner on a fresh machine. `_parse_opencode_jsonl` tolerates non-JSON lines (it does *not* mirror Copilot's strict "any banner is malformed" rule) — a genuine failure still surfaces via the missing-`sessionID` / error-event checks.
-- **Permissions are OpenCode-native.** `--sandbox` and `permission_mode` do not apply. duet runs `opencode run --dangerously-skip-permissions` (like Copilot's `--allow-all-tools`) so tool-using turns don't hang, scopes the project with `--dir <eff_cwd>`, and passes the prompt as the trailing positional (all options first). There is **no `add_dirs:` equivalent** — OpenCode operates on the whole `--dir` project — so `call_opencode` does not take `add_dirs` (it mirrors Codex in that respect). Use per-agent `extra_args` (e.g. `["--agent", "build"]`) for narrower policy.
+- **Permissions are OpenCode-native.** `--sandbox` and `permission_mode` do not apply. duet uses `opencode run --auto`, preserving explicit permission denials, and a child-only inline `subagent_depth: 0` override. It scopes the project with `--dir <eff_cwd>` and passes the prompt last. There is **no `add_dirs:` equivalent**. Existing inline JSON settings are preserved; invalid inline config, remote `--attach`, and the old permission-bypass override fail instead of weakening the policy. Custom primary agents (e.g. `["--agent", "build"]`) remain supported.
 - **Models use the `provider/model` form** (`-m anthropic/claude-sonnet-4-6`); a bare model name will make OpenCode error. There is no `--resume-opencode` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed OpenCode agents.
 
 ## Keep docs in sync with each change

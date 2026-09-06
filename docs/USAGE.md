@@ -14,6 +14,7 @@ layout, `--status` mode, force prompt, and session memory.
 - [Real loop test](#real-loop-test)
 - [Same-backend peering](#same-backend-peering)
 - [Codex-only review](#codex-only-review)
+- [Subagent policy](SUBAGENTS.md)
 - [CLI flags](#cli-flags)
 - [Output layout and status mode](#output-layout-and-status-mode)
 - [How session memory works](#how-session-memory-works)
@@ -514,6 +515,10 @@ The backend is the CLI Duet invokes; the model is a choice inside that CLI.
 Two Codex sessions can use different models with the same sign-in. A second
 CLI or a Claude account is not required for that pairing.
 
+Duet disables native subagent delegation so each peer does its own work.
+See the [subagent policy](SUBAGENTS.md) for backend controls, version requirements,
+and the limits of enforcing this through CLI launches.
+
 ### Codex-only review
 
 The `codex-review` recipe starts a Codex reviewer, then hands its findings to
@@ -698,8 +703,9 @@ permission or storage failure warns and does not fail the agent run.
 
 `duet --stats` reads only the central snapshot directory. `--stats --json`
 prints schema `duet.metrics.report`, grouping observations by duet/backend
-versions, requested and reported models, reasoning values, roles, and paired
-agent profiles. It reports timing, verification, provider-usage coverage, and
+versions, requested and reported models, reasoning values, roles, subagent
+policy, and paired agent profiles. Missing historical subagent policies stay
+unknown. It reports timing, verification, provider-usage coverage, and
 skipped malformed, unreadable, unknown-schema, or duplicate snapshots.
 Overflowing cost totals become `null` in JSON and `unknown (overflow)` in the
 human report; timing medians use arithmetic that avoids overflow.
@@ -1015,10 +1021,12 @@ Gemini extra roots from `--add-dir` / `add_dirs:` are emitted as
 `--include-directories`. Copilot receives `--add-dir` for extra roots and runs
 in non-interactive mode with `--allow-all-tools`; use Copilot `extra_args` for
 additional `--deny-tool`, URL, or path policy. OpenCode permissions are
-likewise native: duet runs `opencode run --dangerously-skip-permissions` so
+likewise native: duet runs `opencode run --auto` so
 tool-using turns don't hang, scopes the project with `--dir <cwd>`, and has no
 `add_dirs:` equivalent (OpenCode operates on the whole `--dir` project); use
-OpenCode `extra_args` for narrower tool/permission policy.
+OpenCode `extra_args` for narrower tool/permission policy. Duet sets
+`subagent_depth: 0`; remote `--attach` and the old permission-bypass
+flag are incompatible with the [subagent policy](SUBAGENTS.md).
 
 duet runs Codex with `--sandbox workspace-write` by default (configurable via `--sandbox` / YAML `sandbox:`). That sandbox **blocks outbound network by default** as a security feature — DNS, HTTPS, anything. So `gh`, `curl`, `npm install`, `pip install`, web APIs, etc. all fail from inside codex turns unless you opt in. Symptom looks like:
 

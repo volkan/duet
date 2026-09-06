@@ -125,10 +125,14 @@ Custom commands do not pre-add `--recap`, keeping `--no-recap` valid.
 
 The command runs on OpenCode's `build` agent (full tool access) so it can
 shell out to `duet`. Make sure your OpenCode permissions allow the `build`
-agent to run shell commands, or run with `--dangerously-skip-permissions` for
-the non-interactive form.
+agent to run shell commands, or run with `--auto` for the non-interactive form.
+Auto mode still respects explicit permission denials.
 
 ## Runtime Expectations
+
+The command instructs the supervising assistant to run Duet directly without
+extra agents. Current Duet also disables native delegation inside each peer;
+see [SUBAGENTS.md](SUBAGENTS.md) for controls, compatible versions, and limits.
 
 The recipe allocates its run directory and writes initial `state.json` before
 starting the `/review` kickoff, so the run is observable immediately.
@@ -170,6 +174,6 @@ end of the run.
 | `/duet` runs but says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure OpenCode's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
-| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --dangerously-skip-permissions "..."`. |
+| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --auto "..."`. Explicit permission denials still apply. |
 | No run directory appears | Check the original duet process. The recipe writes initial state before `/review`; use `duet --list` or a custom `--run-info-file` launch to discover it deterministically. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |

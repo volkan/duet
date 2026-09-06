@@ -37,8 +37,8 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertTrue(args.require_worktree)
         self.assertEqual(args.lead_model, "sonnet")
         self.assertEqual(
-            args.task_from_cmd,
-            "claude -p /review --model sonnet",
+            duet.shlex.split(args.task_from_cmd)[:5],
+            ["claude", "-p", "/review", "--model", "sonnet"],
         )
         self.assertEqual(
             pathlib.Path(args.runs_dir),
@@ -59,8 +59,8 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertEqual(cfg.max_turns, 3)
         self.assertFalse(cfg.require_worktree)
         self.assertEqual(
-            cfg.task_from_cmd,
-            "claude -p /review --model claude-fable-5",
+            duet.shlex.split(cfg.task_from_cmd)[:5],
+            ["claude", "-p", "/review", "--model", "claude-fable-5"],
         )
 
     def test_non_claude_lead_keeps_sonnet_kickoff_default(self) -> None:
@@ -71,8 +71,8 @@ class TestReviewRecipe(unittest.TestCase):
 
         self.assertIsNone(args.lead_model)
         self.assertEqual(
-            args.task_from_cmd,
-            "claude -p /review --model sonnet",
+            duet.shlex.split(args.task_from_cmd)[:5],
+            ["claude", "-p", "/review", "--model", "sonnet"],
         )
 
     def test_explicit_seed_suppresses_recipe_kickoff(self) -> None:
