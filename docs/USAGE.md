@@ -525,7 +525,10 @@ The `codex-review` recipe starts a Codex reviewer, then hands its findings to
 a Codex coder in a separate worktree. It reviews the latest committed `HEAD`,
 uses up to six turns, and writes recap and finding reports. There is no
 separate kickoff agent. Explicit task, model, turn, and worktree flags override
-the defaults; existing `--resume-*` handoffs retain their normal speaking order.
+the defaults. With only `--resume-codex`, the reviewer still starts with the
+default task and then hands its findings to the resumed coder. A custom seed
+combined with `--resume-codex`, or a resumed Claude lead, preserves the existing
+partner-first handoff. A custom seed without resume still starts the reviewer.
 
 Check `duet --help` for this recipe. If your installed release does not list
 it, use the current checkout as shown below or install that checkout with
@@ -618,9 +621,9 @@ worktree gated by `verify_cmd`.
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
 | `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review --model sonnet`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
-| `--recipe codex-review` | two Codex sessions: lead reviewer speaks first, partner coder works in a strict worktree, latest committed `HEAD` task, six turns, recap, finding reports, and timeout continuation. No separate kickoff agent; model flags are optional. Explicit flags win; resume handoffs retain their normal order |
+| `--recipe codex-review` | two Codex sessions: lead reviewer speaks first, partner coder works in a strict worktree, latest committed `HEAD` task, six turns, recap, finding reports, and timeout continuation. No separate kickoff agent; model flags are optional. A lone `--resume-codex` keeps the default task and reviewer-first order. Combining `--resume-codex` with a custom seed, or resuming a Claude lead, starts the partner |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
-| `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. Codex speaks first from that session with the task/kickoff as its prompt |
+| `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. With an explicit seed, Codex speaks first. Alone with a recipe, retain its default seed: `review` runs its Claude kickoff, while `codex-review` starts its lead reviewer before the resumed coder |
 | `--continue RUN_DIR_OR_ID` | start a new run from a prior run's `state.json`: restore agents/session ids, reuse the saved worktree when available, and send the correct next agent a continuation kickoff. Optionally add one extra instruction with `--task`, `--kickoff`, or `--task-from-cmd` |
 | `--stop RUN_DIR_OR_ID` | request a graceful stop for one live run. The argument resolves like `--status`. Duet validates the exact supervisor PID and saved process-start identity, then signals only that PID. The active child turn can finish before the run records `force_stop` |
 | `--immediate` | with `--stop`, ask that supervisor to terminate its active child process group and record `force_stop` without waiting for the turn to finish. It does not signal another run or a broad supervisor process group |
@@ -954,7 +957,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 ## How session memory works
 
-- **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner` because the intended Codex workflow is "resume Codex with the existing plan in context, then let Claude review." If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
+- **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner`, retaining its prior context. The recipe determines speaking order as described under [Codex-only review](#codex-only-review). If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
 - **Claude**: each call uses `claude -p ... --model <model> --output-format json`, defaulting `<model>` to the stable `sonnet` alias and preserving an explicit slot/YAML model unchanged. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
@@ -1025,8 +1028,10 @@ likewise native: duet runs `opencode run --auto` so
 tool-using turns don't hang, scopes the project with `--dir <cwd>`, and has no
 `add_dirs:` equivalent (OpenCode operates on the whole `--dir` project); use
 OpenCode `extra_args` for narrower tool/permission policy. Duet sets
-`subagent_depth: 0`; remote `--attach` and the old permission-bypass
-flag are incompatible with the [subagent policy](SUBAGENTS.md).
+`subagent_depth: 0` and checks the resolved native config before each turn.
+If managed settings override it or the check fails, the peer does not start.
+Remote `--attach` and the old permission-bypass flag are incompatible with the
+[subagent policy](SUBAGENTS.md).
 
 duet runs Codex with `--sandbox workspace-write` by default (configurable via `--sandbox` / YAML `sandbox:`). That sandbox **blocks outbound network by default** as a security feature — DNS, HTTPS, anything. So `gh`, `curl`, `npm install`, `pip install`, web APIs, etc. all fail from inside codex turns unless you opt in. Symptom looks like:
 

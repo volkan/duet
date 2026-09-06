@@ -101,11 +101,19 @@ The full how-to and the per-change matrix live in `docs/USAGE.md`
 
 All adapter calls enforce the controls documented in `docs/SUBAGENTS.md`.
 `_delegation_safe_extra_args` merges tool exclusions without discarding user
-denials; Codex adds its disable overrides after extras on every resume path.
+denials; Codex adds its disable overrides after extras on every resume path,
+including the Guardian feature gate. Native feature resolution is tested;
+app-specific automatic-review events have not been exercised.
 `_agent_environment` supplies child-only environment overlays for Claude,
 OpenCode, and Gemini, and `_run` never mutates `os.environ`. Gemini copies
-existing system settings into a private temporary directory and cleans it up
-even on failure. Do not remove these controls on retries or continuations.
+existing system settings into a private temporary directory, preserves the
+original system-defaults path even with symlinked settings, and cleans up even
+on failure. Configuration
+parsing preserves JSONC comments and OpenCode trailing commas without changing
+quoted strings. `_check_opencode_subagent_policy` checks native resolved config
+before every invocation and refuses managed overrides or unknown depth values;
+the quiet probe shares the turn budget and never logs raw config output.
+Do not remove these controls on retries or continuations.
 The default Claude review kickoff must deny delegation tools too. Custom
 kickoff/verification shell commands remain explicit caller responsibility.
 
@@ -120,9 +128,12 @@ and timeout continuation. The existing `review` recipe keeps its Claude
 `/review` kickoff even with explicit non-Claude slot overrides; an explicit
 seed suppresses that kickoff. `codex-review` defaults to two Codex sessions and
 an ordinary latest-commit task, with no separate kickoff process.
-`_recipe_start_speaker` starts its lead reviewer before the coder; explicit
-resume handoffs preserve their historical speaking order. Model choices remain
-optional and are passed through per slot. The Codex plugin selects this recipe
+`--resume-codex` alone selects the partner session without suppressing either
+recipe's default seed. `_recipe_start_speaker` starts the default Codex review
+with its lead reviewer, then hands findings to the resumed coder. Combining
+`--resume-codex` with an explicit seed, or resuming a Claude lead, preserves
+the historical partner-first handoff. Model choices remain optional and are
+passed through per slot. The Codex plugin selects this recipe
 for an explicit Codex-only request; plain `$duet` retains `review`.
 
 CLI `--dry-run` always enables preview on the YAML/JSON config path, including
@@ -192,11 +203,11 @@ Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently con
 
 ### Continue mode
 
-`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; the `codex-review` recipe also uses it to start with the lead reviewer (`0`). Other fresh runs and explicit `--resume-*` handoffs keep the partner-first value (`1`). Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
+`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; the `codex-review` recipe also uses it to start with the lead reviewer (`0`). Other fresh runs use the partner-first value (`1`). In `codex-review`, partner-first applies when `--resume-codex` has an explicit seed or a Claude lead is resumed. Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
 
 ### Resume flag normalization
 
-`apply_resume_overrides()` is the single place that applies `--resume-claude` / `--resume-codex` to configured agents. Do not add one-off resume assignment in `main()`. Claude resume is the historical "lead supplies the seed" path, so a resumed Claude agent is normalized into slot 0; `derive_seed()` then extracts its latest message before the partner speaks. Codex resume is the "resume Codex with its prior plan in context" path, so a resumed Codex agent is normalized into slot 1 and speaks first from that session. If the matching backend is absent, the helper creates the conventional slot (`claude-lead` or `codex-partner`). If the user put the backend in the wrong slot, moved agents get slot-default roles (`planner` for lead, `coder` for partner), which prevents `--resume-codex --lead codex:planner --partner claude:coder` from silently dropping the UUID or running the wrong side first.
+`apply_resume_overrides()` is the single place that applies `--resume-claude` / `--resume-codex` to configured agents. Do not add one-off resume assignment in `main()`. Claude resume is the historical "lead supplies the seed" path, so a resumed Claude agent is normalized into slot 0; `derive_seed()` then extracts its latest message before the partner speaks. Codex resume is the "resume Codex with its prior plan in context" path, so a resumed Codex agent is normalized into slot 1. It speaks first with an explicit seed; the default `codex-review --resume-codex` path starts the lead reviewer before handing findings to that session. If the matching backend is absent, the helper creates the conventional slot (`claude-lead` or `codex-partner`). If the user put the backend in the wrong slot, moved agents get slot-default roles (`planner` for lead, `coder` for partner), which prevents `--resume-codex --lead codex:planner --partner claude:coder` from silently dropping the UUID or running the wrong side first.
 
 ### Foreign-cwd default
 
@@ -249,7 +260,7 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 - **`opencode run` exits 0 even on errors.** A model-not-found, auth, or tool failure is emitted as a `{"type":"error","error":{...}}` event in the JSONL stream, *not* a nonzero exit code. `_parse_opencode_jsonl` scans for that event and `call_opencode` raises `agent_error` on it — never rely on the process rc for OpenCode error detection (rc only catches crashes/timeouts/`command not found`). This is the single biggest footgun; the unit test `test_opencode_error_event_maps_to_agent_error` pins it.
 - **JSONL `sessionID` is required and stable.** `opencode run --format json` emits a JSONL event stream on stdout; every event carries a top-level `sessionID`. duet collects reply text from `{"type":"text","part":{"type":"text","text":...}}` events (keyed by part id, last-write-wins, concatenated in arrival order so a tool-split reply isn't lost), and resumes with `opencode run -s <sessionID>`. Unlike Claude, OpenCode does **not** rotate the id across turns, so resume is robustly id-keyed and two OpenCode agents can share one cwd safely (`resume_is_cwd_keyed` stays the default `_resume_never_cwd_keyed`; the same-cwd peer guards in `run_duet` are automatic no-ops for OpenCode). A missing `sessionID` stops with `agent_error`.
 - **Non-JSON stdout lines are skipped, not fatal.** OpenCode prints a one-time DB-migration banner on a fresh machine. `_parse_opencode_jsonl` tolerates non-JSON lines (it does *not* mirror Copilot's strict "any banner is malformed" rule) — a genuine failure still surfaces via the missing-`sessionID` / error-event checks.
-- **Permissions are OpenCode-native.** `--sandbox` and `permission_mode` do not apply. duet uses `opencode run --auto`, preserving explicit permission denials, and a child-only inline `subagent_depth: 0` override. It scopes the project with `--dir <eff_cwd>` and passes the prompt last. There is **no `add_dirs:` equivalent**. Existing inline JSON settings are preserved; invalid inline config, remote `--attach`, and the old permission-bypass override fail instead of weakening the policy. Custom primary agents (e.g. `["--agent", "build"]`) remain supported.
+- **Permissions are OpenCode-native.** `--sandbox` and `permission_mode` do not apply. duet uses `opencode run --auto`, preserving explicit permission denials, and a child-only inline `subagent_depth: 0` override. It scopes the project with `--dir <eff_cwd>` and passes the prompt last. There is **no `add_dirs:` equivalent**. Existing inline JSONC settings are preserved; invalid inline config, remote `--attach`, and the old permission-bypass override fail instead of weakening the policy. Before each call, a quiet `opencode debug config` verifies that managed settings have not overridden depth zero. Custom primary agents (e.g. `["--agent", "build"]`) remain supported.
 - **Models use the `provider/model` form** (`-m anthropic/claude-sonnet-4-6`); a bare model name will make OpenCode error. There is no `--resume-opencode` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed OpenCode agents.
 
 ## Keep docs in sync with each change

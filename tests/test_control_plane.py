@@ -80,6 +80,15 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertIsNone(args.task_from_cmd)
         self.assertEqual(args.task, "inspect this")
 
+    def test_codex_resume_without_seed_keeps_review_kickoff(self) -> None:
+        session_id = "019e16c2-635e-7802-83e8-400e93533d2f"
+        parser, args = self._args("--recipe", "review", "--resume-codex", session_id)
+        cfg = duet._build_cfg_from_cli(args, parser, {})
+        self.assertEqual(duet.shlex.split(cfg.task_from_cmd)[:3],
+                         ["claude", "-p", "/review"])
+        self.assertEqual(cfg.agents[1].session_id, session_id)
+        self.assertEqual(cfg.start_speaker_idx, 1)
+
     def test_review_recipe_defaults_to_timeout_continue(self) -> None:
         parser, args = self._args("--recipe", "review", "--task", "x")
         cfg = duet._build_cfg_from_cli(args, parser, {})
@@ -194,10 +203,35 @@ class TestCodexReviewRecipe(unittest.TestCase):
 
     def test_explicit_resume_keeps_the_existing_handoff_order(self) -> None:
         session_id = "019e16c2-635e-7802-83e8-400e93533d2f"
-        cfg = self._cfg("--resume-codex", session_id, "--task", "continue the plan")
-        self.assertEqual(cfg.start_speaker_idx, 1)
+        for flag in ("--task", "--kickoff", "--task-from-cmd"):
+            with self.subTest(flag=flag):
+                cfg = self._cfg("--resume-codex", session_id, flag, "continue the plan")
+                self.assertEqual(cfg.start_speaker_idx, 1)
+                self.assertEqual(cfg.agents[1].session_id, session_id)
+                self.assertEqual(getattr(cfg, flag[2:].replace("-", "_")),
+                                 "continue the plan")
+
+    def test_resume_without_seed_retains_default_task_and_reviewer_first(self) -> None:
+        session_id = "019e16c2-635e-7802-83e8-400e93533d2f"
+        cfg = self._cfg("--resume-codex", session_id)
+        with mock.patch.object(duet, "call_agent", side_effect=AssertionError("unexpected CLI")):
+            self.assertEqual(duet.derive_seed(cfg), duet.DEFAULT_CODEX_REVIEW_TASK)
+        self.assertEqual(cfg.start_speaker_idx, 0)
+        self.assertEqual(cfg.agents[0].role, "reviewer")
+        self.assertEqual(cfg.agents[1].role, "coder")
         self.assertEqual(cfg.agents[1].session_id, session_id)
         self.assertIsNone(cfg.task_from_cmd)
+
+    def test_resumable_claude_lead_remains_the_seed_source(self) -> None:
+        session_id = "019e16c2-635e-7802-83e8-400e93533d2f"
+        cfg = self._cfg("--resume-claude", "claude-session", "--resume-codex", session_id)
+        self.assertIsNone(cfg.task)
+        self.assertIsNone(cfg.task_from_cmd)
+        with mock.patch.object(duet, "call_agent", return_value="previous plan") as call:
+            self.assertEqual(duet.derive_seed(cfg), "previous plan")
+        self.assertIs(call.call_args.args[0], cfg.agents[0])
+        self.assertEqual(cfg.start_speaker_idx, 1)
+        self.assertEqual(cfg.agents[1].session_id, session_id)
 
     def test_dry_run_records_reviewer_then_coder_and_distinct_models(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

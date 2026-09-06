@@ -502,6 +502,8 @@ class TestAgentFinishReasons(unittest.TestCase):
         # `opencode run` exits 0 on a model error, so call_opencode must catch
         # the error event in the JSONL stream and not forward a broken reply.
         def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
             return (
                 0,
                 '{"type":"error","sessionID":"ses_x","error":{"data":{"message":"boom"}}}',
@@ -521,6 +523,8 @@ class TestAgentFinishReasons(unittest.TestCase):
 
     def test_opencode_missing_session_id_maps_to_agent_error(self) -> None:
         def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
             return (
                 0,
                 '{"type":"text","part":{"type":"text","text":"ok","id":"p1"}}',
@@ -540,6 +544,8 @@ class TestAgentFinishReasons(unittest.TestCase):
 
     def test_opencode_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
             return 124, "", "[duet] TIMEOUT after 1s"
 
         agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
@@ -558,6 +564,8 @@ class TestAgentFinishReasons(unittest.TestCase):
         # generic missing-sessionID message — locks the check ordering in
         # call_opencode (mirrors the Gemini precedence test).
         def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
             return (
                 0,
                 '{"type":"error","error":{"data":{"message":"boom"}}}',
@@ -585,6 +593,8 @@ class TestAgentFinishReasons(unittest.TestCase):
 
         def fake_run(cmd, **kwargs):
             captured.append(list(cmd))
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
             return (
                 0,
                 '{"type":"text","sessionID":"ses_new","part":{"type":"text","text":"ok","id":"p1"}}',

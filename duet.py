@@ -86,7 +86,10 @@ CODEX_NO_SUBAGENT_ARGS = (
     "-c", "agents.enabled=false",
     "-c", "features.multi_agent=false",
     "-c", 'approvals_reviewer="user"',
+    "-c", 'apps._default.approvals_reviewer="user"',
+    "-c", "features.guardian_approval=false",
     "--disable", "multi_agent",
+    "--disable", "guardian_approval",
 )
 DEFAULT_CODEX_REVIEW_TASK = (
     "Review the latest commit (HEAD) for concrete correctness issues. "
@@ -1023,11 +1026,16 @@ def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
             return
 
 
+def _live_stream_target(enabled: bool = True):
+    return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
+
+
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
          live_prefix: Optional[str] = None,
          mirror_stdout: bool = False,
+         mirror_stderr: bool = True,
          redact_command: bool = False,
          env_overrides: Optional[dict[str, str]] = None) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
@@ -1036,6 +1044,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     to our stderr line-by-line as it's produced. stdout is captured silently
     unless `mirror_stdout` is set — duet logs agent final answers to the
     transcript afterwards.
+    Set `mirror_stderr=False` for private configuration probes; their captured
+    output must not reach live output or a persistent stderr log.
 
     If `stderr_log_path` is set, the child's stderr is also tee'd line-by-line
     to that file (append mode) — useful for post-hoc forensics on long agent
@@ -1047,7 +1057,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     vs "agent crashed silently". Critical for agents like `claude -p` that
     emit no stderr during their long API call.
     """
-    mirror = sys.stderr if (LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty()) else None
+    mirror = _live_stream_target()
+    stderr_mirror = _live_stream_target(mirror_stderr)
     prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
     out_chunks: list[str] = []
     err_chunks: list[str] = []
@@ -1100,7 +1111,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                                        None, activity_event),
                                  daemon=True)
         t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, mirror, prefix,
+                                 args=(proc.stderr, err_chunks, stderr_mirror, prefix,
                                        stderr_file, activity_event),
                                  daemon=True)
         t_out.start(); t_err.start()
@@ -1108,7 +1119,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         # stderr/stdout). Useful for `claude -p`, which stays silent on
         # stderr during the API call. No-op if mirror is None (--quiet).
         t_hb = threading.Thread(target=_quiet_heartbeat,
-                                args=(proc, mirror, time.monotonic(), activity_event, 20, prefix),
+                                args=(proc, stderr_mirror, time.monotonic(), activity_event, 20, prefix),
                                 daemon=True)
         t_hb.start()
 
@@ -1155,10 +1166,24 @@ def _agent_finished_reason(exc: Exception) -> str:
     return FINISHED_AGENT_ERROR
 
 
-def _json_config_object(raw: str, label: str) -> dict:
+def _json_without_comments(raw: str, *, trailing_commas: bool = False) -> str:
+    """Strip JSONC syntax while preserving quoted strings and token boundaries."""
+    quoted = r'"(?:\\.|[^"\\])*"'
+    clean = re.sub(
+        quoted + r'|//[^\r\n]*|/\*[\s\S]*?\*/',
+        lambda match: match[0] if match[0].startswith('"') else
+        re.sub(r'[^\r\n]', ' ', match[0]), raw,
+    )
+    if trailing_commas:
+        clean = re.sub(quoted + r'|,(?=\s*[}\]])',
+                       lambda match: match[0] if match[0].startswith('"') else ' ', clean)
+    return clean
+
+
+def _json_config_object(raw: str, label: str, *, trailing_commas: bool = False) -> dict:
     """Parse an inherited runtime config without leaking its contents on error."""
     try:
-        value = json.loads(raw)
+        value = json.loads(_json_without_comments(raw, trailing_commas=trailing_commas))
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{label} must be a JSON object to apply Duet's subagent policy") from exc
     if not isinstance(value, dict):
@@ -1166,10 +1191,12 @@ def _json_config_object(raw: str, label: str) -> dict:
     return value
 
 
-def _gemini_system_settings_path() -> pathlib.Path:
+def _gemini_system_settings_path(cwd: Optional[pathlib.Path] = None) -> pathlib.Path:
     explicit = os.environ.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
     if explicit:
-        return pathlib.Path(explicit).expanduser().resolve()
+        path = pathlib.Path(explicit).expanduser()
+        # Defaults are siblings of the configured path, not its symlink target.
+        return (cwd or pathlib.Path.cwd()) / path
     if sys.platform == "darwin":
         return pathlib.Path("/Library/Application Support/GeminiCli/settings.json")
     if os.name == "nt":
@@ -1178,18 +1205,20 @@ def _gemini_system_settings_path() -> pathlib.Path:
 
 
 @contextlib.contextmanager
-def _agent_environment(backend: str):
+def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None):
     """Apply native delegation controls for this child only; keep auth/config intact."""
     if backend == "claude":
         yield {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
                "CLAUDE_CODE_FORK_SUBAGENT": "0"}
     elif backend == "opencode":
-        config = _json_config_object(os.environ.get("OPENCODE_CONFIG_CONTENT", "{}"),
-                                     "OPENCODE_CONFIG_CONTENT")
+        config = _json_config_object(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}",
+                                     "OPENCODE_CONFIG_CONTENT", trailing_commas=True)
         config["subagent_depth"] = 0
         yield {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
     elif backend == "gemini":
-        source = _gemini_system_settings_path()
+        source = _gemini_system_settings_path(cwd)
+        defaults = os.environ.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH") or str(
+            source.with_name("system-defaults.json"))
         try:
             raw = source.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -1204,7 +1233,8 @@ def _agent_environment(backend: str):
         with tempfile.TemporaryDirectory(prefix="duet-gemini-") as directory:
             path = pathlib.Path(directory) / "settings.json"
             write_text_atomic(path, json.dumps(config))
-            yield {"GEMINI_CLI_SYSTEM_SETTINGS_PATH": str(path)}
+            yield {"GEMINI_CLI_SYSTEM_SETTINGS_PATH": str(path),
+                   "GEMINI_CLI_SYSTEM_DEFAULTS_PATH": defaults}
     else:
         yield None
 
@@ -1242,12 +1272,52 @@ def _delegation_safe_extra_args(agent: Agent) -> list[str]:
     return kept
 
 
+def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
+    """Match run's --dir, including an explicit extra-argument override."""
+    directory = str(cwd)
+    for index, arg in enumerate(cmd[2:-1], 2):
+        if arg == "--dir" and index + 1 < len(cmd) - 1:
+            directory = cmd[index + 1]
+        elif arg.startswith("--dir="):
+            directory = arg.partition("=")[2]
+    return (cwd / directory).resolve()
+
+
+def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
+                                    timeout: float, env_overrides: dict[str, str],
+                                    pid_file_path: Optional[pathlib.Path]) -> None:
+    """Check native config precedence without logging potentially secret settings."""
+    probe = ["opencode", "debug", "config"]
+    if "--pure" in cmd[2:-1]:
+        probe.append("--pure")
+    rc, out, _ = _run(probe, cwd=_opencode_probe_cwd(cmd, cwd), stdin="",
+                      timeout=min(timeout, 30), env_overrides=env_overrides,
+                      pid_file_path=pid_file_path, mirror_stderr=False)
+    if rc == 124:
+        raise subprocess.TimeoutExpired(probe, min(timeout, 30))
+    if rc != 0:
+        raise ValueError(f"OpenCode subagent policy check failed (exit {rc}); agent not started")
+    config = _json_config_object(out, "OpenCode resolved config")
+    depth = config.get("subagent_depth")
+    if type(depth) is not int or depth != 0:
+        raise ValueError("OpenCode resolved subagent_depth is not 0; "
+                         "managed settings or this CLI version prevent Duet's policy; agent not started")
+
+
 def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                stdin: Optional[str], timeout: int,
                stderr_log_path: Optional[pathlib.Path],
                pid_file_path: Optional[pathlib.Path]) -> tuple[int, str, str]:
     try:
-        with _agent_environment(backend) as env_overrides:
+        with _agent_environment(backend, cwd=cwd) as env_overrides:
+            if backend == "opencode":
+                started = time.monotonic()
+                _check_opencode_subagent_policy(
+                    cmd, cwd=cwd, timeout=timeout, env_overrides=env_overrides,
+                    pid_file_path=pid_file_path)
+                timeout -= time.monotonic() - started
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(cmd, 0)
             return _run(
                 cmd,
                 cwd=cwd,
@@ -7228,12 +7298,12 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.kickoff is not None,
         args.task_from_cmd is not None,
         args.resume_claude is not None,
-        args.resume_codex is not None,
         args.continue_run is not None,
     ))
     if not explicit_seed:
         if args.recipe == "codex-review":
             args.task = DEFAULT_CODEX_REVIEW_TASK
+            args._recipe_default_task = True
             return
         command = "claude -p /review"
         kickoff_model = (
@@ -7249,8 +7319,11 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
 
 
 def _recipe_start_speaker(args: argparse.Namespace) -> int:
-    """Codex-only reviews start with the reviewer; resume handoffs stay intact."""
-    if args.recipe == "codex-review" and not (args.resume_claude or args.resume_codex):
+    """Start Codex reviews at the lead unless resuming with a supplied seed."""
+    default_review = getattr(args, "_recipe_default_task", False)
+    if args.recipe == "codex-review" and (
+        default_review or not (args.resume_claude or args.resume_codex)
+    ):
         return 0
     return 1
 

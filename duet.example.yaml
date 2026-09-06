@@ -169,6 +169,8 @@ agents:
 # if it is missing or if the stream contains an error event (note that
 # `opencode run` exits 0 even on model/tool errors). Permissions are native:
 # duet runs with `--auto`, `--dir <cwd>`, and an inline subagent_depth: 0;
+# a native config check stops the turn if managed settings override depth zero.
+# Inline OPENCODE_CONFIG_CONTENT supports comments and trailing commas.
 # explicit permission denials still apply. --sandbox, permission_mode, and
 # add_dirs do not apply. Reasoning maps to `run --variant`.
 # Models use OpenCode's provider/model form.

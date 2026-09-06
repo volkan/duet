@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import pathlib
 import shlex
@@ -30,6 +32,9 @@ class TestNoSubagents(unittest.TestCase):
                 agent = duet.Agent("peer", "codex", session_id=sid, extra_args=[
                     "-c", "agents.enabled=true", "--enable", "multi_agent",
                     "-c", "features.multi_agent=true", "-c", 'approvals_reviewer="auto_review"',
+                    "--enable", "guardian_approval", "-c", "features.guardian_approval=true",
+                    "-c", 'apps._default.approvals_reviewer="auto_review"',
+                    "-c", 'apps.example.approvals_reviewer="auto_review"',
                 ])
                 with mock.patch.object(duet, "_run", return_value=(0, "ok", "")) as run:
                     duet.call_codex(agent, "system", "message", pathlib.Path.cwd(),
@@ -40,6 +45,10 @@ class TestNoSubagents(unittest.TestCase):
                 self.assertEqual(config["agents.enabled"], "false")
                 self.assertEqual(config["features.multi_agent"], "false")
                 self.assertEqual(config["approvals_reviewer"], '"user"')
+                self.assertEqual(config["apps._default.approvals_reviewer"], '"user"')
+                self.assertEqual(config["features.guardian_approval"], "false")
+                self.assertIn("guardian_approval", [cmd[i + 1] for i, arg in enumerate(cmd)
+                                                   if arg == "--disable"])
                 self.assertEqual(cmd[cmd.index("--disable") + 1], "multi_agent")
                 self.assertTrue(cmd[-1].startswith("=== ROLE ==="))
                 if sid:
@@ -98,6 +107,8 @@ class TestNoSubagents(unittest.TestCase):
 
                         def run(cmd, **kwargs):
                             overrides = kwargs["env_overrides"]
+                            if cmd[:3] == ["opencode", "debug", "config"]:
+                                return 0, '{"subagent_depth": 0}', ""
                             if backend == "gemini":
                                 path = pathlib.Path(overrides["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
                                 self.assertFalse(json.loads(path.read_text())["experimental"]["enableAgents"])
@@ -137,6 +148,91 @@ class TestNoSubagents(unittest.TestCase):
                 self.assertEqual(config["model"], "example/model")
             self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], original)
 
+    def test_jsonc_preserves_strings_and_supports_backend_specific_trailing_commas(self):
+        value = {"url": "https://example.test/a//b/*literal*/", "quote": 'a\\" // literal',
+                 "nested": [1, 2], "text": ",} ,]"}
+        raw = "/* settings */\n" + json.dumps(value, indent=2).replace(
+            '"nested": [', '// array comment\n"nested": [') + " // end"
+        self.assertEqual(duet._json_config_object(raw, "test"), value)
+        with_commas = raw.replace('2\n  ]', '2,\n  ]').replace('\n}', ',\n}')
+        self.assertEqual(duet._json_config_object(with_commas, "test", trailing_commas=True), value)
+        with self.assertRaises(ValueError):
+            duet._json_config_object(with_commas, "test")
+
+    def test_jsonc_does_not_join_tokens_or_accept_unterminated_comments(self):
+        for raw in ('{"x": 1/* comment */2}', '{"x": tru/* comment */e}',
+                    '{"x": 1} /* unterminated', '{"x": [1,,]}'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                duet._json_config_object(raw, "test", trailing_commas=True)
+
+    def test_opencode_inline_jsonc_and_empty_settings_are_supported(self):
+        for raw in ('{ // native JSONC\n "subagent_depth": 4, "permission": {"bash": "deny",},}', ''):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": raw}):
+                with duet._agent_environment("opencode") as env:
+                    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                    self.assertEqual(config["subagent_depth"], 0)
+                    if raw:
+                        self.assertEqual(config["permission"], {"bash": "deny"})
+                self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], raw)
+
+    def test_opencode_refuses_conflicting_missing_or_malformed_resolved_policy(self):
+        cases = [json.dumps({"subagent_depth": value}) for value in (2, None, False, "0", 0.0)]
+        cases += ['{}', '[]', 'private-config-content']
+        for raw in cases:
+            for sid in (None, SID):
+                with self.subTest(raw=raw, sid=sid), mock.patch.object(
+                        duet, "_run", return_value=(0, raw, "private-config-error")) as run:
+                    agent = duet.Agent("peer", "opencode", session_id=sid)
+                    with self.assertRaises(duet.AgentRunError) as error:
+                        duet.call_opencode(agent, "system", "message", pathlib.Path.cwd(),
+                                           60, False, first_turn=sid is None)
+                    self.assertEqual(error.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+                    self.assertNotIn("private-config", str(error.exception))
+                    self.assertEqual(run.call_count, 1)
+                    self.assertEqual(run.call_args.args[0], ["opencode", "debug", "config"])
+
+    def test_opencode_preflight_uses_child_environment_cwd_and_turn_budget(self):
+        cmd = ["opencode", "run", "--dir", "/original", "--dir=relative", "--pure", "task"]
+        env = {"OPENCODE_CONFIG_CONTENT": '{"subagent_depth":0}'}
+        with mock.patch.object(duet, "_run", side_effect=[(0, '{"subagent_depth":0}', ""),
+                                                        (0, "reply", "")]) as run, \
+                mock.patch.object(duet, "_agent_environment", return_value=contextlib.nullcontext(env)), \
+                mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]):
+            result = duet._agent_run(cmd, backend="opencode", cwd=pathlib.Path("/project"),
+                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None)
+        self.assertEqual(result, (0, "reply", ""))
+        probe, agent = run.call_args_list
+        self.assertEqual(probe.args[0], ["opencode", "debug", "config", "--pure"])
+        self.assertEqual(probe.kwargs["cwd"], pathlib.Path("/project/relative"))
+        self.assertFalse(probe.kwargs["mirror_stderr"])
+        self.assertNotIn("stderr_log_path", probe.kwargs)
+        self.assertEqual(probe.kwargs["env_overrides"], agent.kwargs["env_overrides"])
+        self.assertEqual(probe.kwargs["timeout"], 30)
+        self.assertEqual(agent.kwargs["timeout"], 58)
+
+    def test_opencode_preflight_failure_never_starts_the_agent(self):
+        for rc, reason in ((124, duet.FINISHED_TIMEOUT), (127, duet.FINISHED_AGENT_ERROR),
+                           (1, duet.FINISHED_AGENT_ERROR)):
+            with self.subTest(rc=rc), mock.patch.object(duet, "_run", return_value=(
+                    rc, "private-config-content", "private-config-error")) as run:
+                with self.assertRaises(duet.AgentRunError) as error:
+                    duet._agent_run(["opencode", "run", "task"], backend="opencode",
+                                     cwd=pathlib.Path.cwd(), stdin=None, timeout=60,
+                                     stderr_log_path=None, pid_file_path=None)
+                self.assertEqual(error.exception.finished_reason, reason)
+                self.assertNotIn("private-config", str(error.exception))
+                self.assertEqual(run.call_count, 1)
+
+    def test_opencode_exhausted_budget_stops_after_preflight(self):
+        with mock.patch.object(duet, "_run", return_value=(0, '{"subagent_depth":0}', "")) as run, \
+                mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]):
+            with self.assertRaises(duet.AgentRunError) as error:
+                duet._agent_run(["opencode", "run", "task"], backend="opencode",
+                                 cwd=pathlib.Path.cwd(), stdin=None, timeout=1,
+                                 stderr_log_path=None, pid_file_path=None)
+            self.assertEqual(error.exception.finished_reason, duet.FINISHED_TIMEOUT)
+            self.assertEqual(run.call_count, 1)
+
     def test_invalid_inline_config_stops_before_spawning_a_process(self):
         for raw in ("not-json-private-value", "[]", "null"):
             with self.subTest(raw=raw), mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": raw}), \
@@ -167,6 +263,60 @@ class TestNoSubagents(unittest.TestCase):
                 self.assertFalse(overlay.exists())
                 self.assertEqual(source.read_text(), original)
                 self.assertEqual(os.environ["GEMINI_CLI_SYSTEM_SETTINGS_PATH"], str(source))
+
+    def test_gemini_preserves_implicit_and_explicit_system_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            source = root / "settings.json"
+            source.write_text('{ // native comment\n "experimental": {"enableAgents": true}}')
+            original_defaults = root / "system-defaults.json"
+            original_defaults.write_text('{"model":{"name":"configured-default"}}')
+            for explicit in (None, "", "relative/defaults.json", str(root / "custom-defaults.json")):
+                env = dict(os.environ, GEMINI_CLI_SYSTEM_SETTINGS_PATH="settings.json")
+                env.pop("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", None)
+                if explicit is not None:
+                    env["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"] = explicit
+                with self.subTest(explicit=explicit), mock.patch.dict(os.environ, env, clear=True):
+                    with duet._agent_environment("gemini", cwd=root) as overrides:
+                        self.assertEqual(overrides["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"],
+                                         explicit or str(original_defaults))
+                        settings = json.loads(pathlib.Path(overrides["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]).read_text())
+                        self.assertFalse(settings["experimental"]["enableAgents"])
+                    self.assertEqual(os.environ.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH"), explicit)
+            self.assertEqual(json.loads(original_defaults.read_text())["model"]["name"], "configured-default")
+
+    def test_gemini_settings_symlink_preserves_original_defaults_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory).resolve()
+            target = root / "stored" / "settings.json"
+            target.parent.mkdir()
+            target.write_text('{"experimental":{"enableAgents":true}}')
+            source = root / "settings.json"
+            source.symlink_to(target)
+            for explicit in (str(source), source.name):
+                with self.subTest(explicit=explicit), mock.patch.dict(os.environ, {
+                    "GEMINI_CLI_SYSTEM_SETTINGS_PATH": explicit,
+                    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH": "",
+                }):
+                    with duet._agent_environment("gemini", cwd=root) as env:
+                        self.assertEqual(env["GEMINI_CLI_SYSTEM_DEFAULTS_PATH"],
+                                         str(root / "system-defaults.json"))
+                        settings = json.loads(pathlib.Path(env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"]).read_text())
+                        self.assertFalse(settings["experimental"]["enableAgents"])
+            self.assertTrue(source.is_symlink())
+            self.assertTrue(json.loads(target.read_text())["experimental"]["enableAgents"])
+
+    def test_quiet_preflight_keeps_native_config_output_out_of_terminal(self):
+        terminal = io.StringIO()
+        with contextlib.redirect_stderr(terminal), mock.patch.object(terminal, "isatty", return_value=True), \
+                mock.patch.object(duet, "LIVE_STREAM", True), mock.patch.object(duet, "RECAP_MODE", False):
+            rc, out, err = duet._run([sys.executable, "-c",
+                                     "import sys; print('private-out'); print('private-err', file=sys.stderr)"],
+                                    cwd=pathlib.Path.cwd(), stdin="", timeout=10, mirror_stderr=False)
+        self.assertEqual(rc, 0)
+        self.assertIn("private-out", out)
+        self.assertIn("private-err", err)
+        self.assertNotIn("private-", terminal.getvalue())
 
     def test_environment_override_reaches_child_without_mutating_parent(self):
         with mock.patch.dict(os.environ, {"DUET_TEST_CHILD_POLICY": "parent"}):

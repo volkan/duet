@@ -219,6 +219,9 @@ fi
 expect_stdout "recap dry-run prints mode"    0 "mode: recap" "$DUET" --dry-run --recap --task "x" --cwd "$TMPD"
 expect "triage-reviewer role"                0 "$DUET" --task "x" --dry-run --cwd "$TMPD" --lead claude:triage-reviewer --partner codex:coder
 expect_stdout "resume-codex lead normalized" 0 "Turn 1 :: codex-partner" "$DUET" --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "review resume retains default kickoff" 0 "Turn 1 :: codex-partner" "$DUET" --recipe review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "codex-review resume retains reviewer first" 0 "Turn 1 :: codex-lead (codex/reviewer)" "$DUET" --recipe codex-review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "codex-review explicit resume handoff" 0 "Turn 1 :: codex-partner (codex/coder)" "$DUET" --recipe codex-review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --task "x" --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude partner moved"  0 "Turn 1 :: codex-partner" "$DUET" --resume-claude claude-sid --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude keeps claude partner" 0 "Turn 1 :: claude-partner (claude/reviewer)" "$DUET" --resume-claude claude-sid --lead claude:planner --partner claude:reviewer --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect "same-backend codex dry-run slots"   0 bash -c '
@@ -1102,6 +1105,8 @@ calls = []
 
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
+    if cmd[:3] == ["opencode", "debug", "config"]:
+        return 0, '{"subagent_depth": 0}', ""
     return 0, json.dumps(
         {"type": "text", "sessionID": "oc-sid",
          "part": {"type": "text", "text": "ok", "id": "p1"}}
@@ -1950,6 +1955,8 @@ binary.write_text('''#!/usr/bin/env python3
 import json, sys, uuid
 if "--version" in sys.argv:
     print("1.2.3")
+elif sys.argv[1:3] == ["debug", "config"]:
+    print(json.dumps({"subagent_depth": 0}))
 else:
     items = [{"id":"L1","claim":"private-claim-marker","disposition":"unresolved",
               "evidence":[],"objection":"Missing requirement"}]
