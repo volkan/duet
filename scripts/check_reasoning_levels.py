@@ -70,6 +70,8 @@ def main() -> int:
 
     def fake_run(cmd, **_kwargs):
         captured.append(list(cmd))
+        if cmd[:3] == ["opencode", "debug", "config"]:
+            return 0, '{"subagent_depth": 0}', ""
         if cmd[0] == "claude":
             return (0, json.dumps({"result": "ok", "session_id": "s"}), "")
         if cmd[0] == "gemini":

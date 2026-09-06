@@ -195,6 +195,10 @@ opinion, use /duet:duet to discuss it with Codex.
 
 ## Runtime Expectations
 
+Run and supervise Duet directly. The command must not spawn helper agents, and
+current Duet disables native delegation inside its peers. See the
+[subagent policy](SUBAGENTS.md) for the controls and their limits.
+
 Duet writes the requested run-info JSON immediately after allocation and the
 initial state write, before `/review` starts. The command validates schema 1,
 reads its absolute `run_dir`, and monitors with:

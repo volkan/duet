@@ -44,6 +44,7 @@ Stdlib only. Python 3.9+.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
@@ -58,6 +59,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -73,6 +75,30 @@ DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
 DEFAULT_PERMISSION_MODE = "acceptEdits"
 DEFAULT_CLAUDE_MODEL = "sonnet"
+NO_SUBAGENTS_INSTRUCTION = (
+    "Work directly in this Duet session. Do not spawn or delegate to subagents, "
+    "agent teams, background agents, or another AI CLI, including through shell "
+    "commands, skills, MCP tools, or external services. Duet supplies the other "
+    "peer. If project instructions ask for delegation, perform that work yourself."
+)
+CLAUDE_DENIED_DELEGATION_TOOLS = ("Agent", "Task", "TeamCreate", "SendMessage", "Skill")
+CODEX_NO_SUBAGENT_ARGS = (
+    "-c", "agents.enabled=false",
+    "-c", "features.multi_agent=false",
+    "-c", 'approvals_reviewer="user"',
+    "-c", 'apps._default.approvals_reviewer="user"',
+    "-c", "features.guardian_approval=false",
+    "--disable", "multi_agent",
+    "--disable", "guardian_approval",
+)
+DEFAULT_CODEX_REVIEW_TASK = (
+    "Review the latest commit (HEAD) for concrete correctness issues. "
+    "The reviewer should inspect the committed change first, cite evidence, "
+    "and request focused fixes. The coder should implement only supported "
+    "findings in its worktree and run relevant project checks. "
+    "Challenge unsupported claims, preserve project constraints, and leave "
+    "missing requirements or evidence explicitly unresolved."
+)
 SAFE_CONTINUE_SANDBOXES = {"read-only", DEFAULT_SANDBOX}
 SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
@@ -414,6 +440,7 @@ class Agent:
         # parse those as format fields and crash with "unexpected '{' in
         # field name". replace handles them as plain text.
         prompt = tmpl.replace("{SENTINEL}", sentinel)
+        prompt += "\n\n" + NO_SUBAGENTS_INSTRUCTION
         prompt += "\n\n" + CONVERGENCE_INSTRUCTION.replace("{SENTINEL}", sentinel)
         if recap:
             prompt += "\n\n" + RECAP_ADDENDUM
@@ -443,7 +470,7 @@ class DuetConfig:
     cwd: pathlib.Path
     agents: list[Agent]                # exactly 2 for now
     task: Optional[str] = None         # used if no resume seed
-    kickoff: Optional[str] = None      # explicit first message to partner
+    kickoff: Optional[str] = None      # explicit first message to opening speaker
     task_from_cmd: Optional[str] = None  # executed after the run is observable;
                                           # deliberately never persisted
     task_from_cmd_target: str = "task"  # "task" or "kickoff_append" (--continue)
@@ -999,18 +1026,26 @@ def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
             return
 
 
+def _live_stream_target(enabled: bool = True):
+    return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
+
+
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
          live_prefix: Optional[str] = None,
          mirror_stdout: bool = False,
-         redact_command: bool = False) -> tuple[int, str, str]:
+         mirror_stderr: bool = True,
+         redact_command: bool = False,
+         env_overrides: Optional[dict[str, str]] = None) -> tuple[int, str, str]:
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
     to our stderr line-by-line as it's produced. stdout is captured silently
     unless `mirror_stdout` is set — duet logs agent final answers to the
     transcript afterwards.
+    Set `mirror_stderr=False` for private configuration probes; their captured
+    output must not reach live output or a persistent stderr log.
 
     If `stderr_log_path` is set, the child's stderr is also tee'd line-by-line
     to that file (append mode) — useful for post-hoc forensics on long agent
@@ -1022,7 +1057,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     vs "agent crashed silently". Critical for agents like `claude -p` that
     emit no stderr during their long API call.
     """
-    mirror = sys.stderr if (LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty()) else None
+    mirror = _live_stream_target()
+    stderr_mirror = _live_stream_target(mirror_stderr)
     prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
     out_chunks: list[str] = []
     err_chunks: list[str] = []
@@ -1048,6 +1084,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         try:
             proc = subprocess.Popen(
                 cmd, cwd=str(cwd),
+                env=None if env_overrides is None else {**os.environ, **env_overrides},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace",
                 bufsize=1,  # line-buffered
@@ -1074,7 +1111,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                                        None, activity_event),
                                  daemon=True)
         t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, mirror, prefix,
+                                 args=(proc.stderr, err_chunks, stderr_mirror, prefix,
                                        stderr_file, activity_event),
                                  daemon=True)
         t_out.start(); t_err.start()
@@ -1082,7 +1119,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
         # stderr/stdout). Useful for `claude -p`, which stays silent on
         # stderr during the API call. No-op if mirror is None (--quiet).
         t_hb = threading.Thread(target=_quiet_heartbeat,
-                                args=(proc, mirror, time.monotonic(), activity_event, 20, prefix),
+                                args=(proc, stderr_mirror, time.monotonic(), activity_event, 20, prefix),
                                 daemon=True)
         t_hb.start()
 
@@ -1129,19 +1166,167 @@ def _agent_finished_reason(exc: Exception) -> str:
     return FINISHED_AGENT_ERROR
 
 
+def _json_without_comments(raw: str, *, trailing_commas: bool = False) -> str:
+    """Strip JSONC syntax while preserving quoted strings and token boundaries."""
+    quoted = r'"(?:\\.|[^"\\])*"'
+    clean = re.sub(
+        quoted + r'|//[^\r\n]*|/\*[\s\S]*?\*/',
+        lambda match: match[0] if match[0].startswith('"') else
+        re.sub(r'[^\r\n]', ' ', match[0]), raw,
+    )
+    if trailing_commas:
+        clean = re.sub(quoted + r'|,(?=\s*[}\]])',
+                       lambda match: match[0] if match[0].startswith('"') else ' ', clean)
+    return clean
+
+
+def _json_config_object(raw: str, label: str, *, trailing_commas: bool = False) -> dict:
+    """Parse an inherited runtime config without leaking its contents on error."""
+    try:
+        value = json.loads(_json_without_comments(raw, trailing_commas=trailing_commas))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{label} must be a JSON object to apply Duet's subagent policy") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object to apply Duet's subagent policy")
+    return value
+
+
+def _gemini_system_settings_path(cwd: Optional[pathlib.Path] = None) -> pathlib.Path:
+    explicit = os.environ.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
+    if explicit:
+        path = pathlib.Path(explicit).expanduser()
+        # Defaults are siblings of the configured path, not its symlink target.
+        return (cwd or pathlib.Path.cwd()) / path
+    if sys.platform == "darwin":
+        return pathlib.Path("/Library/Application Support/GeminiCli/settings.json")
+    if os.name == "nt":
+        return pathlib.Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "gemini-cli" / "settings.json"
+    return pathlib.Path("/etc/gemini-cli/settings.json")
+
+
+@contextlib.contextmanager
+def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None):
+    """Apply native delegation controls for this child only; keep auth/config intact."""
+    if backend == "claude":
+        yield {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+               "CLAUDE_CODE_FORK_SUBAGENT": "0"}
+    elif backend == "opencode":
+        config = _json_config_object(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}",
+                                     "OPENCODE_CONFIG_CONTENT", trailing_commas=True)
+        config["subagent_depth"] = 0
+        yield {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+    elif backend == "gemini":
+        source = _gemini_system_settings_path(cwd)
+        defaults = os.environ.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH") or str(
+            source.with_name("system-defaults.json"))
+        try:
+            raw = source.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raw = "{}"
+        config = _json_config_object(raw, "Gemini system settings")
+        experimental = config.setdefault("experimental", {})
+        if not isinstance(experimental, dict):
+            raise ValueError("Gemini system settings experimental must be an object")
+        experimental["enableAgents"] = False
+        # Preserve other system settings; never modify the original or move auth.
+        # The private directory also protects copied settings from other users.
+        with tempfile.TemporaryDirectory(prefix="duet-gemini-") as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            write_text_atomic(path, json.dumps(config))
+            yield {"GEMINI_CLI_SYSTEM_SETTINGS_PATH": str(path),
+                   "GEMINI_CLI_SYSTEM_DEFAULTS_PATH": defaults}
+    else:
+        yield None
+
+
+def _delegation_safe_extra_args(agent: Agent) -> list[str]:
+    """Keep user tool denials while adding mandatory native delegation denials."""
+    extra = list(agent.extra_args)
+    if "--" in extra:
+        raise ValueError("agent extra_args cannot contain -- before Duet's required policy flags")
+    if agent.backend == "codex" and "--approve-for-me" in extra:
+        raise ValueError("Codex --approve-for-me starts a reviewer subagent and is incompatible with Duet")
+    if agent.backend == "opencode" and any(
+            arg.split("=", 1)[0] in {"--attach", "--dangerously-skip-permissions"} for arg in extra):
+        raise ValueError("OpenCode --attach and --dangerously-skip-permissions cannot enforce Duet's subagent policy")
+    flags = ({"--disallowedTools", "--disallowed-tools"} if agent.backend == "claude"
+             else {"--excluded-tools"} if agent.backend == "copilot" else set())
+    denied = list(CLAUDE_DENIED_DELEGATION_TOOLS if agent.backend == "claude"
+                  else ("task", "write_agent") if agent.backend == "copilot" else ())
+    kept: list[str] = []
+    index = 0
+    while index < len(extra):
+        flag, equals, value = extra[index].partition("=")
+        if flag not in flags:
+            kept.append(extra[index])
+        elif equals:
+            denied.append(value)
+        else:
+            while index + 1 < len(extra) and not extra[index + 1].startswith("-"):
+                index += 1
+                denied.append(extra[index])
+        index += 1
+    if denied:
+        kept += ["--disallowedTools" if agent.backend == "claude" else "--excluded-tools",
+                 ",".join(denied)]
+    return kept
+
+
+def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
+    """Match run's --dir, including an explicit extra-argument override."""
+    directory = str(cwd)
+    for index, arg in enumerate(cmd[2:-1], 2):
+        if arg == "--dir" and index + 1 < len(cmd) - 1:
+            directory = cmd[index + 1]
+        elif arg.startswith("--dir="):
+            directory = arg.partition("=")[2]
+    return (cwd / directory).resolve()
+
+
+def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
+                                    timeout: float, env_overrides: dict[str, str],
+                                    pid_file_path: Optional[pathlib.Path]) -> None:
+    """Check native config precedence without logging potentially secret settings."""
+    probe = ["opencode", "debug", "config"]
+    if "--pure" in cmd[2:-1]:
+        probe.append("--pure")
+    rc, out, _ = _run(probe, cwd=_opencode_probe_cwd(cmd, cwd), stdin="",
+                      timeout=min(timeout, 30), env_overrides=env_overrides,
+                      pid_file_path=pid_file_path, mirror_stderr=False)
+    if rc == 124:
+        raise subprocess.TimeoutExpired(probe, min(timeout, 30))
+    if rc != 0:
+        raise ValueError(f"OpenCode subagent policy check failed (exit {rc}); agent not started")
+    config = _json_config_object(out, "OpenCode resolved config")
+    depth = config.get("subagent_depth")
+    if type(depth) is not int or depth != 0:
+        raise ValueError("OpenCode resolved subagent_depth is not 0; "
+                         "managed settings or this CLI version prevent Duet's policy; agent not started")
+
+
 def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                stdin: Optional[str], timeout: int,
                stderr_log_path: Optional[pathlib.Path],
                pid_file_path: Optional[pathlib.Path]) -> tuple[int, str, str]:
     try:
-        return _run(
-            cmd,
-            cwd=cwd,
-            stdin=stdin,
-            timeout=timeout,
-            stderr_log_path=stderr_log_path,
-            pid_file_path=pid_file_path,
-        )
+        with _agent_environment(backend, cwd=cwd) as env_overrides:
+            if backend == "opencode":
+                started = time.monotonic()
+                _check_opencode_subagent_policy(
+                    cmd, cwd=cwd, timeout=timeout, env_overrides=env_overrides,
+                    pid_file_path=pid_file_path)
+                timeout -= time.monotonic() - started
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(cmd, 0)
+            return _run(
+                cmd,
+                cwd=cwd,
+                stdin=stdin,
+                timeout=timeout,
+                stderr_log_path=stderr_log_path,
+                pid_file_path=pid_file_path,
+                env_overrides=env_overrides,
+            )
     except subprocess.TimeoutExpired as e:
         raise AgentRunError(
             FINISHED_TIMEOUT,
@@ -1442,6 +1627,7 @@ def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
         "reasoning_transport": transport,
         "fast_mode": fast,
         "extra_args_present": bool(agent.extra_args),
+        "subagent_policy": "disabled",
         "prompt_transport": (
             "system_flag_and_message" if agent.backend == "claude" else "combined_prompt"
         ),
@@ -1645,7 +1831,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd += ["--resume", agent.session_id]
     if agent.model:
         cmd += ["--model", agent.model]
-    cmd += agent.extra_args
+    cmd += _delegation_safe_extra_args(agent)
     rc, out, err = _agent_run(
         cmd,
         backend="claude",
@@ -1774,7 +1960,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
     # rejects flags after the prompt.
     if first_turn or not agent.session_id:
         exec_only_opts = ["--sandbox", sandbox, "--cd", str(eff_cwd)]
-        options = [*exec_only_opts, *shared_opts, *reasoning_args, *agent.extra_args]
+        options = [*exec_only_opts, *shared_opts, *reasoning_args,
+                   *_delegation_safe_extra_args(agent), *CODEX_NO_SUBAGENT_ARGS]
         cmd = ["codex", "exec", *options, full_prompt]
     else:
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
@@ -1785,7 +1972,8 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         options = [
             *shared_opts,
             *reasoning_args,
-            *agent.extra_args,
+            *_delegation_safe_extra_args(agent),
+            *CODEX_NO_SUBAGENT_ARGS,
             *resume_sandbox_opts,
         ]
         if _CODEX_UUID_RE.match(agent.session_id):
@@ -1882,7 +2070,7 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
         cmd += ["--model", agent.model]
     for d in (add_dirs or []):
         cmd += ["--include-directories", str(d)]
-    cmd += agent.extra_args
+    cmd += _delegation_safe_extra_args(agent)
     rc, out, err = _agent_run(
         cmd,
         backend="gemini",
@@ -2014,7 +2202,7 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
         cmd += ["--model", agent.model]
     for d in (add_dirs or []):
         cmd += ["--add-dir", str(d)]
-    cmd += agent.extra_args
+    cmd += _delegation_safe_extra_args(agent)
     cmd += ["-p", full_prompt]
     rc, out, err = _agent_run(
         cmd,
@@ -2152,7 +2340,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
         "opencode", "run",
         "--format", "json",
         "--dir", str(eff_cwd),
-        "--dangerously-skip-permissions",
+        "--auto",
     ]
     if agent.session_id:
         cmd += ["-s", agent.session_id]
@@ -2162,7 +2350,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
             cmd += ["--variant", variant]
     if agent.model:
         cmd += ["-m", agent.model]
-    cmd += agent.extra_args
+    cmd += _delegation_safe_extra_args(agent)
     cmd.append(full_prompt)
     rc, out, err = _agent_run(
         cmd,
@@ -2882,7 +3070,7 @@ def _metrics_snapshot_profile(raw: object, slot: str) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     fields = ("backend", "model_requested", "cli_version", "reasoning_requested",
               "reasoning_effective", "reasoning_backend_value", "reasoning_transport",
-              "prompt_transport")
+              "prompt_transport", "subagent_policy")
     result = {key: _metrics_identifier(raw.get(key)) for key in fields}
     result.update(slot=slot, role=raw.get("role") if raw.get("role") in ROLE_PROMPTS else "custom",
                   fast_mode=raw.get("fast_mode") if isinstance(raw.get("fast_mode"), bool) else None)
@@ -3126,6 +3314,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
     effective_phase = "finished" if finished_reason else (phase or "between_turns")
     state = {
         "duet_version": __version__,
+        "subagent_policy": "disabled",
         "max_turns": cfg.max_turns,
         "dry_run": cfg.dry_run,
         "metrics_enabled": cfg.metrics_enabled,
@@ -3251,6 +3440,15 @@ def _requested_stop_state(
     return state
 
 
+def _apply_kickoff_output(cfg: DuetConfig, output: str) -> None:
+    """Route a kickoff result (or preview placeholder) to its configured seed."""
+    if cfg.task_from_cmd_target == "kickoff_append":
+        suffix = f"\n\nHuman continuation instruction:\n{output}"
+        cfg.kickoff = (cfg.kickoff or "") + suffix
+    else:
+        cfg.task = output
+
+
 def _run_kickoff_command(
     cfg: DuetConfig,
     *,
@@ -3266,6 +3464,10 @@ def _run_kickoff_command(
 ) -> Optional[dict]:
     """Execute deferred task_from_cmd; return terminal state on failure."""
     if cfg.task_from_cmd is None:
+        return None
+    if cfg.dry_run:
+        _apply_kickoff_output(cfg, "[dry-run: command output not collected]")
+        print("[duet] dry-run: task_from_cmd not executed.")
         return None
     running = _build_run_state(
         cfg,
@@ -3326,11 +3528,7 @@ def _run_kickoff_command(
             wt_path=wt_path,
             wt_branch=wt_branch,
         )
-    if cfg.task_from_cmd_target == "kickoff_append":
-        suffix = f"\n\nHuman continuation instruction:\n{output}"
-        cfg.kickoff = (cfg.kickoff or "") + suffix
-    else:
-        cfg.task = output
+    _apply_kickoff_output(cfg, output)
     ready = _build_run_state(
         cfg,
         turns_used=0,
@@ -3846,8 +4044,8 @@ def run_duet(cfg: DuetConfig) -> dict:
     last_msg = seed
 
     # Partner (agent[1]) normally speaks first in the loop, replying to the seed.
-    # `--continue` may set this to the other agent so the next speaker matches
-    # the previous run's last completed turn.
+    # `codex-review` starts with the lead reviewer. `--continue` selects the
+    # next speaker from the previous run's last completed turn.
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
     previous_convergence_proposal = False
@@ -5429,7 +5627,7 @@ _METRICS_REPORT_USAGE_KEYS = (
 _METRICS_REPORT_PROFILE_KEYS = (
     "slot", "backend", "role", "model_requested", "cli_version",
     "reasoning_requested", "reasoning_effective", "reasoning_backend_value",
-    "reasoning_transport", "fast_mode", "extra_args_present", "prompt_transport",
+    "reasoning_transport", "fast_mode", "extra_args_present", "prompt_transport", "subagent_policy",
 )
 
 
@@ -5908,10 +6106,12 @@ def _print_metrics_human(report: dict) -> None:
         reported = profile["model_reported"] or ",".join(profile["models_reported"]) or "unreported"
         version = profile["cli_version"] or "version?"
         effort = profile["reasoning_effective"] or "native-default"
+        subagents = profile.get("subagent_policy") or "unknown"
         timing = group["timing"]["agent_elapsed_s"]
         median = "?" if timing["median"] is None else f"{timing['median']:.1f}s"
         print(f"  {profile['slot']} {profile['backend'] or '?'} {requested} → {reported} "
-              f"({version}, effort={effort}, {profile['reasoning_transport'] or 'transport?'}): "
+              f"({version}, effort={effort}, {profile['reasoning_transport'] or 'transport?'}, "
+              f"subagents={subagents}): "
               f"{group['turn_count']} turns, median {median} "
               f"({timing['reported_turns']}/{timing['total_turns']} measured)")
     remaining = len(report["agent_groups"]) - 8
@@ -6900,9 +7100,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="duet — two CLI agents in conversation, with per-agent session memory.")
     ap.add_argument("--version", action="version", version=f"duet {__version__}")
-    ap.add_argument("--recipe", choices=["review"], default=None,
+    ap.add_argument("--recipe", choices=["review", "codex-review"], default=None,
                     help="apply a canonical launch profile; explicit flags override "
-                         "recipe values (currently: review)")
+                         "recipe values (review: Claude + Codex; "
+                         "codex-review: two Codex sessions)")
     ap.add_argument("--resume-claude", metavar="SESSION_ID",
                     help="resume an existing Claude session id; harness will pull "
                          "its latest message and feed it to the partner agent.")
@@ -6914,7 +7115,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task", help="task description, @file, or @- stdin "
                                    "(used if no --resume-* and no --kickoff)")
     ap.add_argument("--kickoff", help="explicit first message, @file, or @- stdin "
-                                      "to send to the partner agent")
+                                      "to send to the opening speaker")
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default=None,
@@ -7052,13 +7253,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="disable recap mode, including a recipe default",
     )
     ap.set_defaults(recap=None)
-    ap.add_argument("--dry-run", action="store_true", help="don't actually call CLIs")
+    ap.add_argument("--dry-run", action="store_true", help="preview without agent, "
+                    "kickoff, or verification commands, including with --config")
     return ap
 
 
 def _apply_recipe_args(args: argparse.Namespace) -> None:
     """Fill omitted CLI values from a named recipe; explicit flags win."""
-    if args.recipe != "review":
+    if args.recipe not in ("review", "codex-review"):
         return
     if args.cwd is None:
         args.cwd = str(pathlib.Path.cwd())
@@ -7066,7 +7268,9 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
     if args.runs_dir is None:
         args.runs_dir = str(recipe_cwd / ".duet" / "runs")
     if args.lead is None:
-        args.lead = "claude:reviewer"
+        args.lead = (
+            "codex:reviewer" if args.recipe == "codex-review" else "claude:reviewer"
+        )
     if args.partner is None:
         args.partner = "codex:coder"
     lead_backend = (args.lead or "").partition(":")[0]
@@ -7094,10 +7298,13 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
         args.kickoff is not None,
         args.task_from_cmd is not None,
         args.resume_claude is not None,
-        args.resume_codex is not None,
         args.continue_run is not None,
     ))
     if not explicit_seed:
+        if args.recipe == "codex-review":
+            args.task = DEFAULT_CODEX_REVIEW_TASK
+            args._recipe_default_task = True
+            return
         command = "claude -p /review"
         kickoff_model = (
             args.lead_model
@@ -7105,7 +7312,20 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
             else DEFAULT_CLAUDE_MODEL
         )
         command += f" --model {shlex.quote(kickoff_model)}"
+        command += " --disallowedTools " + shlex.quote(
+            ",".join(CLAUDE_DENIED_DELEGATION_TOOLS))
+        command += " --append-system-prompt " + shlex.quote(NO_SUBAGENTS_INSTRUCTION)
         args.task_from_cmd = command
+
+
+def _recipe_start_speaker(args: argparse.Namespace) -> int:
+    """Start Codex reviews at the lead unless resuming with a supplied seed."""
+    default_review = getattr(args, "_recipe_default_task", False)
+    if args.recipe == "codex-review" and (
+        default_review or not (args.resume_claude or args.resume_codex)
+    ):
+        return 0
+    return 1
 
 
 def _resolve_opt_path(*candidates: object) -> Optional[pathlib.Path]:
@@ -7144,7 +7364,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
                          stdin_cache: dict) -> DuetConfig:
     """Build a DuetConfig from a --config YAML/JSON file. CLI flags only fill
     seed inputs (task/kickoff) when the file specifies none, and a handful of
-    flags (runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
+    flags (dry_run, runs_dir, verify_cmd, worktree*, recap, reasoning, codex_fast,
     on_turn_timeout) override or combine with file values; --resume-* still
     apply on top."""
     raw = load_yaml_or_json(pathlib.Path(args.config))
@@ -7196,7 +7416,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
             args.permission_mode
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE,
         ),
-        dry_run=bool(raw.get("dry_run", False)),
+        dry_run=bool(args.dry_run or raw.get("dry_run", False)),
         recap=bool(raw.get("recap", False)) or bool(args.recap),
         verify_cmd=verify_cmd,
         worktree=bool(raw.get("worktree", False)) or bool(args.worktree),
@@ -7293,6 +7513,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
             if args.permission_mode is not None else DEFAULT_PERMISSION_MODE
         ),
         dry_run=args.dry_run,
+        start_speaker_idx=_recipe_start_speaker(args),
         recap=bool(args.recap),
         verify_cmd=normalize_verify_cmd(args.verify_cmd, ap),
         worktree=bool(args.worktree),

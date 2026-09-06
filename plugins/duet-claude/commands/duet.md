@@ -7,6 +7,10 @@ description: Run Claude Code's /review through the duet two-agent harness, or ha
 Run the installed `duet` CLI as a long-running process and monitor it through
 its machine-readable control plane.
 
+Run and supervise the harness directly. Do not delegate this workflow to
+subagents or launch extra agents alongside its two peers. Current Duet disables
+native delegation inside the peers; older releases may not include that policy.
+
 ## Prerequisites
 
 Require `command -v duet`. If it is missing, stop and tell the user to install

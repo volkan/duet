@@ -43,7 +43,7 @@ Each file is a JSON object with `schema_version: 1` and
 | `run_kind` | `live`, `test`, `dry_run`, or `unknown` |
 | `duet_version` | Duet version when known |
 | `phase`, `finished_reason` | Curated lifecycle outcome; missing values remain unknown |
-| `agents` | Safe profile for each slot: backend, built-in/custom role, requested model, bounded CLI version, reasoning requested/effective/backend value and transport, prompt transport, fast-mode, and whether unrecorded extra arguments were present |
+| `agents` | Safe profile for each slot: backend, built-in/custom role, requested model, bounded CLI version, reasoning requested/effective/backend value and transport, prompt transport, fast-mode, subagent policy, and whether unrecorded extra arguments were present |
 | `max_turns`, `per_turn_timeout` | Configured run budget when known |
 | `wall_elapsed_s` | End-to-end elapsed time when available |
 | `turns` | Numeric timing/byte fields and safe outcome labels for each turn |
@@ -65,6 +65,11 @@ When available, `usage.reasoning_tokens` preserves a backend's native
 reasoning/thought counter. It is not normalized across vendors and must not be
 blindly added to input or output totals: some provider counters already include
 reasoning in another reported number.
+
+New profiles record `subagent_policy: "disabled"` for Duet's native delegation
+controls. This records the launch policy, not an observed zero-subagent count.
+Historical profiles without it remain unknown and form separate comparison
+groups. See [SUBAGENTS.md](SUBAGENTS.md) for backend controls and audit limits.
 
 The current adapters collect native usage ledgers from Claude's `modelUsage`,
 Gemini's `stats.models`, and OpenCode's `step_finish` events. A total stays
@@ -126,7 +131,7 @@ Collection opt-outs keep new feedback local; existing central records remain.
 See [FINDINGS.md](FINDINGS.md) for commands and interpretation.
 
 Reports exclude incomplete live runs from performance aggregates and group
-observations by versions, backends/models, effective reasoning, roles, turn
+observations by versions, backends/models, effective reasoning, subagent policy, roles, turn
 kind, fresh/resume mode, usage scope, configured turn/time budgets, and
 paired-agent profiles. They expose timing and provider-usage coverage so a
 missing value is not mistaken for zero. “Effective” means Duet's intended

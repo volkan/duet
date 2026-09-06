@@ -47,8 +47,23 @@ printf "fix typo\n" > "$TMPD/stdin-task.txt"
 expect "task @-"                            0 "$DUET" --task @- --dry-run --cwd "$TMPD" < "$TMPD/stdin-task.txt"
 echo "from file" > "$TMPD/t.txt"
 expect "task @file"                          0 "$DUET" --task @"$TMPD/t.txt" --dry-run --cwd "$TMPD"
-expect "task-from-cmd"                       0 "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
-expect "task-from-cmd cwd"                   0 "$DUET" --task-from-cmd "test \"\$(pwd -P)\" = \"$TMPD_REAL\" && echo cwd-ok" --dry-run --cwd "$TMPD"
+expect_stdout "task-from-cmd preview"        0 "dry-run: task_from_cmd not executed" "$DUET" --task-from-cmd 'echo hello' --dry-run --cwd "$TMPD"
+expect "task-from-cmd preview cannot write"  0 bash -c '
+  "$1" --task-from-cmd "touch unexpected-kickoff; printf seed" --dry-run --cwd "$2" || exit
+  test ! -e "$2/unexpected-kickoff"
+' _ "$DUET_ABS" "$TMPD"
+expect "task-from-cmd cwd and stdout"        0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("duet_under_test", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+root = pathlib.Path(sys.argv[2]).resolve()
+assert m.run_task_from_cmd("pwd -P", root, 10, root).strip() == str(root)
+PY
 expect "task literal still works"            0 "$DUET" --task "literal" --dry-run --cwd "$TMPD"
 CONTROL_DIR="$TMPD/control"
 mkdir -p "$CONTROL_DIR"
@@ -204,6 +219,9 @@ fi
 expect_stdout "recap dry-run prints mode"    0 "mode: recap" "$DUET" --dry-run --recap --task "x" --cwd "$TMPD"
 expect "triage-reviewer role"                0 "$DUET" --task "x" --dry-run --cwd "$TMPD" --lead claude:triage-reviewer --partner codex:coder
 expect_stdout "resume-codex lead normalized" 0 "Turn 1 :: codex-partner" "$DUET" --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "review resume retains default kickoff" 0 "Turn 1 :: codex-partner" "$DUET" --recipe review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "codex-review resume retains reviewer first" 0 "Turn 1 :: codex-lead (codex/reviewer)" "$DUET" --recipe codex-review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
+expect_stdout "codex-review explicit resume handoff" 0 "Turn 1 :: codex-partner (codex/coder)" "$DUET" --recipe codex-review --resume-codex 019e16c2-635e-7802-83e8-400e93533d2f --task "x" --no-recap --no-worktree --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude partner moved"  0 "Turn 1 :: codex-partner" "$DUET" --resume-claude claude-sid --lead codex:planner --partner claude:coder --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect_stdout "resume-claude keeps claude partner" 0 "Turn 1 :: claude-partner (claude/reviewer)" "$DUET" --resume-claude claude-sid --lead claude:planner --partner claude:reviewer --task "x" --turns 1 --dry-run --cwd "$TMPD"
 expect "same-backend codex dry-run slots"   0 bash -c '
@@ -213,6 +231,18 @@ expect "same-backend codex dry-run slots"   0 bash -c '
     || { echo "missing codex partner turn"; echo "$out"; exit 1; }
   echo "$out" | grep -q "Turn 2 :: codex-lead" \
     || { echo "missing codex lead turn"; echo "$out"; exit 1; }
+  exit 0
+' _ "$DUET_ABS" "$TMPD"
+expect "codex-review starts reviewer and preserves model slots" 0 bash -c '
+  out=$("$1" --recipe codex-review --dry-run --no-recap --no-worktree \
+         --turns 2 --cwd "$2" --lead-model reviewer-model --partner-model coder-model)
+  echo "$out" | grep -q "Turn 1 :: codex-lead (codex/reviewer)" \
+    || { echo "missing initial Codex review"; echo "$out"; exit 1; }
+  echo "$out" | grep -q "Turn 2 :: codex-partner (codex/coder)" \
+    || { echo "missing Codex implementation turn"; echo "$out"; exit 1; }
+  if echo "$out" | grep -q "claude -p"; then
+    echo "unexpected Claude kickoff"; exit 1
+  fi
   exit 0
 ' _ "$DUET_ABS" "$TMPD"
 expect "same-backend claude dry-run slots"   0 bash -c '
@@ -256,7 +286,7 @@ head -c 524289 /dev/zero > "$TMPD/large.txt"
 expect "task too large -> error"             2 "$DUET" --task @"$TMPD/large.txt" --dry-run --cwd "$TMPD"
 KICKOFF_INFO="$CONTROL_DIR/kickoff-failure.json"
 expect "from-cmd nonzero -> durable error"   1 "$DUET" --task-from-cmd 'false' \
-  --dry-run --cwd "$TMPD" --run-info-file "$KICKOFF_INFO"
+  --no-metrics --cwd "$TMPD" --run-info-file "$KICKOFF_INFO"
 expect "from-cmd failure persisted"          0 python3 - "$KICKOFF_INFO" <<'PY'
 import json
 import pathlib
@@ -267,7 +297,7 @@ state = json.loads(pathlib.Path(info["state_path"]).read_text())
 assert state["finished_reason"] == "kickoff_error", state
 assert state["phase"] == "finished", state
 PY
-expect "from-cmd empty stdout -> error"      1 "$DUET" --task-from-cmd 'true' --dry-run --cwd "$TMPD"
+expect "from-cmd empty stdout -> error"      1 "$DUET" --task-from-cmd 'true' --no-metrics --cwd "$TMPD"
 echo keep > "$CONTROL_DIR/existing.json"
 expect "run-info refuses overwrite"          2 "$DUET" --task "x" --dry-run \
   --cwd "$TMPD" --run-info-file "$CONTROL_DIR/existing.json"
@@ -1075,6 +1105,8 @@ calls = []
 
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
+    if cmd[:3] == ["opencode", "debug", "config"]:
+        return 0, '{"subagent_depth": 0}', ""
     return 0, json.dumps(
         {"type": "text", "sessionID": "oc-sid",
          "part": {"type": "text", "text": "ok", "id": "p1"}}
@@ -1102,7 +1134,8 @@ first = calls[-1]
 assert first[:2] == ["opencode", "run"], first
 assert "--format" in first and "json" in first, first
 assert "--dir" in first, first
-assert "--dangerously-skip-permissions" in first, first
+assert "--auto" in first, first
+assert "--dangerously-skip-permissions" not in first, first
 assert "--variant" in first and first[first.index("--variant") + 1] == "max", first
 assert "-m" in first and "anthropic/claude-sonnet-4-6" in first, first
 assert "--agent" in first and "build" in first, first
@@ -1922,6 +1955,8 @@ binary.write_text('''#!/usr/bin/env python3
 import json, sys, uuid
 if "--version" in sys.argv:
     print("1.2.3")
+elif sys.argv[1:3] == ["debug", "config"]:
+    print(json.dumps({"subagent_depth": 0}))
 else:
     items = [{"id":"L1","claim":"private-claim-marker","disposition":"unresolved",
               "evidence":[],"objection":"Missing requirement"}]

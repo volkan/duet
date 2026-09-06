@@ -55,6 +55,22 @@ def _record(number: int, **overrides) -> dict:
 
 
 class TestMetricsReportAggregation(unittest.TestCase):
+    def test_unknown_and_disabled_subagent_policies_are_not_pooled(self) -> None:
+        unrestricted = _record(1)
+        restricted = _record(2)
+        for agent in restricted["agents"]:
+            agent["subagent_policy"] = "disabled"
+        report = duet.build_metrics_report([unrestricted, restricted])
+        self.assertEqual(len(report["agent_groups"]), 2)
+        self.assertEqual(len(report["pair_groups"]), 2)
+        self.assertEqual({g["profile"]["subagent_policy"] for g in report["agent_groups"]},
+                         {None, "disabled"})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            duet._print_metrics_human(report)
+        self.assertIn("subagents=unknown", output.getvalue())
+        self.assertIn("subagents=disabled", output.getvalue())
+
     def test_profiles_versions_and_partial_provider_coverage(self) -> None:
         lead = _turn("lead", model_reported="claude-sonnet", agent_elapsed_s=2.0,
                      usage={"input_tokens": 0, "output_tokens": 5, "reasoning_tokens": 2}, cost_usd=0.25,

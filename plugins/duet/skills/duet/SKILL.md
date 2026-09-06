@@ -8,6 +8,10 @@ description: Run the duet two-agent CLI harness from Codex. Use when asked to ru
 Use the installed `duet` CLI from the current project. This skill does not
 install `duet`, `claude`, `codex`, or any optional backend.
 
+Run and supervise the harness directly; do not delegate this workflow to
+subagents or launch extra agents alongside its two peers. Current Duet disables
+native delegation inside the peers; older releases may not include that policy.
+
 ## Prerequisites
 
 First run:
@@ -26,8 +30,26 @@ command -v claude
 command -v codex
 ```
 
-If either is missing, stop and name the missing binary. Do not substitute a
-different harness or backend without the user's direction.
+If either is missing for an otherwise-default request, name the missing binary
+and suggest `--recipe codex-review` when Claude is missing. Do not silently
+switch recipes or substitute a different harness or backend; an explicit
+topology request remains unchanged.
+
+The plain `$duet` request uses this Claude-plus-Codex review recipe. If the
+user explicitly asks for a Codex-only review, says they do not have Claude,
+asks for two Codex models, or names `--recipe codex-review`, use the
+Codex-only recipe below instead. In that case check only `git`, `codex`, and
+`duet`; do not require Claude and do not silently change an explicitly chosen
+topology.
+
+For that Codex-only path, check:
+
+```bash
+command -v git
+command -v codex
+command -v duet
+codex login status
+```
 
 ## Launch
 
@@ -50,6 +72,27 @@ isolation, a `claude -p /review --model sonnet` kickoff, Sonnet-defaulted
 Claude loop turns, and continuation past one non-final automatic-turn timeout.
 Explicit flags supplied by the user go after the recipe and override its
 values.
+
+For a Codex-only review, launch:
+
+```bash
+duet --recipe codex-review --run-info-file "$DUET_RUN_INFO"
+```
+
+`codex-review` uses `codex:reviewer` as the lead, who speaks first, and
+`codex:coder` as the partner, with six turns, recap mode, local finding reports, strict worktree
+isolation, and continuation after one non-final automatic-turn timeout. The
+default task reviews the latest committed `HEAD`, then asks for focused fixes
+that are supported by the review findings. It does not start a separate
+Claude or upstream reviewer process. `--lead-model` and `--partner-model` are
+optional; when omitted, let the CLI's model defaults apply. Preserve exact
+model IDs supplied by the user and never substitute a different model or
+force a particular model.
+
+If this recipe is not listed by `duet --help`, the installed PyPI release is
+older than the recipe. Use the current checkout with `make install` (or run
+the checkout's Python entry point) before passing `--recipe codex-review`;
+published versions that predate the recipe do not support that flag.
 
 For a custom upstream command, launch:
 
@@ -162,6 +205,19 @@ Claude defaults to the stable `sonnet` alias. With `--recipe review`, a Claude
 `claude -p /review` kickoff automatically. With a custom explicit
 `--task-from-cmd 'claude -p /review …'`, add the same `--model` value inside
 that command yourself.
+
+For `codex-review`, model names are passed to the two Codex slots as supplied.
+For example, this natural-language request selects two exact model IDs:
+
+```text
+Use Codex-only Duet review with --lead-model gpt-5.6-sol and --partner-model gpt-5.6-luna.
+```
+
+Model availability depends on the account, rollout, and client. The Codex CLI
+can use an existing ChatGPT subscription sign-in; no API key is needed for
+that sign-in. Check it with `codex login status`. Both peers use the same
+account limits. Two models do not establish correctness, and availability does
+not imply free or unlimited usage or independence.
 
 Example:
 

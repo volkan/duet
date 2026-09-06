@@ -121,11 +121,14 @@ QA directory printed by the renderer.
 Preparation checks also verified that the published reports exactly match the
 original saved reports, the fixture hashes match, and the portable config
 loads with the documented settings. One earlier config-validation attempt
-timed out after the existing CLI ignored `--dry-run` alongside `--config` and
+timed out after the then-current CLI ignored `--dry-run` alongside `--config` and
 started an agent; that process was stopped and no output from the attempt is
 used in this demo. The corrected check passed with `dry_run: true` in a
-temporary config. To preview a config without agent calls, set that key inside
-the config rather than relying on the CLI flag.
+temporary config. Current source honors `--dry-run` with `--config`, even when
+the file sets `dry_run: false`, and skips kickoff commands too. Older releases
+need `dry_run: true` in the config to prevent agent turns, but still execute
+`task_from_cmd` if present; use current source to preview those configs without
+running their kickoff commands. The recorded demo artifacts are unchanged.
 
 The [storyboard](../launch/demo-script.md) tracks the seven scenes. To change
 the recorded evidence, manually inspect a new public capture and update its

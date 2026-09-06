@@ -1,5 +1,6 @@
 # Example config for duet — pass with `duet.py --config duet.example.yaml`.
 # Two agents take turns. Each keeps its own session across turns.
+# Native subagent delegation is disabled; see docs/SUBAGENTS.md for limits.
 
 cwd: ~/code/myrepo
 max_turns: 10
@@ -21,13 +22,14 @@ runs_dir: runs
 # Label manual evaluations separately from ordinary live runs. Dry runs are
 # always reported separately. Accepted values: live | test.
 # metrics_kind: live
+# Profiles record the disabled subagent policy; historical missing values stay unknown.
 # See docs/METRICS.md for refresh recovery and numeric reporting limits.
 # Local claim reports (enabled by --recipe review); independent of metrics.
 # Private findings remain in state.json/review.md. Human feedback is opt in.
 # finding_reports: false
 sandbox: workspace-write
 permission_mode: acceptEdits
-dry_run: false
+dry_run: false                # CLI --dry-run always enables preview, even when false here
 # recap: false  # true = compact per-turn debug view (writes recap.md next to transcript.md)
 
 # Optional reasoning effort for both agents:
@@ -166,8 +168,11 @@ agents:
 # `run --format json` stream carries a `sessionID`; duet stops with agent_error
 # if it is missing or if the stream contains an error event (note that
 # `opencode run` exits 0 even on model/tool errors). Permissions are native:
-# duet runs with `--dangerously-skip-permissions` and `--dir <cwd>`; --sandbox,
-# permission_mode, and add_dirs do not apply. Reasoning maps to `run --variant`.
+# duet runs with `--auto`, `--dir <cwd>`, and an inline subagent_depth: 0;
+# a native config check stops the turn if managed settings override depth zero.
+# Inline OPENCODE_CONFIG_CONTENT supports comments and trailing commas.
+# explicit permission denials still apply. --sandbox, permission_mode, and
+# add_dirs do not apply. Reasoning maps to `run --variant`.
 # Models use OpenCode's provider/model form.
 # agents:
 #   - name: opencode-lead
