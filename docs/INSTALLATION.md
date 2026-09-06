@@ -130,6 +130,14 @@ Upgrade the CLI with the same method you used to install it:
 | pip | `python3 -m pip install --upgrade --user duet-cli` |
 | Source checkout | `git -C /path/to/duet pull --ff-only`, then `make -C /path/to/duet install` |
 
+If `pipx upgrade duet-cli` reports `already at latest version` despite a newer
+release on PyPI, pip may be using a cached package index response. Retry
+without the cache:
+
+```bash
+pipx upgrade duet-cli --pip-args="--no-cache-dir"
+```
+
 For a pip installation with YAML support, upgrade `'duet-cli[yaml]'` instead.
 Package-manager installs receive published PyPI releases; a checkout follows
 its Git branch. Verify which executable you updated:
