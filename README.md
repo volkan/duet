@@ -92,6 +92,14 @@ pipx upgrade duet-cli
 npx skills update duet --global
 ```
 
+If pipx reports `already at latest version` despite a newer release on PyPI,
+retry without pip's cache:
+
+```bash
+pipx upgrade duet-cli --pip-args="--no-cache-dir"
+duet --version
+```
+
 Start a new agent session afterward. For `uv`, `pip`, source checkouts, or
 native marketplace plugins, follow the
 [upgrade guide](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md#upgrade).
