@@ -53,7 +53,7 @@ version). Setuptools derives wheel/sdist metadata from the first item, and
 `scripts/check_distribution_metadata.py` fails if they disagree:
 
 - `duet.py` — `__version__ = "..."` (canonical runtime/package source)
-- `plugins/duet-claude/.claude-plugin/plugin.json` — `"version": "..."`
+- `plugins/duet/.claude-plugin/plugin.json` — `"version": "..."`
 - `plugins/duet/.codex-plugin/plugin.json` — `"version": "..."`
 
 `scripts/bump_release_version.py` (run by the **bump-version** workflow, below)

@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "duet",
-      "source": "./plugins/duet-claude",
-      "description": "Pair two CLI coding agents (claude + codex, or same-backend) in a reviewed loop; /duet kicks off Claude Code's /review through the duet harness."
+      "source": "./plugins/duet",
+      "description": "Pair two CLI coding agents in a reviewed loop using the shared Duet skill."
     }
   ]
 }

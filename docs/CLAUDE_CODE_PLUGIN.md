@@ -1,8 +1,8 @@
 # Claude Code Plugin
 
-The Claude Code plugin installs the `/duet` slash command. It does not install
-the `duet`, `claude`, `codex`, or `gemini` binaries. The slash command shells
-out to the `duet` CLI on your PATH.
+The Claude Code plugin exposes the shared `duet` skill as `/duet:duet`. It
+uses the `duet` CLI on PATH and does not install Duet or backend CLIs. For
+Claude itself, follow the [official setup guide](https://code.claude.com/docs/en/quickstart).
 
 ## 30-Second Setup
 
@@ -15,6 +15,9 @@ command -v duet
 
 `pipx` is recommended; `uv tool install duet-cli` or
 `python3 -m pip install --user duet-cli` also put `duet` on PATH.
+
+For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
+[Shared skill installation](INSTALLATION.md#shared-skill).
 
 From this repository, `make install` is equivalent if `~/.local/bin` is on
 PATH:
@@ -30,10 +33,11 @@ Then run this inside Claude Code:
 /plugin marketplace add volkan/duet
 /plugin install duet@volkan-duet
 /reload-plugins
-/duet
+/duet:duet
 ```
 
-Use `/duet:duet` if your Claude Code install shows the namespaced command.
+The unified native plugin skill is `/duet:duet`; the standalone shared skill is
+`/duet`. Choose one installation route per host to avoid duplicate skills.
 Use `/plugin list` to inspect installed plugins, or
 `/plugin enable duet@volkan-duet` followed by `/reload-plugins` if the plugin
 was installed but disabled.
@@ -65,9 +69,8 @@ Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
    python3 -m pip install --user 'duet-cli[yaml]'      # alternative, with --config support
    ```
 
-   Existing plugin users: run `/plugin marketplace update` and reinstall the
-   plugin to pick up the narrowed plugin payload. Old cached versions are not
-   cleaned up automatically.
+   Existing plugin users: follow [Upgrade](#upgrade) to refresh the marketplace
+   and plugin.
 
 2. Confirm `duet` is visible to Claude Code's shell.
 
@@ -97,18 +100,38 @@ Recording script: see [duet-plugin-demo.md](launch/duet-plugin-demo.md).
    If Claude Code says the plugin is already installed globally, that is fine.
    Use `/plugin` or `/plugin list` to inspect or manage the installed plugin.
 
-## Run It
+## Upgrade
 
-Depending on Claude Code command disambiguation, the command may appear as
-`/duet` or `/duet:duet`.
+Update the CLI separately, then update the native Claude Code plugin:
 
-Default review recipe:
-
-```text
-/duet
+```bash
+pipx upgrade duet-cli
 ```
 
-or:
+```text
+/plugin marketplace update volkan-duet
+/plugin update duet@volkan-duet
+/reload-plugins
+```
+
+Use the package-manager upgrade command matching your CLI installation. The
+terminal equivalents are `claude plugin marketplace update volkan-duet` and
+`claude plugin update duet@volkan-duet`. If installed at project or local
+scope, pass the matching `--scope` to `claude plugin update`. Restart Claude
+Code if reloading does not expose the updated skill. For the shared skill,
+follow [Upgrade](INSTALLATION.md#upgrade).
+
+The shared native package starts at version `0.2.14`. Claude uses the plugin
+version to detect updates, so refreshing only the marketplace does not update
+an installed plugin; run both update steps above. See the official
+[plugin versioning reference](https://code.claude.com/docs/en/plugins-reference#version-management).
+
+## Run It
+
+The native plugin uses `/duet:duet`. If you installed the standalone shared
+skill instead, use `/duet` in these examples.
+
+Default review recipe:
 
 ```text
 /duet:duet
@@ -135,19 +158,19 @@ are separate from recorded harness checks; see [FINDINGS.md](FINDINGS.md).
 Custom upstream command:
 
 ```text
-/duet 'npm test 2>&1' --turns 4
+/duet:duet 'npm test 2>&1' --turns 4
 ```
 
 Review a PR diff:
 
 ```text
-/duet 'gh pr diff' --turns 6 --reasoning high
+/duet:duet 'gh pr diff' --turns 6 --reasoning high
 ```
 
 Use Gemini instead of the default Codex partner:
 
 ```text
-/duet 'cat failing-log.txt' --partner gemini:coder --turns 2 --permission-mode plan
+/duet:duet 'cat failing-log.txt' --partner gemini:coder --turns 2 --permission-mode plan
 ```
 
 The first quoted argument is the shell command used to create the kickoff text.
@@ -248,7 +271,7 @@ end of the run.
 | Symptom | Fix |
 |---|---|
 | `/plugin install duet@volkan-duet` says the plugin is already installed globally | Nothing else is needed for the plugin. Use `/plugin` to inspect or manage it. |
-| `/duet` does not appear after install | Run `/reload-plugins`, then try `/duet` or `/duet:duet`. Use `/plugin list` to confirm the plugin is installed and enabled. |
+| `/duet` does not appear after install | Run `/reload-plugins`, then try `/duet:duet` for the native plugin (`/duet` for a standalone skill). Use `/plugin list` to confirm the plugin is installed and enabled. |
 | `/duet` says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Claude Code's shell can resolve `command -v duet`. |
 | Plain `/duet` says `claude` is not on PATH | Install/authenticate Claude Code before using the default `/review` recipe. |
 | Plain `/duet` says `codex` is not on PATH | Install Codex, or pass a custom partner/config that does not use Codex. |
@@ -257,67 +280,9 @@ end of the run.
 
 ## Manual Fallback
 
-If plugin install is unavailable, copy the same command as a user-level Claude
-Code skill:
-
-````bash
-mkdir -p ~/.claude/skills/duet && cat > ~/.claude/skills/duet/SKILL.md <<'EOF'
----
-name: duet
-description: Run Claude Code's real /review through the duet two-agent harness, or hand off another command's output to duet. Wraps `duet --task-from-cmd <shell>` so /review, gh, npm test, cat error.log, or another upstream tool can drive a two-agent loop.
-argument-hint: "['<shell command>' extra duet flags...]"
-allowed-tools: Bash(*)
----
-
-# /duet
-
-First confirm `duet` is on PATH:
-
-```bash
-command -v duet
-```
-
-For plain `/duet`, also confirm:
-
-```bash
-command -v claude
-command -v codex
-```
-
-Create a private control path:
-
-```bash
-DUET_CONTROL_DIR=$(mktemp -d)
-DUET_RUN_INFO="$DUET_CONTROL_DIR/run.json"
-```
-
-If `$ARGUMENTS` is empty, run:
-
-```bash
-duet --recipe review --run-info-file "$DUET_RUN_INFO"
-```
-
-Otherwise run:
-
-```bash
-duet --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" \
-  --partner codex:coder <conditional worktree defaults> \
-  --run-info-file "$DUET_RUN_INFO" \
-  --task-from-cmd '<upstream shell command>' <remaining duet flags>
-```
-
-Replace `<conditional worktree defaults>` before executing; never pass it
-literally. Examine only the remaining duet flags. Add `--worktree` only when
-none of `--worktree`, `--no-worktree`, or `--worktree-path` is present. Add
-`--require-worktree` only when worktree use is not disabled and neither
-`--require-worktree` nor `--allow-worktree-fallback` is present. Report
-user-supplied conflicting pairs instead of rewriting them. Do not pre-add
-`--recap`.
-
-Validate schema 1 in `$DUET_RUN_INFO`, then poll the discovered run with
-`duet --status <run_dir> --json`. Do not scrape banners.
-Surface `active_turn.remaining_seconds`. When `last_timeout` is non-null,
-report its turn and agent; the field remains present when the review recipe
-continues past one non-final coder timeout.
-EOF
-````
+If native plugin installation is unavailable, use the same shared skill via
+[the shared installer](INSTALLATION.md#shared-skill) or
+[manual checkout links](INSTALLATION.md#manual-installation-from-a-checkout).
+The standalone skill appears as `/duet` in Claude Code. Its source is
+[`plugins/duet/skills/duet/SKILL.md`](../plugins/duet/skills/duet/SKILL.md);
+there is no separate Claude recipe to copy or keep in sync.

@@ -23,7 +23,9 @@ both the code and a test that had accepted the incorrect output.
 
 ## Quick start
 
-You need Python 3.9+ and the CLIs for your chosen pair, installed and signed in.
+You need Python 3.9+ and the CLIs for your chosen pair, installed and signed in:
+[install Claude Code](https://code.claude.com/docs/en/quickstart) and
+[install Codex CLI](https://developers.openai.com/codex/cli#getting-started).
 **Only have Codex?** [Run two Codex models](https://github.com/volkan/duet/blob/main/docs/USAGE.md#codex-only-review).
 For the Claude + Codex pair, run this from a Git repository:
 
@@ -35,10 +37,35 @@ duet --recipe review
 This starts a review and fix loop with the coder in a separate Git worktree.
 Inspect the changes before merging; agent agreement does not prove correctness.
 
-Already working inside an agent? Follow the plugin guide for
+Already working inside an agent? Install the **same Duet skill** for Claude
+Code, Codex, and OpenCode (requires Node.js/npm; choose **Symlink**):
+
+```bash
+npx skills add volkan/duet --skill duet --global \
+  --agent claude-code --agent codex --agent opencode
+```
+
+Start a new session, then use `/duet` in Claude Code, `$duet` in Codex, or ask
+OpenCode to use the `duet` skill.
+[Installation details](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md)
+cover `~/.agents/skills`, prerequisites, and alternative installers. Native
+integration guides:
 [Claude Code](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md),
 [Codex](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md), or
 [OpenCode](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
+
+## Upgrade
+
+Update the CLI and, if installed, the shared skill:
+
+```bash
+pipx upgrade duet-cli
+npx skills update duet --global
+```
+
+Start a new agent session afterward. For `uv`, `pip`, source checkouts, or
+native marketplace plugins, follow the
+[upgrade guide](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md#upgrade).
 
 ## Go further
 

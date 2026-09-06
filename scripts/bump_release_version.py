@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DUET_PY = ROOT / "duet.py"
-CLAUDE_PLUGIN_JSON = ROOT / "plugins" / "duet-claude" / ".claude-plugin" / "plugin.json"
+CLAUDE_PLUGIN_JSON = ROOT / "plugins" / "duet" / ".claude-plugin" / "plugin.json"
 CODEX_PLUGIN_JSON = ROOT / "plugins" / "duet" / ".codex-plugin" / "plugin.json"
 
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -88,7 +88,7 @@ def bump(root: Path, new_version: str) -> str:
     Returns the previous version."""
     parse_strict_semver(new_version)
     duet_py = root / "duet.py"
-    claude = root / "plugins" / "duet-claude" / ".claude-plugin" / "plugin.json"
+    claude = root / "plugins" / "duet" / ".claude-plugin" / "plugin.json"
     codex = root / "plugins" / "duet" / ".codex-plugin" / "plugin.json"
 
     current = read_current_version(duet_py.read_text(encoding="utf-8"))

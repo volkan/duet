@@ -1,12 +1,17 @@
 ---
 name: duet
-description: Run the duet two-agent CLI harness from Codex. Use when asked to run duet, kick off a duet loop, run Claude Code review through duet, hand command output to duet, or have two CLI agents review and implement together.
+description: Run and supervise the Duet two-agent CLI harness from Codex, Claude Code, or OpenCode. Use for duet loops, Claude/Codex review-and-fix runs, or handing an upstream command to Duet.
 ---
 
 # Duet
 
 Use the installed `duet` CLI from the current project. This skill does not
 install `duet`, `claude`, `codex`, or any optional backend.
+
+Arguments may arrive through the host invocation or a wrapper. Treat them as
+the user's arguments rather than inserting a literal host placeholder into
+commands. Invoke it as `$duet` in Codex, `/duet` in Claude Code (`/duet:duet`
+for the native plugin), or by a natural-language Duet request in OpenCode.
 
 Run and supervise the harness directly; do not delegate this workflow to
 subagents or launch extra agents alongside its two peers. Current Duet disables
@@ -23,7 +28,8 @@ command -v duet
 If it is missing, stop and tell the user to install `duet-cli` with `pipx
 install duet-cli`, `uv tool install duet-cli`, or `make install` from a clone.
 
-For the default review recipe, also require:
+The plain Duet request uses the Claude-plus-Codex `review` recipe. For that
+default only, also require:
 
 ```bash
 command -v claude
@@ -35,12 +41,17 @@ and suggest `--recipe codex-review` when Claude is missing. Do not silently
 switch recipes or substitute a different harness or backend; an explicit
 topology request remains unchanged.
 
-The plain `$duet` request uses this Claude-plus-Codex review recipe. If the
-user explicitly asks for a Codex-only review, says they do not have Claude,
-asks for two Codex models, or names `--recipe codex-review`, use the
-Codex-only recipe below instead. In that case check only `git`, `codex`, and
-`duet`; do not require Claude and do not silently change an explicitly chosen
-topology.
+If the user supplies an explicit backend/topology override, custom partner, or
+config, check the binaries required by that requested setup instead. Do not
+require Claude or Codex merely because they are defaults when the requested
+configuration does not use them. Check `git` too when the requested setup uses
+a worktree.
+
+The plain request uses this Claude-plus-Codex review recipe. If the user
+explicitly asks for a Codex-only review, says they do not have Claude, asks for
+two Codex models, or names `--recipe codex-review`, use the Codex-only recipe
+below instead. In that case check only `git`, `codex`, and `duet`; do not
+require Claude and do not silently change an explicitly chosen topology.
 
 For that Codex-only path, check:
 
@@ -145,7 +156,10 @@ as JSON, and accept it only when:
 - `run_id`, absolute `run_dir`, absolute `state_path`, and integer `pid` exist.
 
 Compatibility is schema-based. Report `duet_version`, but do not require it to
-equal the plugin version.
+equal the plugin version. If the original process exits before publishing valid
+run-info, or the file is missing or invalid, collect and report that process's
+result and diagnostics; do not fall back to banners, guess a run directory, or
+operate on an unvalidated run.
 
 Once the launch document is valid, monitor with:
 
@@ -158,7 +172,9 @@ fields instead of prose. Status exit codes are `0` terminal (for any terminal
 reason), `1` running, `2` stuck/crashed, and `3` lookup/schema/status error.
 During a live run, report the run dir and phase from JSON. On exit, collect the
 original duet process result and the final status snapshot; surface
-`finished_reason`, `error`, and artifact paths.
+`finished_reason`, `error`, and artifact paths. If status cannot be read or is
+invalid, report that control-plane failure and retain the original process
+result; do not inspect `state.json` as a replacement interface.
 
 For an active turn, also surface `budget_seconds` and `remaining_seconds`.
 When `last_timeout` is non-null, report its turn and agent; it remains present
