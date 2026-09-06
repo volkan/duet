@@ -6,8 +6,10 @@ Duet runs two coding agents in alternating turns: one reviews or plans, the
 other implements or challenges the result. Each keeps its own conversation,
 and you get a saved transcript to inspect.
 
-Pair Claude and Codex, or use **two models through one CLI**. Gemini,
-Copilot, and OpenCode are also supported.
+Run **two different models through a single agent harness (CLI)**, such as
+Codex or OpenCode. You can also pair different CLIs, such as Claude Code and
+Codex. Gemini and Copilot are also supported.
+[See examples using one CLI](https://github.com/volkan/duet/blob/main/docs/USAGE.md#same-backend-peering).
 
 [![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
 
@@ -23,9 +25,11 @@ both the code and a test that had accepted the incorrect output.
 
 ## Quick start
 
-You need Python 3.9+ and the CLIs for your chosen pair, installed and signed in:
-[install Claude Code](https://code.claude.com/docs/en/quickstart) and
-[install Codex CLI](https://developers.openai.com/codex/cli#getting-started).
+You need Python 3.9+ and at least one chosen agent CLI, installed and signed
+in. See [Claude Code installation](https://code.claude.com/docs/en/quickstart)
+or [Codex CLI installation](https://developers.openai.com/codex/cli#getting-started).
+Duet uses two separate sessions, which may use the same CLI with different
+models.
 **Only have Codex?** [Run two Codex models](https://github.com/volkan/duet/blob/main/docs/USAGE.md#codex-only-review).
 For the Claude + Codex pair, run this from a Git repository:
 
