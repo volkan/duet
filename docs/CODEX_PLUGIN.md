@@ -72,6 +72,19 @@ on your PATH.
    codex plugin add duet@volkan-duet
    ```
 
+   If `codex plugin add duet@volkan-duet` says the plugin is not found while
+   `codex plugin marketplace add` says the marketplace is already added from a
+   different source, a cached checkout may remain without its configuration
+   entry. Reset the marketplace cache and registration, then retry:
+
+   ```bash
+   codex plugin marketplace remove volkan-duet
+   codex plugin marketplace add volkan/duet
+   codex plugin add duet@volkan-duet
+   ```
+
+   For a local install, use `/path/to/duet` in place of `volkan/duet`.
+
    Restart Codex or start a new thread after installing so the bundled skill is
    available.
 
@@ -255,7 +268,8 @@ end of the run.
 
 | Symptom | Fix |
 |---|---|
-| `codex plugin add duet@volkan-duet` cannot find the marketplace | Run `codex plugin marketplace list` and confirm `volkan-duet` is listed. Add the local checkout or GitHub repo with `codex plugin marketplace add` if it is missing. |
+| `codex plugin add duet@volkan-duet` cannot find the plugin | Run `codex plugin marketplace list` and confirm `volkan-duet` is listed. Add the local checkout or GitHub repo with `codex plugin marketplace add` if it is missing. |
+| `codex plugin add duet@volkan-duet` cannot find the plugin, while marketplace add says it is already added from a different source | Follow the conditional cache reset reminder in [Install Checklist step 4](#install-checklist). |
 | Codex does not invoke the skill after install | Start a new thread or restart Codex so the plugin's bundled skills are loaded. |
 | The Duet skill says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure Codex's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | The missing binary is `claude`; install or authenticate Claude Code for the default `/review` recipe, or explicitly choose `--recipe codex-review` for the Codex-only path. |
