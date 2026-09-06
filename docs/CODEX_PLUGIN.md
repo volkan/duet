@@ -1,8 +1,7 @@
 # Codex Plugin
 
-The Codex plugin installs the `duet` skill. It does not install the `duet`,
-backend binaries. The skill shells out to the `duet` CLI
-on your PATH.
+The Codex plugin installs the `duet` skill. It does not install Duet or backend
+binaries. The skill shells out to the `duet` CLI on your PATH.
 
 For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
 [Shared skill installation](INSTALLATION.md#shared-skill).

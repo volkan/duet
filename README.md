@@ -52,11 +52,36 @@ npx skills add volkan/duet --skill duet --global \
 Start a new session, then use `/duet` in Claude Code, `$duet` in Codex, or ask
 OpenCode to use the `duet` skill.
 [Installation details](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md)
-cover `~/.agents/skills`, prerequisites, and alternative installers. Native
-integration guides:
-[Claude Code](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md),
-[Codex](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md), or
-[OpenCode](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md).
+cover `~/.agents/skills`, prerequisites, and alternative installers. See the
+[OpenCode guide](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md)
+for its native skill and optional command wrapper.
+
+## Native plugin installation
+
+These optional native routes install the same shared Duet skill. Use one route
+per host.
+
+Codex, in a terminal:
+
+```bash
+codex plugin marketplace add volkan/duet
+codex plugin add duet@volkan-duet
+```
+
+Start a new Codex session, then invoke `$duet`. See the [Codex installation
+guide](https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md#install-checklist)
+for setup and marketplace recovery.
+
+Claude Code, inside Claude Code:
+
+```text
+/plugin marketplace add volkan/duet
+/plugin install duet@volkan-duet
+/reload-plugins
+```
+
+Then invoke `/duet:duet`. See the [Claude Code installation
+guide](https://github.com/volkan/duet/blob/main/docs/CLAUDE_CODE_PLUGIN.md).
 
 ## Upgrade
 
