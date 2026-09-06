@@ -8,6 +8,7 @@ layout, `--status` mode, force prompt, and session memory.
 ## Contents
 
 - [Installation](#installation)
+- [Upgrade](#upgrade)
 - [Other ways to start](#other-ways-to-start)
 - [Drive duet from any tool, any folder](#drive-duet-from-any-tool-any-folder)
 - [Plugin entry points](#plugin-entry-points)
@@ -28,7 +29,10 @@ layout, `--status` mode, force prompt, and session memory.
 ## Installation
 
 Duet requires Python 3.9+ and the CLI tools for your selected agents, installed
-and authenticated. The default pairing uses Claude Code and Codex. Install
+and authenticated. Follow the official
+[Claude Code setup](https://code.claude.com/docs/en/quickstart) and
+[Codex CLI setup](https://developers.openai.com/codex/cli#getting-started)
+guides for the default pairing. Install
 the `duet-cli` package with `pipx` to put the `duet` command on PATH:
 
 ```bash
@@ -52,6 +56,22 @@ uvx --from duet-cli duet --task "Fix the failing test" --cwd ~/code/myrepo
 
 This does not put `duet` on PATH. The `/duet` and `$duet` plugins need one of
 the persistent installations above; see [Plugin entry points](#plugin-entry-points).
+
+The [installation guide](INSTALLATION.md) covers prerequisites and the single
+shared skill for Claude Code, Codex, and OpenCode.
+
+## Upgrade
+
+For a pipx CLI install and a shared skill installed with `npx skills`:
+
+```bash
+pipx upgrade duet-cli
+npx skills update duet --global
+```
+
+The CLI and skill are updated separately. Start a new agent session afterward.
+See [the upgrade guide](INSTALLATION.md#upgrade) for `uv`, `pip`, source
+checkouts, and native marketplace plugins.
 
 ## Other ways to start
 
@@ -286,15 +306,40 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 
 ## Plugin entry points
 
-### `/duet` Claude Code command (plugin or manual skill)
+### One shared skill
 
-Plain `/duet` runs Claude Code's real `/review` through duet, while still
-letting you pass any other upstream command. Some Claude Code installs expose
-the namespaced form `/duet:duet`. The
-[Claude Code guide](CLAUDE_CODE_PLUGIN.md) has the full installation and
-handoff walkthrough; this section is the concise command reference.
+Install the same `duet` skill for Claude Code, Codex, and OpenCode:
 
-The primary install path is the plugin shipped in this repo:
+```bash
+npx skills add volkan/duet --skill duet --global \
+  --agent claude-code --agent codex --agent opencode
+```
+
+Choose **Symlink** to keep one canonical copy at `~/.agents/skills/duet`.
+The installer creates host-specific links as needed. Start a new session,
+then invoke `/duet` in Claude Code, `$duet` in Codex, or ask OpenCode to use the
+`duet` skill. The [installation and upgrade guide](INSTALLATION.md) covers
+prerequisites, manual installation, updates, and migration.
+
+The shared skill shells out to the PATH-installed `duet` CLI. Its default
+review needs authenticated Claude Code and Codex CLIs. For an explicit
+Codex-only review, it selects `--recipe codex-review`; for custom pairings,
+install the selected backends. It creates a private run-info path and launches:
+
+```bash
+duet --recipe review --run-info-file "$DUET_RUN_INFO"
+```
+
+The skill validates schema 1 in that file and polls
+`duet --status <run_dir> --json`. The run-info and initial state exist before
+the default `claude -p /review --model sonnet` kickoff starts.
+
+### Native marketplace options
+
+Both native marketplaces expose the same skill from `plugins/duet`.
+Choose either the shared installer above or a native plugin for each host.
+
+In Claude Code:
 
 ```text
 /plugin marketplace add volkan/duet
@@ -302,93 +347,34 @@ The primary install path is the plugin shipped in this repo:
 /reload-plugins
 ```
 
-The `/duet` command shells out to the `duet` CLI, so the binary must be on
-PATH too: `make install` from a clone, `pipx install duet-cli` (recommended),
-or `pipx install 'duet-cli[yaml]'` to add PyYAML for `--config foo.yaml`.
-`uv tool install duet-cli` and `python3 -m pip install --user duet-cli` are
-equivalent persistent installs (the PyPI package is `duet-cli`; the command it
-installs is `duet`). The default recipe also needs `claude` and `codex` on
-PATH.
+The native plugin uses `/duet:duet`. See the
+[Claude Code guide](CLAUDE_CODE_PLUGIN.md) for examples and plugin upgrades.
 
-The plugin creates a private run-info path and launches:
-
-```bash
-duet --recipe review --run-info-file "$DUET_RUN_INFO"
-```
-
-It validates schema 1 in that file and polls `duet --status <run_dir> --json`;
-it does not scrape the human banner. The run-info and initial state exist before
-`claude -p /review --model sonnet` starts.
-
-Full install checklist, custom examples, troubleshooting, and the manual skill
-fallback live in [Claude Code Plugin](CLAUDE_CODE_PLUGIN.md).
-
-### `$duet` Codex skill plugin
-
-The Codex plugin ships a `duet` skill. Invoke it explicitly as `$duet`, or ask
-Codex to use Duet in natural language. The plugin does not install `duet`,
-`claude`, `codex`, or `gemini`; it shells out to whichever binaries are already
-on PATH.
-
-Install from a local checkout:
-
-```bash
-codex plugin marketplace add /path/to/duet
-codex plugin add duet@volkan-duet
-```
-
-Install from GitHub:
+For Codex, from a terminal:
 
 ```bash
 codex plugin marketplace add volkan/duet
 codex plugin add duet@volkan-duet
 ```
 
-If plugin installation reports `not found` while adding the marketplace reports
-`already added from a different source`, follow the cache recovery steps in the
-[Codex Plugin install checklist](CODEX_PLUGIN.md#install-checklist).
+Use `/path/to/duet` instead of `volkan/duet` for a local marketplace. If plugin
+installation reports `not found` while marketplace add reports
+`already added from a different source`, follow the reset reminder in the
+[Codex install checklist](CODEX_PLUGIN.md#install-checklist).
+Start a new Codex thread, then invoke `$duet`. See the
+[Codex guide](CODEX_PLUGIN.md) for examples and plugin upgrades.
 
-Start a new Codex thread after installing so the bundled skill is loaded. The
-default skill recipe uses the same schema-checked launch:
+### OpenCode command option
 
-```bash
-duet --recipe review --run-info-file "$DUET_RUN_INFO"
-```
+OpenCode discovers the shared skill natively. The optional `/duet` wrapper
+loads that skill through OpenCode's skill tool and forwards the user's
+arguments. See the [OpenCode guide](OPENCODE_PLUGIN.md) for the wrapper,
+non-interactive use, and migration from the old standalone command.
 
-Full install checklist, examples, and troubleshooting live in
-[Codex Plugin](CODEX_PLUGIN.md).
-
-### `/duet` OpenCode command
-
-OpenCode custom commands are drop-in markdown files — there is no marketplace
-step. Copy (or symlink) the shipped command into OpenCode's command directory
-(`command/`, singular):
-
-```bash
-mkdir -p ~/.config/opencode/command
-cp plugins/duet-opencode/command/duet.md ~/.config/opencode/command/duet.md
-```
-
-The filename becomes the command, so this provides `/duet` in the TUI (and
-`opencode run --command duet "<args>"` non-interactively). It runs on OpenCode's
-`build` agent and shells out to the `duet` CLI, so the binary must be on PATH
-(`make install`, `pipx install duet-cli`, etc.) and the default recipe also
-needs `claude` and `codex`. Plain `/duet` runs the same
-`claude -p /review --model sonnet` kickoff; pass
-`'<shell cmd>' <duet flags>` to seed from any other command. Note that duet can
-also run OpenCode as a *backend* (`--partner opencode:coder`), so OpenCode can
-be one of the two looped agents, not just the host.
-
-Across the Claude, Codex, and OpenCode entry points, custom-command worktree
-defaults are conditional. `--no-worktree`, `--worktree-path`, and
-`--allow-worktree-fallback` suppress the incompatible default instead of being
-appended after it; argparse treats the paired flags as mutually exclusive, so
-ordering cannot implement an override. The entry points inspect only duet flags
-after the quoted upstream command and do not pre-add `--recap`, keeping
-`--no-recap` valid.
-
-Full install checklist, examples, and troubleshooting live in
-[OpenCode Plugin](OPENCODE_PLUGIN.md).
+Across all hosts, custom-command worktree defaults are conditional.
+`--no-worktree`, `--worktree-path`, and `--allow-worktree-fallback` suppress
+incompatible defaults. The skill inspects only Duet flags after the quoted
+upstream command and does not pre-add `--recap`, keeping `--no-recap` valid.
 
 ---
 

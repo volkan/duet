@@ -26,24 +26,25 @@ except ModuleNotFoundError:  # pragma: no cover - CI runs this on Python 3.11+.
 
 
 ROOT = Path(__file__).resolve().parent.parent
-CLAUDE_PLUGIN_ROOT = ROOT / "plugins" / "duet-claude"
+PLUGIN_ROOT = ROOT / "plugins" / "duet"
+CLAUDE_PLUGIN_ROOT = PLUGIN_ROOT
 CLAUDE_PLUGIN_JSON = CLAUDE_PLUGIN_ROOT / ".claude-plugin" / "plugin.json"
 CLAUDE_MARKETPLACE_JSON = ROOT / ".claude-plugin" / "marketplace.json"
-CLAUDE_COMMAND = CLAUDE_PLUGIN_ROOT / "commands" / "duet.md"
-CODEX_PLUGIN_ROOT = ROOT / "plugins" / "duet"
+CODEX_PLUGIN_ROOT = PLUGIN_ROOT
 CODEX_PLUGIN_JSON = CODEX_PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 CODEX_MARKETPLACE_JSON = ROOT / ".agents" / "plugins" / "marketplace.json"
-CODEX_SKILL = CODEX_PLUGIN_ROOT / "skills" / "duet" / "SKILL.md"
+SHARED_SKILL = PLUGIN_ROOT / "skills" / "duet" / "SKILL.md"
 CODEX_PLUGIN_DOC = ROOT / "docs" / "CODEX_PLUGIN.md"
-# OpenCode ships a drop-in custom command (no manifest / no version lockstep);
-# validate it exists and still wraps the duet CLI recipe.
-OPENCODE_COMMAND = ROOT / "plugins" / "duet-opencode" / "command" / "duet.md"
+# OpenCode discovers the shared skill natively; this optional command forwards
+# slash-command arguments to that skill without duplicating the recipe.
+OPENCODE_COMMAND = PLUGIN_ROOT / "integrations" / "opencode" / "duet.md"
 OPENCODE_PLUGIN_DOC = ROOT / "docs" / "OPENCODE_PLUGIN.md"
 PYPROJECT = ROOT / "pyproject.toml"
 DUET_PY = ROOT / "duet.py"
 FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
 README_ABSOLUTE_LINKS = [
+    "https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md",
     "https://github.com/volkan/duet/blob/main/docs/USAGE.md",
     "https://github.com/volkan/duet/blob/main/docs/CODEX_PLUGIN.md",
     "https://github.com/volkan/duet/blob/main/.github/BRANCH_PROTECTION.md",
@@ -206,32 +207,16 @@ def _assert_claude_plugin_metadata(
     plugins = marketplace.get("plugins")
     if not isinstance(plugins, list) or not plugins:
         _fail(".claude-plugin/marketplace.json plugins must be a non-empty list")
-    if not any(p.get("name") == "duet" and p.get("source") == "./plugins/duet-claude"
+    if not any(p.get("name") == "duet" and p.get("source") == "./plugins/duet"
                for p in plugins if isinstance(p, dict)):
-        _fail(".claude-plugin/marketplace.json must list the duet plugin source './plugins/duet-claude'")
+        _fail(".claude-plugin/marketplace.json must list the duet plugin source './plugins/duet'")
 
-    if not CLAUDE_COMMAND.exists():
-        _fail("plugins/duet-claude/commands/duet.md must exist for the Claude Code plugin")
-    command_text = CLAUDE_COMMAND.read_text(encoding="utf-8")
-    _assert_conditional_worktree_defaults(
-        command_text,
-        "plugins/duet-claude/commands/duet.md",
-    )
-    for required in (
-        "command -v duet",
-        "duet --recipe review --run-info-file",
-        "duet --status '<run_dir>' --json",
-        "duet --stop '<run_dir>' --immediate",
-        "schema_version == 1",
-        "claude-fable-5",
-        "gpt-5.6-sol",
-    ):
-        if required not in command_text:
-            _fail(f"plugins/duet-claude/commands/duet.md is missing required text: {required!r}")
+    if plugin.get("skills") != "./skills/":
+        _fail(".claude-plugin/plugin.json must expose the shared skills via './skills/'")
     if (ROOT / ".claude-plugin" / "plugin.json").exists():
-        _fail("root .claude-plugin/plugin.json must be removed; the Claude plugin now lives under plugins/duet-claude/")
+        _fail("root .claude-plugin/plugin.json must be removed; the shared plugin lives under plugins/duet/")
     if (ROOT / "commands" / "duet.md").exists():
-        _fail("root commands/duet.md must be removed; the Claude command now lives under plugins/duet-claude/commands/")
+        _fail("root commands/duet.md must be removed; Claude uses the shared duet skill")
 
 
 def _assert_codex_plugin_metadata(
@@ -301,9 +286,12 @@ def _assert_codex_plugin_metadata(
 
     if not CODEX_PLUGIN_DOC.exists():
         _fail("docs/CODEX_PLUGIN.md must exist for the Codex plugin")
-    if not CODEX_SKILL.exists():
-        _fail("plugins/duet/skills/duet/SKILL.md must exist for the Codex plugin")
-    skill_text = CODEX_SKILL.read_text(encoding="utf-8")
+
+
+def _assert_shared_skill() -> None:
+    if not SHARED_SKILL.exists():
+        _fail("plugins/duet/skills/duet/SKILL.md must exist for all agent integrations")
+    skill_text = SHARED_SKILL.read_text(encoding="utf-8")
     _assert_conditional_worktree_defaults(
         skill_text,
         "plugins/duet/skills/duet/SKILL.md",
@@ -331,23 +319,15 @@ def _assert_opencode_command_metadata() -> None:
     if not OPENCODE_PLUGIN_DOC.exists():
         _fail("docs/OPENCODE_PLUGIN.md must exist for the OpenCode plugin")
     if not OPENCODE_COMMAND.exists():
-        _fail("plugins/duet-opencode/command/duet.md must exist for the OpenCode plugin")
+        _fail("plugins/duet/integrations/opencode/duet.md must exist for the OpenCode command")
     command_text = OPENCODE_COMMAND.read_text(encoding="utf-8")
-    _assert_conditional_worktree_defaults(
-        command_text,
-        "plugins/duet-opencode/command/duet.md",
-    )
     for required in (
-        "command -v duet",
-        "command -v claude",
-        "command -v codex",
-        "duet --recipe review",
-        "claude -p /review",
-        "--partner codex:coder",
+        "agent: build",
+        "`duet` skill",
         "$ARGUMENTS",
     ):
         if required not in command_text:
-            _fail(f"plugins/duet-opencode/command/duet.md is missing required text: {required!r}")
+            _fail(f"OpenCode command wrapper is missing required text: {required!r}")
 
 
 def _assert_source_metadata() -> str:
@@ -364,6 +344,7 @@ def _assert_source_metadata() -> str:
     _assert_project_metadata(pyproject, project)
     _assert_claude_plugin_metadata(claude_plugin, claude_marketplace, version)
     _assert_codex_plugin_metadata(codex_plugin, codex_marketplace, version)
+    _assert_shared_skill()
     _assert_opencode_command_metadata()
     _assert_no_forbidden_text()
     return version

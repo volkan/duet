@@ -1,7 +1,7 @@
 {
   "name": "duet",
-  "description": "Two-agent CLI harness: run claude + codex (or same-backend pairings) in alternating turns with session persistence, worktree mode, and LGTM convergence detection. Provides the /duet command, which kicks off Claude Code's /review (or any upstream command's output) through the duet loop.",
-  "version": "0.2.13",
+  "description": "Run the shared Duet skill: pair two CLI coding agents for review and implementation, with session persistence, worktree isolation, and structured status checks.",
+  "version": "0.2.14",
   "author": {
     "name": "Volkan Altan",
     "email": "volkanaltan@gmail.com"
@@ -9,6 +9,7 @@
   "homepage": "https://github.com/volkan/duet",
   "repository": "https://github.com/volkan/duet",
   "license": "MIT",
+  "skills": "./skills/",
   "keywords": [
     "agents",
     "orchestration",

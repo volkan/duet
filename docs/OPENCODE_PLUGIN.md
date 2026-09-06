@@ -1,13 +1,15 @@
 # OpenCode Plugin
 
-The OpenCode integration installs a `/duet` custom command. It does not install
-the `duet`, `claude`, or `codex` binaries. The command shells out to the `duet`
-CLI on your PATH.
+OpenCode loads the shared `duet` skill natively. The skill uses the `duet` CLI
+on PATH; it does not install Duet or backend CLIs.
 
-Unlike the Claude Code plugin (a marketplace plugin) and the Codex plugin (a
-marketplace skill), OpenCode custom commands are **drop-in markdown files** —
-there is no marketplace step. You copy (or symlink) one file into OpenCode's
-command directory and `/duet` is available.
+For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
+[Shared skill installation](INSTALLATION.md#shared-skill).
+
+An optional `/duet` command loads that same skill and forwards its arguments.
+Install the shared skill first, then add the small command wrapper if you want
+the slash command. See the official [OpenCode setup](https://opencode.ai/docs/)
+and [custom command reference](https://opencode.ai/docs/commands/).
 
 ## Install Checklist
 
@@ -50,34 +52,42 @@ command directory and `/duet` is available.
    opencode:coder` — so OpenCode can be one of the two looped agents, not just
    the host.)
 
-4. Install the `/duet` command.
+4. Install the shared skill using the
+   [shared installation guide](INSTALLATION.md#shared-skill). Start a new
+   OpenCode session and ask it to use the `duet` skill.
+
+5. Optionally install the `/duet` command wrapper.
 
    Global (available in every project), from a local checkout:
 
    ```bash
-   mkdir -p ~/.config/opencode/command
-   cp plugins/duet-opencode/command/duet.md ~/.config/opencode/command/duet.md
+   mkdir -p ~/.config/opencode/commands
+   cp plugins/duet/integrations/opencode/duet.md ~/.config/opencode/commands/duet.md
    ```
 
    Or symlink it so the command tracks the checkout:
 
    ```bash
-   mkdir -p ~/.config/opencode/command
-   ln -s "$(pwd)/plugins/duet-opencode/command/duet.md" ~/.config/opencode/command/duet.md
+   mkdir -p ~/.config/opencode/commands
+   ln -s "$(pwd)/plugins/duet/integrations/opencode/duet.md" ~/.config/opencode/commands/duet.md
    ```
 
    Project-scoped instead of global (commit it to a repo so the team gets it):
 
    ```bash
-   mkdir -p .opencode/command
-   cp /path/to/duet/plugins/duet-opencode/command/duet.md .opencode/command/duet.md
+   mkdir -p .opencode/commands
+   cp /path/to/duet/plugins/duet/integrations/opencode/duet.md .opencode/commands/duet.md
    ```
 
-   OpenCode discovers commands from the `command/` directory (singular) under
+   OpenCode discovers commands from the `commands/` directory under
    `~/.config/opencode/` (global) or `.opencode/` (project). The filename
    becomes the command name, so `duet.md` provides `/duet`.
 
 ## Run It
+
+Use the shared skill natively with a request such as “Use the duet skill to
+review this change.” The optional `/duet` wrapper loads that skill and passes
+`$ARGUMENTS` through to it.
 
 In the OpenCode TUI, invoke the command:
 
@@ -128,24 +138,33 @@ shell out to `duet`. Make sure your OpenCode permissions allow the `build`
 agent to run shell commands, or run with `--auto` for the non-interactive form.
 Auto mode still respects explicit permission denials.
 
+## Upgrade
+
+Update the CLI and shared skill using [the upgrade guide](INSTALLATION.md#upgrade).
+If you copied the optional wrapper, pull your Duet checkout and copy it again
+from the checkout root:
+
+```bash
+git pull --ff-only
+mkdir -p ~/.config/opencode/commands
+cp plugins/duet/integrations/opencode/duet.md ~/.config/opencode/commands/duet.md
+```
+
+A symlinked wrapper follows the checkout automatically. Older installations
+copied a standalone recipe to `~/.config/opencode/command/duet.md` or
+`.opencode/command/duet.md`. After installing the shared skill, remove only
+that old Duet command and replace it with the optional wrapper above if you
+still want `/duet`. Restart OpenCode after changing commands or skills.
+
 ## Runtime Expectations
 
 The command instructs the supervising assistant to run Duet directly without
 extra agents. Current Duet also disables native delegation inside each peer;
 see [SUBAGENTS.md](SUBAGENTS.md) for controls, compatible versions, and limits.
 
-The recipe allocates its run directory and writes initial `state.json` before
-starting the `/review` kickoff, so the run is observable immediately.
-
-Wait for this line in the default recap recipe:
-
-```text
-[duet] run: /path/to/project/.duet/runs/<run_id>
-```
-
-Non-recap runs print `[duet] run dir: ...` instead.
-
-Then monitor from another terminal or OpenCode shell:
+The recipe writes a private run-info JSON document before starting the
+`/review` kickoff. Read its absolute `run_dir`, then monitor from another
+terminal or OpenCode shell:
 
 ```bash
 duet --status /path/to/project/.duet/runs/<run_id> --json
@@ -170,7 +189,8 @@ end of the run.
 
 | Symptom | Fix |
 |---|---|
-| `/duet` does not appear in OpenCode | Confirm the file is at `~/.config/opencode/command/duet.md` (or `.opencode/command/duet.md` in the project). The directory is `command/`, singular. Restart the OpenCode session so it re-scans commands. |
+| OpenCode cannot find the `duet` skill | Install the shared skill, confirm `~/.agents/skills/duet/SKILL.md` exists, and start a new session. The optional command wrapper needs this skill. |
+| `/duet` does not appear in OpenCode | Confirm the file is at `~/.config/opencode/commands/duet.md` (or `.opencode/commands/duet.md` in the project). Restart the OpenCode session so it re-scans commands. Remove only an old Duet `command/duet.md` if it creates a duplicate. |
 | `/duet` runs but says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure OpenCode's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |

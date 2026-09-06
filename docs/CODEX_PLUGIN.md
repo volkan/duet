@@ -1,8 +1,11 @@
 # Codex Plugin
 
 The Codex plugin installs the `duet` skill. It does not install the `duet`,
-`claude`, `codex`, or `gemini` binaries. The skill shells out to the `duet` CLI
+backend binaries. The skill shells out to the `duet` CLI
 on your PATH.
+
+For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
+[Shared skill installation](INSTALLATION.md#shared-skill).
 
 ## Install Checklist
 
@@ -87,6 +90,25 @@ on your PATH.
 
    Restart Codex or start a new thread after installing so the bundled skill is
    available.
+
+## Upgrade
+
+Update the CLI separately, then update the native Codex plugin:
+
+```bash
+pipx upgrade duet-cli
+codex plugin marketplace upgrade volkan-duet
+codex plugin add duet@volkan-duet
+```
+
+`marketplace upgrade` refreshes the GitHub checkout; `plugin add` reinstalls
+Duet from that refreshed snapshot. For a local marketplace, pull its checkout
+first, then run `codex plugin add duet@volkan-duet`. Start a new Codex thread
+afterward. If a marketplace source conflict occurs, use the reminder in the
+[install checklist](#install-checklist).
+
+Use the package-manager upgrade command matching your CLI installation. For
+the shared skill, follow [Upgrade](INSTALLATION.md#upgrade).
 
 ## Run It
 

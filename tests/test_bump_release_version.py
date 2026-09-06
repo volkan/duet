@@ -26,7 +26,7 @@ CODEX_PLUGIN = {"name": "duet", "version": "0.2.1", "skills": "./skills/"}
 
 def _make_repo(tmp: Path) -> None:
     (tmp / "duet.py").write_text(DUET_SOURCE, encoding="utf-8")
-    claude = tmp / "plugins" / "duet-claude" / ".claude-plugin"
+    claude = tmp / "plugins" / "duet" / ".claude-plugin"
     codex = tmp / "plugins" / "duet" / ".codex-plugin"
     claude.mkdir(parents=True)
     codex.mkdir(parents=True)
@@ -56,7 +56,7 @@ class TestBump(unittest.TestCase):
 
     def _versions(self):
         runtime = brv.read_current_version((self.root / "duet.py").read_text())
-        cl = json.loads((self.root / "plugins/duet-claude/.claude-plugin/plugin.json").read_text())
+        cl = json.loads((self.root / "plugins/duet/.claude-plugin/plugin.json").read_text())
         cx = json.loads((self.root / "plugins/duet/.codex-plugin/plugin.json").read_text())
         return runtime, cl["version"], cx["version"]
 
@@ -70,7 +70,7 @@ class TestBump(unittest.TestCase):
 
     def test_bump_preserves_source_and_json_structure(self):
         brv.bump(self.root, "0.2.2")
-        cl = json.loads((self.root / "plugins/duet-claude/.claude-plugin/plugin.json").read_text())
+        cl = json.loads((self.root / "plugins/duet/.claude-plugin/plugin.json").read_text())
         self.assertEqual(cl["name"], "duet")
         self.assertEqual(cl["author"], {"name": "Volkan Altan"})
         source = (self.root / "duet.py").read_text()

@@ -1,7 +1,7 @@
 {
   "name": "duet",
-  "version": "0.2.13",
-  "description": "Run the duet two-agent CLI harness from Codex as a reusable skill.",
+  "version": "0.2.14",
+  "description": "Run the shared Duet skill: pair two CLI coding agents for review and implementation, with session persistence, worktree isolation, and structured status checks.",
   "author": {
     "name": "Volkan Altan",
     "email": "volkanaltan@gmail.com",
@@ -23,8 +23,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Duet",
-    "shortDescription": "Run two-agent duet loops from Codex",
-    "longDescription": "Use the installed duet CLI to run Claude, Codex, or Gemini in an alternating two-agent loop with session persistence, optional worktree isolation, transcripts, status checks, and LGTM convergence.",
+    "shortDescription": "Pair two coding agents with Duet",
+    "longDescription": "Use the shared Duet skill and installed duet CLI to pair Claude, Codex, Gemini, Copilot, or OpenCode in an alternating loop with session persistence, worktree isolation, transcripts, and structured status checks.",
     "developerName": "Volkan Altan",
     "category": "Productivity",
     "capabilities": [
