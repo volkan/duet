@@ -90,13 +90,13 @@ agents:
     backend: claude
     role: planner
     # session_id: 106c1c57-ca42-473f-b2f1-1ea764f78c46   # paste from prior `claude` session
-    # Claude defaults to the stable `sonnet` alias; uncomment to override it.
+    # Claude defaults to the `sonnet` alias; uncomment to request another model.
     # model: opus
 
   - name: codex-partner
     backend: codex
     role: coder
-    # model: gpt-5
+    # model: gpt-5.6-sol
     # Codex 0.128+ with --sandbox workspace-write defaults to approval=never.
     # If your version still prompts, prepend "--full-auto" (older builds) or
     # "--yolo" (community alias) to extra_args.
@@ -112,27 +112,38 @@ agents:
 
 # Same-backend variants:
 #
-# Codex planner + Codex coder. Prefer worktree mode so one Codex peer gets a
-# separate cwd; without cwd isolation, both peers must emit session UUIDs on
-# their first turns or duet aborts before using the cwd-based --last fallback.
+# Codex reviewer + Codex coder. The reviewer uses max effort and the coder uses
+# high effort. The coder can change the worktree. Prefer worktree mode so one
+# Codex peer gets a separate cwd; without cwd isolation, both peers must emit
+# session UUIDs on their first turns or duet aborts before using the cwd-based
+# --last fallback.
 # worktree: true
 # agents:
 #   - name: codex-lead
 #     backend: codex
-#     role: planner
+#     role: reviewer
+#     model: gpt-6-astra
+#     reasoning_effort: max
 #   - name: codex-partner
 #     backend: codex
 #     role: coder
+#     model: gpt-5.6-sol
+#     reasoning_effort: high
 #
-# Claude coder + Claude reviewer. Reviewer prompts tell Claude to inspect
-# actual files, diffs, and test output instead of relying only on summaries.
+# Claude coder + Claude reviewer. The coder can edit the current cwd. Reviewer
+# prompts tell Claude to inspect actual files, diffs, and test output instead
+# of relying only on summaries.
 # agents:
 #   - name: claude-lead
 #     backend: claude
 #     role: coder
+#     model: claude-opus-5-5
+#     reasoning_effort: high
 #   - name: claude-partner
 #     backend: claude
 #     role: reviewer
+#     model: sonnet
+#     reasoning_effort: max
 #
 # Gemini reviewer + Codex coder. Gemini requires a CLI build whose
 # `--output-format json` output includes `session_id`; duet stops with
