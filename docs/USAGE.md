@@ -505,6 +505,17 @@ The backend is the CLI Duet invokes; the model is a choice inside that CLI.
 Two Codex sessions can use different models with the same sign-in. A second
 CLI or a Claude account is not required for that pairing.
 
+New model versions need no Duet code change when the selected CLI accepts
+their ID. Duet has no model allowlist. The CLI, provider, and account decide
+whether a model is available. A catalog listing does not prove account access
+or execution. Saved model strings can be moving aliases. Claude aliases such
+as `opus` and `sonnet` can vary by provider, settings, and CLI version. Use
+`claude-opus-5-5` to request Opus 5.5. It does not prove provider execution.
+See [Claude model configuration](https://code.claude.com/docs/en/model-config)
+for provider aliases and CLI requirements. Opus 5.5 needs Claude Code v2.1.280+.
+See [model limits in metrics](METRICS.md#reading-comparisons-responsibly) for
+the difference between requested and CLI-reported models.
+
 Duet disables native subagent delegation so each peer does its own work.
 See the [subagent policy](SUBAGENTS.md) for backend controls, version requirements,
 and the limits of enforcing this through CLI launches.
@@ -528,14 +539,15 @@ From this Duet checkout, select two models available to your account:
 
 ```bash
 python3 duet.py --recipe codex-review --cwd /path/to/your/project \
-    --lead-model gpt-5.6-sol --partner-model gpt-5.6-luna \
-    --reasoning medium
+    --lead-model gpt-6-astra --partner-model gpt-5.6-sol \
+    --reasoning high
 ```
 
-Here Sol reviews first and Luna implements supported fixes. The pairing is an
-example, not a measured quality recommendation. Omit both model flags to use
-Codex's configured default in two separate sessions, or provide other exact
-model IDs. Use Codex's `/model` picker to check your available choices.
+Here Astra reviews first and Sol implements supported fixes. The coder can
+change the recipe worktree. The pairing is an example, not a quality recommendation.
+Omit both model flags to use Codex's configured default in two sessions. You
+can also pass another string the Codex CLI accepts. Use Codex's `/model` picker
+to check your available choices.
 
 Codex supports [ChatGPT subscription sign-in](https://learn.chatgpt.com/docs/auth)
 for local CLI use; `codex login status` shows the active method. Duet reuses
@@ -548,12 +560,12 @@ and a read-only sandbox. This explicit form also works without the new recipe:
 
 ```bash
 duet --lead codex:reviewer --partner codex:reviewer \
-    --lead-model gpt-5.6-sol --partner-model gpt-5.6-luna \
+    --lead-model gpt-6-astra --partner-model gpt-5.6-sol \
     --sandbox read-only --turns 4 \
     --task "Review the latest commit without editing files. Compare findings, cite evidence, and keep unresolved questions visible."
 ```
 
-The explicit form starts with the partner, so Luna reviews first here. Add
+The explicit form starts with the partner, so Sol reviews first here. Add
 `--finding-reports` on builds that support reports. Separate sessions and model
 names do not establish independent correctness; use project checks and inspect
 the evidence. These are collaborative turns, not a controlled model benchmark.
@@ -566,17 +578,20 @@ place; use `codex-review` or an explicit task as above to avoid that dependency.
 
 `--lead` and `--partner` may use the same backend when you want role separation.
 Use `--lead-model` and `--partner-model` when those roles should use different
-models:
+models. Set `model` and `reasoning_effort` in
+[duet.example.yaml](../duet.example.yaml) for reusable YAML or JSON pairs.
 
 ```bash
 # Codex planner + Codex coder. Partner speaks first and runs in the worktree.
 ./duet.py --task "Fix the issue" \
      --lead codex:planner --partner codex:coder \
-     --worktree --turns 6
+     --lead-model gpt-6-astra --partner-model gpt-5.6-sol \
+     --reasoning max --worktree --turns 6
 
-# Claude coder + Claude reviewer.
+# Claude coder + Claude reviewer. The coder can edit the current cwd.
 ./duet.py --task "Review and fix the current change" \
      --lead claude:coder --partner claude:reviewer \
+     --lead-model opus --partner-model sonnet \
      --turns 6
 
 # Copilot planner + Copilot coder.
@@ -622,8 +637,8 @@ worktree gated by `verify_cmd`.
 | `--task-from-cmd "CMD"` | after allocating the run and writing initial state/run-info, run `CMD` with `cwd=--cwd` and use stdout as the task. Failure is persisted as `kickoff_error` and exits 1 |
 | `--lead BACKEND:ROLE` | lead agent spec, default `claude:planner`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--partner` |
 | `--partner BACKEND:ROLE` | partner agent spec, default `codex:coder`. Supported backends: `claude`, `codex`, `gemini`, `copilot`, `opencode`. May use the same backend as `--lead` |
-| `--lead-model MODEL` | model name for the lead agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared lead into the other slot, the model follows that agent |
-| `--partner-model MODEL` | model name for the partner agent. Passed through to that backend as `--model MODEL`; Claude defaults to its stable `sonnet` alias when omitted. When `--resume-*` moves the declared partner into the other slot, the model follows that agent |
+| `--lead-model MODEL` | model name for the declared lead agent. Duet sends it with the selected backend syntax. Claude defaults to the `sonnet` alias when omitted. See [Same-backend peering](#same-backend-peering) for availability limits |
+| `--partner-model MODEL` | model name for the declared partner agent. Duet sends it with the selected backend syntax. Claude defaults to the `sonnet` alias when omitted. See [Same-backend peering](#same-backend-peering) for availability limits |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
 | `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
 | `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
@@ -947,8 +962,8 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 ## How session memory works
 
-- **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner`, retaining its prior context. The recipe determines speaking order as described under [Codex-only review](#codex-only-review). If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner).
-- **Claude**: each call uses `claude -p ... --model <model> --output-format json`, defaulting `<model>` to the stable `sonnet` alias and preserving an explicit slot/YAML model unchanged. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn the prompt sent is just the partner's latest message, so prompts stay small while Claude keeps the full thread in its session.
+- **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner`, retaining its prior context. The recipe determines speaking order as described under [Codex-only review](#codex-only-review). If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner). Model selection stays with the declared agent before normalization; see [`--lead-model` and `--partner-model`](#cli-flags).
+- **Claude**: each call uses `claude -p ... --model <model> --output-format json`. With the default Claude lead, an omitted model defaults to `sonnet`, including with `--resume-claude`. Pass `--lead-model <model>` to change that default. Explicit CLI or YAML model selections stay with their declared agents when slots move. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn sends only the partner's latest message, so Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
