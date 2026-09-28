@@ -24,4 +24,5 @@ If this file and `CLAUDE.md` ever disagree, follow `CLAUDE.md`.
   `plugins/duet/skills/duet/SKILL.md` and the affected host guides in the same
   commit. See `CLAUDE.md` for the detailed scope. Do not update the skill for
   internal-only refactors or an accepted model ID with unchanged behavior.
-- Run `make test` after behavior changes to `duet.py` or CLI/config handling.
+- Run `make ci` for every change (the minimum gate in `CLAUDE.md`), plus the
+  risk-scaled real-loop and package checks listed there.

@@ -9,7 +9,7 @@ status fallbacks. They are pure-function tests — no subprocesses, no filesyste
 writes, no agent CLIs.
 
 Run via:
-    python3 -m unittest discover -s tests
+    DUET_METRICS=0 python3 -m unittest discover -s tests
 or (alongside the smoke suite):
     make test
 """
