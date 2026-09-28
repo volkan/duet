@@ -18,6 +18,8 @@ command -v duet
 
 For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
 [Shared skill installation](INSTALLATION.md#shared-skill).
+See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
+aliases, and version IDs.
 
 From this repository, `make install` is equivalent if `~/.local/bin` is on
 PATH:

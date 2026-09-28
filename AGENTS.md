@@ -20,4 +20,8 @@ If this file and `CLAUDE.md` ever disagree, follow `CLAUDE.md`.
 - Preserve the constraints documented in `CLAUDE.md`, especially the stdlib-only
   runtime, atomic writes, prompt-template handling, subprocess process-group
   behavior, and Codex resume flag handling.
+- When a change affects agent-visible harness instructions, update
+  `plugins/duet/skills/duet/SKILL.md` and the affected host guides in the same
+  commit. See `CLAUDE.md` for the detailed scope. Do not update the skill for
+  internal-only refactors or an accepted model ID with unchanged behavior.
 - Run `make test` after behavior changes to `duet.py` or CLI/config handling.

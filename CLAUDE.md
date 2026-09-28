@@ -286,7 +286,13 @@ media from `docs/demos/README.md`. Put new flags, recipes, screenshots, and
 detailed limitations in the relevant guide under `docs/` instead of expanding
 the README.
 
-Every change to `duet.py` (or anything else under this repo) must update the related documents in the **same commit**. Drift between code and docs is the dominant failure mode here — there's no CI, no schema validation, just these files. Use this table as a checklist before you commit:
+Every change to `duet.py` (or anything else under this repo) must update the related documents in the **same commit**. CI validates checked contracts, but code and document drift remains a failure mode. Use this table as a checklist before you commit:
+
+When a change affects how agents use Duet, update
+`plugins/duet/skills/duet/SKILL.md` and the affected host guides in the same
+commit. This includes model selection, configuration or recipes, launch or
+resume, permissions, and monitoring or stop behavior. Do not update the skill
+for an internal-only refactor or a new model ID that needs no new instruction.
 
 | change in `duet.py` | also update |
 |---|---|
@@ -301,7 +307,7 @@ Every change to `duet.py` (or anything else under this repo) must update the rel
 | new / changed sandbox / permission-mode / network behavior | `docs/USAGE.md` "Codex sandbox and network access" section; `duet.example.yaml`'s `extra_args` example if users copy that pattern |
 | new role or new ROLE_PROMPT entry | `ROLE_PROMPTS` in `duet.py`; the "Roles ship with" line in `docs/USAGE.md` |
 | stop-condition / SIGINT / force-prompt change | `docs/USAGE.md` "Stop conditions and force prompt" table; `README.md` overview if its behavior summary changes |
-| change to the shared Duet skill recipe | `plugins/duet/skills/duet/SKILL.md`, `docs/INSTALLATION.md`, and the affected host guides (`docs/CLAUDE_CODE_PLUGIN.md`, `docs/CODEX_PLUGIN.md`, `docs/OPENCODE_PLUGIN.md`); keep `docs/USAGE.md` as the concise reference; update native manifest descriptions if the behavior summary shifts |
+| change to shared Duet skill instructions or recipes | `plugins/duet/skills/duet/SKILL.md`, `docs/INSTALLATION.md`, and the affected host guides (`docs/CLAUDE_CODE_PLUGIN.md`, `docs/CODEX_PLUGIN.md`, `docs/OPENCODE_PLUGIN.md`); keep `docs/USAGE.md` as the concise reference; update native manifest descriptions if the behavior summary shifts |
 | change to the OpenCode `/duet` wrapper | `plugins/duet/integrations/opencode/duet.md` and `docs/OPENCODE_PLUGIN.md`; keep launch and monitoring logic in the shared skill; retain the OpenCode guide link in `README.md` |
 | packaging / plugin metadata change (`duet.__version__`, `pyproject.toml` dynamic version/console script/extras; plugin manifests/marketplaces) | `README.md` "Quick start"; plugin guides and `docs/USAGE.md` if behavior changes; keep both plugin manifest versions matching `duet.__version__` |
 | function grows past the complexity/length budget | extract a named helper (single-file: never a new module); re-run `make complexity`; if the budget itself moves, update `scripts/check_complexity.py` defaults and the merge gates paragraph |

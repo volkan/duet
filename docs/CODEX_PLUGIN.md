@@ -149,19 +149,6 @@ Claude or upstream reviewer process. The plain `$duet` request keeps using the
 Claude-plus-Codex `review` recipe. A request that says “I don't have Claude,”
 “two Codex models,” or “Codex only” selects `codex-review`.
 
-`--lead-model` and `--partner-model` are optional for `codex-review`; if they
-are omitted, the CLI defaults apply. Preserve exact model IDs and never
-silently substitute or force a model. For example:
-
-```text
-Use two Codex models for review: --lead-model gpt-5.6-sol and --partner-model gpt-5.6-luna.
-```
-
-Model availability depends on the account, rollout, and client. Both sessions
-use the same account limits; two models do not establish correctness. See
-OpenAI's [ChatGPT sign-in documentation](https://learn.chatgpt.com/docs/auth)
-and [model availability documentation](https://learn.chatgpt.com/docs/models).
-
 The `codex-review` recipe may not yet be present in the current PyPI release.
 Run `duet --help` first; if `codex-review` is absent, use this checkout with
 `make install` (or the checkout's Python entry point) rather than passing the
@@ -172,36 +159,46 @@ The recipe also enables local finding reports in `review.md`.
 See [FINDINGS.md](FINDINGS.md) for unresolved-ID continuation and optional human
 feedback. Finding assessments do not replace the run's convergence status.
 
-### Select models by name
+### Model selection
 
-For the default `claude:reviewer` lead and `codex:coder` partner, named models
-map directly to `--lead-model` and `--partner-model`. Claude defaults to the
-stable `sonnet` alias, and the recipe automatically pins its separate
-`/review` kickoff to the same default or a Claude lead-model override.
+Duet passes model IDs and aliases to the selected backend. New IDs need no
+Duet code or skill mapping when that backend accepts them. Preserve exact IDs,
+the requested backend, topology, task, and roles. Do not guess, substitute, or
+silently upgrade a model.
 
-For `codex-review`, both slots are Codex and the exact IDs supplied by the user
-are preserved. Omitted model flags use the CLI defaults.
+Forward an exact requested ID even if local discovery or a catalog omits it.
+The selected backend decides availability. Report its error without substituting
+another model.
 
-For example:
+Aliases such as `opus` and `sonnet` can move. Use `claude-opus-5-5` to request
+that explicit version. For an unclear friendly name or version, check the
+selected backend's current IDs before you choose one. Model access depends on
+the CLI, provider, and account. Requested model and reasoning effort are not
+proof of the model or effort used.
+
+The default recipe uses `sonnet` for the Claude reviewer and `/review` kickoff.
+A Claude `--lead-model` overrides both. For a custom `claude -p /review`
+command, add `--model` inside that command. With `--config`, `model` and
+`reasoning_effort` select each agent. Slot model flags do not replace config
+models. An agent `reasoning_effort` overrides run-level `reasoning`; the
+run-level value applies when that field is omitted. Resume normalization keeps
+models with their declared agents.
+
+The review recipes pair a reviewer with a coder. The coder can edit its
+worktree. For opinions only, request reviewer roles and no file edits. Use
+`--sandbox read-only` for Codex or `--permission-mode plan` for Claude. Keep
+the user's requested task, roles, and edit scope.
 
 ```text
-Use Duet with Opus 4.8 and GPT Sol.
+Use Codex-only Duet review with --lead-model gpt-6-astra and --partner-model gpt-5.6-sol.
 ```
 
-The skill translates that request to:
-
-```bash
-duet --recipe review \
-  --run-info-file "$DUET_RUN_INFO" \
-  --lead-model claude-opus-4-8 \
-  --partner-model gpt-5.6-sol
+```text
+Use two Claude reviewers with --lead-model opus and --partner-model sonnet. Use --permission-mode plan and do not edit files.
 ```
 
-If the user supplies exact backend model IDs, the skill preserves them. A
-request for the latest Opus without a version uses Claude's stable `opus`
-alias; `Fable 5` maps to `claude-fable-5`. With custom agents, the model follows
-the slot: the `--lead` agent uses
-`--lead-model`, and the `--partner` agent uses `--partner-model`.
+See the canonical [usage guide](https://github.com/volkan/duet/blob/main/docs/USAGE.md#same-backend-peering)
+for model examples and availability limits.
 
 Custom upstream command:
 

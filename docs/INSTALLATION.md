@@ -82,6 +82,8 @@ command that loads this same skill.
 The source lives at
 [`plugins/duet/skills/duet/SKILL.md`](../plugins/duet/skills/duet/SKILL.md).
 Both native marketplace manifests point to the same `plugins/duet` package.
+See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
+aliases, and version IDs.
 The unified native package is version `0.2.14` or later; it remains compatible
 with the `0.2.13` CLI through the existing schema 1 control interface.
 Host discovery rules are documented in the official

@@ -208,36 +208,44 @@ run.
 
 ## Model selection
 
-Use `--lead-model` for the lead slot and `--partner-model` for the partner slot.
-Preserve exact backend IDs supplied by the user. Known friendly mappings:
+Use `--lead-model` for the declared lead and `--partner-model` for the
+declared partner. Duet passes model IDs and aliases to the selected backend.
+New accepted IDs need no Duet code or skill mapping. Preserve the user's exact
+requested ID, backend, topology, task, and roles. Do not guess, substitute, or
+silently upgrade a model. For example, preserve `claude-fable-5` when supplied.
+Forward an exact requested ID even if local discovery or a catalog omits it.
+The selected backend decides availability. Report its error without substituting
+another model. OpenCode model IDs use the `provider/model` form.
 
-- Fable 5 → `claude-fable-5`
-- Opus 4.8 → `claude-opus-4-8`
-- latest Opus → `opus`
-- GPT Sol → `gpt-5.6-sol`
+For an unclear friendly name or version, verify the selected backend's current
+IDs before you choose one. Aliases such as `opus` and `sonnet` can move. Use
+`claude-opus-5-5` when the user requests that explicit version. The request
+does not prove the provider used that model.
 
-Claude defaults to the stable `sonnet` alias. With `--recipe review`, a Claude
-`--lead-model` overrides that default for both the loop agent and standalone
-`claude -p /review` kickoff automatically. With a custom explicit
-`--task-from-cmd 'claude -p /review …'`, add the same `--model` value inside
-that command yourself.
+Model access depends on the CLI, provider, and account. Configured or requested
+model and reasoning effort do not prove the model or effort used. With
+`--config`, each agent's `model` is selected from the config. Slot model flags
+do not replace it. An agent's `reasoning_effort` overrides run-level
+`reasoning`; the run-level value applies when that field is omitted. When resume
+normalization moves a slot, the model stays with its declared agent.
 
-For `codex-review`, model names are passed to the two Codex slots as supplied.
-For example, this natural-language request selects two exact model IDs:
+Claude defaults to `sonnet`. With `--recipe review`, a Claude `--lead-model`
+overrides that default for the loop agent and the `claude -p /review` kickoff.
+For a custom `--task-from-cmd 'claude -p /review …'`, add the required
+`--model` value inside that command.
+
+The `review` and `codex-review` recipes pair a reviewer with a coder. The coder
+can edit its worktree. For opinions only, keep both roles as reviewers and ask
+them not to edit files. Use `--sandbox read-only` for Codex or
+`--permission-mode plan` for Claude. Do not change the user's roles or edit
+scope.
+
+Examples:
 
 ```text
-Use Codex-only Duet review with --lead-model gpt-5.6-sol and --partner-model gpt-5.6-luna.
+Use Codex-only Duet review with --lead-model gpt-6-astra and --partner-model gpt-5.6-sol.
 ```
 
-Model availability depends on the account, rollout, and client. The Codex CLI
-can use an existing ChatGPT subscription sign-in; no API key is needed for
-that sign-in. Check it with `codex login status`. Both peers use the same
-account limits. Two models do not establish correctness, and availability does
-not imply free or unlimited usage or independence.
-
-Example:
-
-```bash
-duet --recipe review --run-info-file "$DUET_RUN_INFO" \
-  --lead-model claude-fable-5 --partner-model gpt-5.6-sol
+```text
+Use two Claude reviewers with --lead-model opus and --partner-model sonnet. Use --permission-mode plan and do not edit files.
 ```
