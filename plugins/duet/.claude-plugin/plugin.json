@@ -1,7 +1,7 @@
 {
   "name": "duet",
   "description": "Run the shared Duet skill: pair two CLI coding agents for review and implementation, with session persistence, worktree isolation, and structured status checks.",
-  "version": "0.2.14",
+  "version": "0.2.16",
   "author": {
     "name": "Volkan Altan",
     "email": "volkanaltan@gmail.com"
