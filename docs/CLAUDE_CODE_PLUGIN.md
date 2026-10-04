@@ -16,8 +16,8 @@ command -v duet
 `pipx` is recommended; `uv tool install duet-cli` or
 `python3 -m pip install --user duet-cli` also put `duet` on PATH.
 
-For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
-[Shared skill installation](INSTALLATION.md#shared-skill).
+For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
+see [Shared skill installation](INSTALLATION.md#shared-skill).
 See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
 aliases, and version IDs.
 

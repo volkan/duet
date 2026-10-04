@@ -42,7 +42,7 @@ This starts a review and fix loop with the coder in a separate Git worktree.
 Inspect the changes before merging; agent agreement does not prove correctness.
 
 Already working inside an agent? Install the **same Duet skill** for Claude
-Code, Codex, and OpenCode (requires Node.js/npm; choose **Symlink**):
+Code, Codex, OpenCode, and ZCode (requires Node.js/npm; choose **Symlink**):
 
 ```bash
 npx skills add volkan/duet --skill duet --global \
@@ -50,7 +50,7 @@ npx skills add volkan/duet --skill duet --global \
 ```
 
 Start a new session, then use `/duet` in Claude Code, `$duet` in Codex, or ask
-OpenCode to use the `duet` skill.
+OpenCode or ZCode to use the `duet` skill.
 [Installation details](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md)
 cover `~/.agents/skills`, prerequisites, and alternative installers. See the
 [OpenCode guide](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md)

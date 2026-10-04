@@ -1,6 +1,6 @@
 ---
 name: duet
-description: Run and supervise the Duet two-agent CLI harness from Codex, Claude Code, or OpenCode. Use for duet loops, Claude/Codex review-and-fix runs, or handing an upstream command to Duet.
+description: Run and supervise the Duet two-agent CLI harness from Codex, Claude Code, OpenCode, or ZCode. Use for duet loops, Claude/Codex review-and-fix runs, or handing an upstream command to Duet.
 ---
 
 # Duet
@@ -11,7 +11,8 @@ install `duet`, `claude`, `codex`, or any optional backend.
 Arguments may arrive through the host invocation or a wrapper. Treat them as
 the user's arguments rather than inserting a literal host placeholder into
 commands. Invoke it as `$duet` in Codex, `/duet` in Claude Code (`/duet:duet`
-for the native plugin), or by a natural-language Duet request in OpenCode.
+for the native plugin), or by a natural-language Duet request in OpenCode or
+ZCode.
 
 Run and supervise the harness directly; do not delegate this workflow to
 subagents or launch extra agents alongside its two peers. Current Duet disables
