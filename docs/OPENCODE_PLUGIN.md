@@ -3,8 +3,8 @@
 OpenCode loads the shared `duet` skill natively. The skill uses the `duet` CLI
 on PATH; it does not install Duet or backend CLIs.
 
-For the shared `duet` skill used by Claude Code, Codex, and OpenCode, see
-[Shared skill installation](INSTALLATION.md#shared-skill).
+For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
+see [Shared skill installation](INSTALLATION.md#shared-skill).
 See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
 aliases, and version IDs.
 

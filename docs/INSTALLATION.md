@@ -53,20 +53,20 @@ reference. One-shot runners do not install `duet` on the assistant's PATH.
 
 ## Shared skill
 
-One skill definition serves Claude Code, Codex, and OpenCode. With Node.js/npm
-available, use the [skills installer](https://github.com/vercel-labs/skills):
+One skill definition serves Claude Code, Codex, OpenCode, and ZCode. With
+Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add volkan/duet --skill duet --global \
-  --agent claude-code --agent codex --agent opencode
+  --agent claude-code --agent codex --agent opencode --agent zcode
 ```
 
 Choose **Symlink** when prompted. The installer keeps its canonical copy at
 `~/.agents/skills/duet` and links it into agent-specific directories as needed.
-Claude Code needs the `~/.claude/skills/duet` compatibility link; Codex and
-OpenCode can discover `~/.agents/skills` directly. If symlinks are unavailable,
-the installer can use copies. Remove unwanted `--agent` options to target
-fewer hosts. The installer manages skills, not the Duet CLI or backend logins.
+Claude Code needs the `~/.claude/skills/duet` compatibility link; Codex,
+OpenCode, and ZCode can discover `~/.agents/skills` directly. If symlinks
+are unavailable, the installer can use copies. Remove unwanted `--agent`
+options to target fewer hosts. The installer manages skills, not the Duet CLI or backend logins.
 
 Start a new agent session after installing:
 
@@ -75,6 +75,7 @@ Start a new agent session after installing:
 | Claude Code | `/duet` |
 | Codex | `$duet` |
 | OpenCode | Ask: `Use the duet skill to review this repository.` |
+| ZCode | Ask: `Use the duet skill to review this repository.` |
 
 The [OpenCode guide](OPENCODE_PLUGIN.md) also provides an optional `/duet`
 command that loads this same skill.
