@@ -58,7 +58,7 @@ This does not put `duet` on PATH. The `/duet` and `$duet` plugins need one of
 the persistent installations above; see [Plugin entry points](#plugin-entry-points).
 
 The [installation guide](INSTALLATION.md) covers prerequisites and the single
-shared skill for Claude Code, Codex, and OpenCode.
+shared skill for Claude Code, Codex, OpenCode, and ZCode.
 
 ## Upgrade
 
@@ -308,18 +308,18 @@ Stdin is cached so `--task @-` and `--kickoff @-` can coexist in the same invoca
 
 ### One shared skill
 
-Install the same `duet` skill for Claude Code, Codex, and OpenCode:
+Install the same `duet` skill for Claude Code, Codex, OpenCode, and ZCode:
 
 ```bash
 npx skills add volkan/duet --skill duet --global \
-  --agent claude-code --agent codex --agent opencode
+  --agent claude-code --agent codex --agent opencode --agent zcode
 ```
 
 Choose **Symlink** to keep one canonical copy at `~/.agents/skills/duet`.
 The installer creates host-specific links as needed. Start a new session,
-then invoke `/duet` in Claude Code, `$duet` in Codex, or ask OpenCode to use the
-`duet` skill. The [installation and upgrade guide](INSTALLATION.md) covers
-prerequisites, manual installation, updates, and migration.
+then invoke `/duet` in Claude Code, `$duet` in Codex, or ask OpenCode or ZCode
+to use the `duet` skill. The [installation and upgrade guide](INSTALLATION.md)
+covers prerequisites, manual installation, updates, and migration.
 
 The shared skill shells out to the PATH-installed `duet` CLI. Its default
 review needs authenticated Claude Code and Codex CLIs. For an explicit

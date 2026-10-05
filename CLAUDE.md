@@ -15,7 +15,8 @@ optional `[yaml]` extra, zero runtime dependencies). Both marketplaces point
 at one narrowed plugin root, `plugins/duet/`, with Claude and Codex manifests
 and the shared `skills/duet/SKILL.md`. The `skills` installer distributes that
 same skill through `~/.agents/skills`, with host-specific links where needed.
-OpenCode can load it natively; `plugins/duet/integrations/opencode/duet.md` is
+OpenCode and ZCode can load it natively;
+`plugins/duet/integrations/opencode/duet.md` is
 only an optional argument-forwarding command wrapper. Keep workflow logic in
 the shared skill. All hosts launch the PATH-installed CLI with
 `--run-info-file`, validate schema 1, and poll `duet --status <run_dir> --json`.

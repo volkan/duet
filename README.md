@@ -46,7 +46,7 @@ Code, Codex, OpenCode, and ZCode (requires Node.js/npm; choose **Symlink**):
 
 ```bash
 npx skills add volkan/duet --skill duet --global \
-  --agent claude-code --agent codex --agent opencode
+  --agent claude-code --agent codex --agent opencode --agent zcode
 ```
 
 Start a new session, then use `/duet` in Claude Code, `$duet` in Codex, or ask
