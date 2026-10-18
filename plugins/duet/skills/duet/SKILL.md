@@ -11,8 +11,9 @@ install `duet`, `claude`, `codex`, or any optional backend.
 Arguments may arrive through the host invocation or a wrapper. Treat them as
 the user's arguments rather than inserting a literal host placeholder into
 commands. Invoke it as `$duet` in Codex, `/duet` in Claude Code (`/duet:duet`
-for the native plugin), or by a natural-language Duet request in OpenCode or
-ZCode.
+for the native plugin), `/skill duet` in ZCode, or by a natural-language Duet
+request in OpenCode or ZCode. ZCode also supports the optional `/duet` command
+wrapper documented in `docs/ZCODE.md#host-shortcuts`; it requires this same skill.
 
 Run and supervise the harness directly; do not delegate this workflow to
 subagents or launch extra agents alongside its two peers. Current Duet disables

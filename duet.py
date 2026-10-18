@@ -2488,15 +2488,28 @@ _ZCODE_DESKTOP_RESOURCES = pathlib.Path("/Applications/ZCode.app/Contents/Resour
 _ZCODE_SESSION_ID_RE = re.compile(r"^sess_[A-Za-z0-9_-]+$")
 _ZCODE_REVIEW_DENIED_TOOLS = CLAUDE_DENIED_DELEGATION_TOOLS + (
     "Bash", "Write", "Edit", "NotebookEdit", "ApplyPatch", "CreateWorkflow",
-    "RunWorkflow", "OffPeakTask", "WebSearch", "WebFetch", "AskUserQuestion",
+    "AmendWorkflow", "FillWorkflowHole", "ResumeWorkflowRun", "SaveWorkflow",
+    "OffPeakCreate", "CronCreate", "CronUpdate", "CronDelete",
+    "WebSearch", "WebFetch", "AskUserQuestion",
     "EnterPlanMode", "ExitPlanMode", "ReplyToChannel",
 )
 
 
 def _zcode_command() -> tuple[list[str], dict[str, str]]:
     """Use the official CLI, or the installed macOS app's headless runtime."""
-    if shutil.which("zcode"):
-        return ["zcode"], {}
+    cli = shutil.which("zcode")
+    if cli:
+        key = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"
+        source = os.environ.get(key, "").strip()
+        if not source:
+            directory = pathlib.Path(cli).resolve().parent
+            candidates = (directory / "provider/zcode-builtin.json",
+                          (directory / "../../../../../config/provider/zcode-builtin.json").resolve())
+            source = next((str(path) for path in candidates if path.is_file()), "")
+        if not source:
+            raise ValueError("Cannot locate the PATH ZCode CLI's catalog; set "
+                             "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE to that installation's JSON catalog")
+        return [cli], {key: source}
     entry = _ZCODE_DESKTOP_RESOURCES / "glm" / "zcode.cjs"
     builtin = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"
     node = shutil.which("node")

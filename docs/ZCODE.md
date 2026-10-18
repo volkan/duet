@@ -3,7 +3,26 @@
 ZCode can load the shared Duet skill as a host. A ZCode peer also needs the
 native `zcode` backend. Host skill installation alone does not add a backend
 or connect another CLI's account. Duet 0.2.16 from PyPI predates this backend.
-Use this source checkout until a release includes it.
+Use this source checkout until a release includes it. Run `make install` from
+the checkout to put this source version on PATH.
+
+## Host shortcuts
+
+Install the shared skill as described in [Installation](INSTALLATION.md#shared-skill).
+In ZCode, invoke `/skill duet` followed by the task or Duet arguments.
+
+For a `/duet` shortcut, run these commands from the target project:
+
+```bash
+mkdir -p .zcode/commands
+ln -s /absolute/path/to/duet/plugins/duet/integrations/zcode/duet.md .zcode/commands/duet.md
+zcode commands inspect duet --json
+```
+
+Use your Duet checkout's absolute path. The link command fails if the destination exists.
+Start a new ZCode session, then invoke `/duet` with your task or Duet arguments.
+The wrapper requires the shared skill and forwards arguments through ZCode's native command handling.
+It contains no separate launch or monitoring logic.
 
 ## Native review peer
 
@@ -15,6 +34,10 @@ Duet uses the official `zcode` executable on PATH. On macOS, it can also use
 the headless runtime in `/Applications/ZCode.app` through an installed Node.js.
 It does not install a community CLI or copy account credentials.
 
+Complete [account initialization](#account-initialization) and the native MCP prerequisite below before launching a peer.
+Duet finds the PATH CLI's bundled catalog through its real executable path, including symlinks.
+It never pairs a PATH CLI with another installation's catalog.
+
 Use the native provider-qualified model ID. OpenCode's
 `opencode/glm-5.3` belongs to a different provider and account.
 
@@ -25,6 +48,16 @@ duet --lead zcode:reviewer \
   --reasoning max --turns 6 --no-worktree \
   --task 'Review the plan against current source. Do not edit files.'
 ```
+
+For a review and fix loop with a ZCode reviewer and Sol coder, reuse the existing recipe:
+
+```bash
+duet --recipe codex-review --lead zcode:reviewer \
+  --lead-model account:zai-individual-coding-plan/GLM-5.3 \
+  --partner-model gpt-6.1-sol --reasoning max
+```
+
+The explicit lead overrides the recipe's Codex reviewer. The coder uses a strict Git worktree.
 
 For different reasoning per peer, use a JSON config:
 
@@ -90,9 +123,15 @@ on hidden providers. It snapshots the validated public catalog and disables
 remote catalog refresh for the child. Native fallback cannot select another model.
 An explicit effort also narrows the selected model to that validated level.
 Native resume then rejects an externally changed effort instead of using it.
-The macOS runtime supplies its builtin catalog. Other CLI installations
-must expose their own catalog through `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`.
-A PATH CLI never borrows the desktop installation's catalog.
+The macOS runtime supplies its builtin catalog. PATH CLI installations use their own bundled catalog.
+An explicit `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` overrides discovery.
+A self-contained executable or wrapper without an accessible bundled catalog needs this variable:
+
+```bash
+export ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/provider/zcode-builtin.json
+```
+
+Use the public JSON catalog from that CLI installation. A PATH CLI never borrows the desktop installation's catalog.
 
 Native plan mode allows some MCP tools that do not declare themselves
 destructive, including tools with missing annotations. It is not a read-only
@@ -147,11 +186,6 @@ make loop-test LOOP_TEST_ARGS='--scenario S2 --lead-backend zcode --lead-model a
 Inspect the native events as well as the Duet transcript. Require automatic
 handoff, a resumed ZCode turn with the same ID, correct model/effort, and no
 delegation calls. Dry-run convergence is not model verification.
-
-The worker `app-server` API serves the desktop host. It expects host account
-configuration and bidirectional client replies. Starting it alone can return
-capabilities while exposing no models. This backend uses the standalone
-headless entry instead of reproducing the desktop's account protocol.
 
 Sources: [official ZCode source](https://github.com/zai-org/ZCode),
 [CLI prompt entry](https://github.com/zai-org/ZCode/blob/main/apps/zcode-cli/packages/cli/src/prompt-command.ts),

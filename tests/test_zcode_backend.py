@@ -83,8 +83,12 @@ class ZCodeBackendTests(unittest.TestCase):
             self.assertEqual("plan", command[command.index("--mode") + 1])
             self.assertEqual("disabled", command[command.index("--workflow-mode") + 1])
             denied = command[command.index("--disallowed-tools") + 1].split(",")
-            for tool in ("Task", "Agent", "Skill", "Bash", "Write", "Edit", "CreateWorkflow"):
+            for tool in ("Task", "Agent", "Skill", "Bash", "Write", "Edit", "CreateWorkflow",
+                         "AmendWorkflow", "FillWorkflowHole", "ResumeWorkflowRun", "SaveWorkflow",
+                         "OffPeakCreate", "CronCreate", "CronUpdate", "CronDelete"):
                 self.assertIn(tool, denied)
+            self.assertNotIn("OffPeakTask", denied)
+            self.assertNotIn("RunWorkflow", denied)
             self.assertNotIn("--resume", command)
             self.assertIn("system {literal}", command[-1])
             self.assertIsNone(kwargs["stdin"])
@@ -227,6 +231,51 @@ class ZCodeBackendTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ValueError, "another installation's catalog"):
                 duet._zcode_catalog(selection, {})
+
+    def test_path_cli_resolves_catalog_from_its_real_installation(self):
+        self.launch.stop()
+        for bundled in (True, False):
+            with self.subTest(bundled=bundled):
+                installation = self.cwd / str(bundled)
+                entry = installation / "apps/zcode-cli/packages/cli/dist/zcode.cjs"
+                entry.parent.mkdir(parents=True)
+                entry.write_text("// native entry")
+                catalog = (entry.parent / "provider/zcode-builtin.json" if bundled else
+                           installation / "config/provider/zcode-builtin.json")
+                catalog.parent.mkdir(parents=True)
+                catalog.write_text(self.catalog.read_text())
+                link = installation / "zcode"
+                link.symlink_to(entry)
+                with mock.patch.object(duet.shutil, "which", return_value=str(link)), \
+                        mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+                    command, env = duet._zcode_command()
+                self.assertEqual([str(link)], command)
+                self.assertEqual(str(catalog.resolve()), env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"])
+                selection = {"providerId": "account:zai-individual-coding-plan", "modelId": "GLM-5.3"}
+                self.assertEqual(json.loads(catalog.read_text()), duet._zcode_catalog(selection, env))
+
+    def test_path_cli_honors_explicit_catalog(self):
+        self.launch.stop()
+        with mock.patch.object(duet.shutil, "which", return_value="/runtime/zcode"), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(self.catalog)}):
+            command, env = duet._zcode_command()
+        self.assertEqual(["/runtime/zcode"], command)
+        self.assertEqual(str(self.catalog), env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"])
+
+    def test_missing_path_catalog_does_not_borrow_desktop_catalog(self):
+        self.launch.stop()
+        desktop = self.cwd / "desktop"
+        catalog = desktop / "config/provider/zcode-builtin.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(self.catalog.read_text())
+        entry = desktop / "glm/zcode.cjs"
+        entry.parent.mkdir()
+        entry.write_text("// desktop entry")
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", desktop), \
+                mock.patch.object(duet.shutil, "which", return_value=str(self.cwd / "cli/zcode")), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+                duet._zcode_command()
 
     def test_catalog_snapshot_freezes_validation_and_disables_remote_refresh(self):
         before = json.loads(self.catalog.read_text())
