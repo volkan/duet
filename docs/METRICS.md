@@ -141,3 +141,7 @@ provider. Agent agreement and finished outcomes are observational signals, not
 correctness labels. Provider usage scopes can differ, and the data is not a
 controlled benchmark of vendors or models. Requested or reported model IDs are
 bounded identifiers, not guarantees of anonymity for user-defined aliases.
+
+ZCode reports requested reasoning with transport `config_file`. The private
+profile controls the native selection; this metadata is not a provider
+attestation of actual model/effort use. Native events establish that gate.

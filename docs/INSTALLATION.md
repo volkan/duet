@@ -77,6 +77,10 @@ Start a new agent session after installing:
 | OpenCode | Ask: `Use the duet skill to review this repository.` |
 | ZCode | Ask: `Use the duet skill to review this repository.` |
 
+These are skill hosts. A ZCode model peer uses the separate native
+[ZCode backend](ZCODE.md), including standalone account initialization.
+Do not substitute OpenCode when the user requests ZCode.
+
 The [OpenCode guide](OPENCODE_PLUGIN.md) also provides an optional `/duet`
 command that loads this same skill.
 

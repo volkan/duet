@@ -207,6 +207,32 @@ the original Duet terminal or close its stdin. Never use `pkill`, `killall`,
 process-name matching, or a broad process group. Never stop a different Duet
 run.
 
+## ZCode peers
+
+ZCode can host this skill and can also be a native read-only reviewer or
+planner peer. These are separate capabilities. Released Duet 0.2.16 has
+host support only; use a checkout that includes the `zcode` backend.
+Do not replace a requested ZCode peer with OpenCode or treat a pasted
+response passed through `--task-from-cmd` as an automatic two-peer loop.
+
+Select `zcode:reviewer` and its exact native account provider/model ID,
+for example `account:zai-individual-coding-plan/GLM-5.3`. Use per-agent
+`reasoning_effort: max` when requested. The adapter can use the official
+`zcode` CLI or the installed macOS desktop headless runtime plus Node.js.
+It needs the normal standalone account login even when the desktop is
+already connected. Native review execution requires effective `features.mcp: false`
+in that target's native configuration. Do not toggle global settings or bypass
+this prerequisite. Do not copy tokens or initialize identity values by hand.
+Read `docs/ZCODE.md` in that source checkout for native setup and limits.
+
+The adapter supplies a private credential-free model profile, denies
+delegation and write tools, and pins the explicit session ID plus initial
+model/effort. It validates the native catalog and leaves only the requested candidate
+selectable; unavailable models or efforts fail before a prompt. It refuses
+coder roles, custom API providers, `extra_args`,
+untracked sessions, and model/effort changes on resume. Complete the real
+affected-backend loop before reporting ZCode integration verified.
+
 ## Model selection
 
 Use `--lead-model` for the declared lead and `--partner-model` for the

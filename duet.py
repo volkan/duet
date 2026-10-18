@@ -32,6 +32,8 @@ Each agent keeps its own session across turns:
     `gemini --resume <session_id>` from the JSON response.
   - Copilot: `copilot -p ... --output-format json`; subsequent turns use
     `copilot --resume=<sessionId>` from the JSONL result event.
+  - ZCode: official headless JSON summaries and explicit --resume sess_ IDs;
+    private credential-free profiles select the account model and reasoning.
   - OpenCode: `opencode run --format json`; subsequent turns use
     `opencode run -s <sessionID>` from the JSONL event stream.
 
@@ -65,6 +67,7 @@ import threading
 import time
 import traceback
 import uuid
+import urllib.parse
 from typing import Callable, Iterable, Optional
 
 # ---------- defaults ----------
@@ -422,6 +425,7 @@ class Agent:
     # stays out of Agent's repr and serialized config/state shape; the run
     # lifecycle records it alongside the turn when metrics are enabled.
     last_call_metrics: dict = dataclasses.field(default_factory=dict, repr=False)
+    zcode_selection: Optional[dict] = None  # native resume cannot change model/effort
 
     def __post_init__(self) -> None:
         # Pin Claude to its stable Sonnet alias instead of inheriting a
@@ -462,6 +466,8 @@ def agent_state(a: Agent) -> dict:
         data["extra_args"] = a.extra_args
     if a.reasoning_effort is not None:
         data["reasoning_effort"] = a.reasoning_effort
+    if a.zcode_selection is not None:
+        data["zcode_selection"] = a.zcode_selection
     return data
 
 
@@ -594,6 +600,11 @@ def validate_config(cfg: DuetConfig,
                 f"expected {choices}",
                 parser,
             )
+        if agent.backend == "zcode":
+            try:
+                _zcode_requested_selection(agent, effective_reasoning(agent, cfg.reasoning))
+            except ValueError as exc:
+                _config_error(str(exc), parser)
         if agent.name in seen_names:
             _config_error(
                 f"duplicate agent name {agent.name!r}; agent names must be unique",
@@ -1598,6 +1609,8 @@ def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
             return requested, None, None, "native_default", fast
         transport = "prompt"
         backend_value = None
+    elif agent.backend == "zcode":
+        transport = "config_file"
     elif agent.backend == "codex":
         transport = "config_flag"
     else:
@@ -2470,6 +2483,322 @@ def _call_opencode_backend(agent: Agent, system_prompt: str, message: str,
     )
 
 
+
+_ZCODE_DESKTOP_RESOURCES = pathlib.Path("/Applications/ZCode.app/Contents/Resources")
+_ZCODE_SESSION_ID_RE = re.compile(r"^sess_[A-Za-z0-9_-]+$")
+_ZCODE_REVIEW_DENIED_TOOLS = CLAUDE_DENIED_DELEGATION_TOOLS + (
+    "Bash", "Write", "Edit", "NotebookEdit", "ApplyPatch", "CreateWorkflow",
+    "RunWorkflow", "OffPeakTask", "WebSearch", "WebFetch", "AskUserQuestion",
+    "EnterPlanMode", "ExitPlanMode", "ReplyToChannel",
+)
+
+
+def _zcode_command() -> tuple[list[str], dict[str, str]]:
+    """Use the official CLI, or the installed macOS app's headless runtime."""
+    if shutil.which("zcode"):
+        return ["zcode"], {}
+    entry = _ZCODE_DESKTOP_RESOURCES / "glm" / "zcode.cjs"
+    builtin = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"
+    node = shutil.which("node")
+    if sys.platform != "darwin" or not node or not entry.is_file() or not builtin.is_file():
+        raise ValueError("ZCode CLI is not on PATH and no installed macOS ZCode runtime was found")
+    return [node, str(entry)], {
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(builtin),
+    }
+
+
+def _zcode_requested_selection(agent: Agent, reasoning: Optional[str]) -> dict:
+    if agent.extra_args:
+        raise ValueError("ZCode review backend does not accept extra_args; native policy must stay fixed")
+    if agent.role not in {"reviewer", "triage-reviewer", "planner"}:
+        raise ValueError("ZCode currently supports read-only reviewer/planner roles, not coder roles")
+    provider, separator, model = (agent.model or "").partition("/")
+    if not separator or not provider.startswith("account:") or not model:
+        raise ValueError("ZCode requires its native account provider/model ID, e.g. "
+                         "account:zai-individual-coding-plan/GLM-5.3")
+    pin = {"model": agent.model, "reasoning": reasoning}
+    if agent.session_id:
+        if not _ZCODE_SESSION_ID_RE.fullmatch(agent.session_id):
+            raise ValueError("ZCode requires an explicit sess_ session ID; cwd-based resume is unsafe")
+        if agent.zcode_selection != pin:
+            raise ValueError("ZCode resume requires its original model/effort pin; start a fresh peer to change them")
+    return {"providerId": provider, "modelId": model,
+            **({"options": {"reasoningLevel": reasoning}} if reasoning else {})}
+
+
+
+def _reject_zcode_json_constant(value: str):
+    raise ValueError("ZCode configuration must use strict JSON")
+
+
+def _zcode_resolved_provider(config: dict, provider: dict) -> dict:
+    concrete = provider["config"]
+    template_id = provider.get("templateId")
+    if not template_id:
+        return concrete
+    templates = [row for row in config["providerConfigRules"].get("templateRules", [])
+                 if row["templateId"] == template_id]
+    if len(templates) != 1:
+        raise ValueError("ZCode catalog has no unique provider template")
+    base = templates[0]["config"]
+    resolved = {**base, **concrete}
+    if isinstance(base.get("api"), dict) and isinstance(concrete.get("api"), dict):
+        resolved["api"] = {**base["api"], **concrete["api"]}
+    return resolved
+
+
+def _zcode_catalog(selection: dict, launch_env: dict[str, str]) -> dict:
+    source = launch_env.get("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE") or os.environ.get(
+        "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")
+    if not source:
+        raise ValueError("ZCode needs ZCODE_BUILTIN_PROVIDER_CONFIG_FILE for its selected runtime; "
+                         "a PATH CLI must not use another installation's catalog")
+    data = json.loads(pathlib.Path(source).read_text(encoding="utf-8"),
+                      parse_constant=_reject_zcode_json_constant)
+    config = data["config"]
+    providers = config["providerConfigRules"]["providerRules"]
+    matches = [row for row in providers if row["providerId"] == selection["providerId"]]
+    if len(matches) != 1:
+        raise ValueError("Requested ZCode account model is absent from its native catalog")
+    provider = {**matches[0], "config": _zcode_resolved_provider(config, matches[0])}
+    if selection["modelId"] not in provider["config"].get("builtinModelIds", []):
+        raise ValueError("Requested ZCode account model is absent from its native catalog")
+    levels = _zcode_catalog_reasoning(config["modelConfigRules"], provider, selection["modelId"])
+    requested = selection.get("options", {}).get("reasoningLevel")
+    if requested is not None and requested not in levels:
+        raise ValueError("Requested ZCode reasoning level is absent from its native model catalog")
+    return data
+
+
+def _zcode_rule_url(value: str) -> str:
+    # Match native URL normalization for canonical HTTP(S) endpoints. Reject
+    # exotic forms rather than validate an effort against a different site.
+    if not re.fullmatch(r"[A-Za-z0-9:/?&#_~!$()*+,;=@.\[\]-]+", value):
+        raise ValueError("Unsupported ZCode catalog API URL")
+    url = urllib.parse.urlsplit(value)
+    host = url.hostname or ""
+    if (url.scheme not in {"http", "https"} or not host or url.username is not None
+            or ":" in host or host.rstrip(".").rsplit(".", 1)[-1].isdigit()
+            or host.rstrip(".").rsplit(".", 1)[-1].lower().startswith("0x")
+            or re.search(r"(?:^|/)\.{1,2}(?:/|$)", url.path)
+            or value.endswith(("?", "#")) or "?#" in value):
+        raise ValueError("Unsupported ZCode catalog API URL")
+    port = url.port
+    authority = host.lower()
+    if port is not None and port != {"http": 80, "https": 443}[url.scheme]:
+        authority += ":" + str(port)
+    endpoint = f"{url.scheme}://{authority}{url.path}".rstrip("/")
+    return endpoint + ("?" + url.query if url.query else "") + ("#" + url.fragment if url.fragment else "")
+
+
+def _zcode_catalog_reasoning(rules: dict, provider: dict, model: str) -> list[str]:
+    levels = []
+    api = provider["config"].get("api") or {}
+    subjects = {"modelMatch": model, "apiTypeMatch": api.get("type", ""),
+                "baseUrlMatch": _zcode_rule_url(api["baseUrl"]) if api.get("baseUrl") else ""}
+    for layer in ("modelRules", "modelApiRules", "providerSiteRules",
+                  "templateModelRules", "builtinProviderModelRules"):
+        for row in rules.get(layer, []):
+            if any(key in row and (not value or not re.fullmatch(
+                    row[key], value, re.IGNORECASE if key == "modelMatch" else 0))
+                   for key, value in subjects.items()):
+                continue
+            if row.get("modelId", model) != model:
+                continue
+            if row.get("providerId", provider["providerId"]) != provider["providerId"]:
+                continue
+            if "templateId" in row and row["templateId"] != provider.get("templateId"):
+                continue
+            specs = row.get("config", {}).get("optionSpecs", {})
+            if specs is None or ("reasoningLevel" in specs and specs["reasoningLevel"] is None):
+                levels = []
+                continue
+            reasoning = specs.get("reasoningLevel", {})
+            values = reasoning.get("values")
+            if "values" in reasoning and values is None:
+                levels = []
+                continue
+            if values is not None:
+                if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+                    raise ValueError("Unsupported ZCode native reasoning catalog shape")
+                levels = values
+    return levels
+
+
+def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
+    directory = pathlib.Path(os.path.abspath(cwd))
+    ancestors = [directory, *directory.parents]
+    directories = [directory]
+    for index, parent in enumerate(ancestors):
+        if (parent / ".git").exists():
+            directories = list(reversed(ancestors[:index + 1]))
+            break
+    return [pathlib.Path.home() / ".zcode/cli/config.json", *[
+        path for folder in directories for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
+
+
+def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
+    denied = list(_ZCODE_REVIEW_DENIED_TOOLS)
+    fingerprints = {}
+    mcp_disabled = False
+    for path in _zcode_permission_paths(cwd):
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            fingerprints[path] = None
+            continue
+        except OSError:
+            raise ValueError("Cannot read a native ZCode permission configuration") from None
+        fingerprints[path] = hashlib.sha256(raw).hexdigest()
+        try:
+            data = json.loads(raw.decode("utf-8"), parse_constant=_reject_zcode_json_constant)
+            permission = data.get("permission", {})
+            rules = permission.get("disallowedTools", [])
+            if (not isinstance(data, dict) or not isinstance(permission, dict)
+                    or not isinstance(rules, list) or not all(isinstance(rule, str) for rule in rules)
+                    or permission.get("allowedTools")):
+                raise ValueError()
+            if "features" in data:
+                if not isinstance(data["features"], dict):
+                    raise ValueError()
+                # Native ignores a whole invalid document. Certify only the
+                # minimal schema we validate completely, not a richer file
+                # whose unrelated fields could cause MCP=false to be skipped.
+                mcp_disabled = (set(data) == {"features"}
+                                and set(data["features"]) == {"mcp"}
+                                and data["features"]["mcp"] is False)
+            # CLI accepts comma/space-separated whole-tool names. Normalize
+            # native command-pattern denials conservatively to the whole tool.
+            for rule in rules:
+                name = rule.strip().split("(", 1)[0].strip()
+                if not name or re.search(r"[\s,]", name):
+                    raise ValueError()
+                denied.append(name)
+        except (ValueError, AttributeError, TypeError):
+            raise ValueError("Unsupported native ZCode permission configuration; refusing to replace it") from None
+    if not mcp_disabled:
+        raise ValueError("ZCode review requires native features.mcp=false; plan mode permits some MCP writes")
+    return list(dict.fromkeys(denied)), fingerprints
+
+
+def _zcode_check_permission_inputs(cwd: pathlib.Path, expected: dict) -> None:
+    _, current = _zcode_permission_denials(cwd)
+    if current != expected:
+        raise ValueError("Native ZCode permission configuration changed before launch")
+
+
+@contextlib.contextmanager
+def _zcode_peer_profile(selection: dict, launch_env: dict[str, str]):
+    # Native headless CLI has no model/effort flags. Its supported provider
+    # profile carries only this peer's choice; auth stays in ZCode's store.
+    catalog = _zcode_catalog(selection, launch_env)
+    config = catalog["config"]
+    providers = config["providerConfigRules"]["providerRules"]
+    # Native defaults may fall back. Expose only the requested account/model;
+    # an unavailable selection must fail before any other model is invoked.
+    hidden = [{"providerId": row["providerId"], "config": {"visibility": "hidden"}}
+              for row in providers if row["providerId"] != selection["providerId"]]
+    disabled = [{"providerId": row["providerId"], "modelId": model,
+                 "config": {"enabled": False}}
+                for row in providers
+                for model in [*_zcode_resolved_provider(config, row).get("builtinModelIds", []),
+                              *_zcode_resolved_provider(config, row).get("personalModelIds", [])]
+                if (row["providerId"], model) != (selection["providerId"], selection["modelId"])]
+    reasoning = selection.get("options", {}).get("reasoningLevel")
+    if reasoning is not None:
+        # Narrow only after native-catalog validation. A session edited outside
+        # Duet must not resume with another still-supported effort silently.
+        disabled.append({"providerId": selection["providerId"], "modelId": selection["modelId"],
+                         "config": {"optionSpecs": {"reasoningLevel": {"values": [reasoning]}}}})
+    with tempfile.TemporaryDirectory(prefix="duet-zcode-") as directory:
+        profile = pathlib.Path(directory) / "provider.json"
+        config = {"schemaVersion": 1, "config": {
+            "providerConfigRules": {"providerRules": hidden},
+            "modelConfigRules": {"providerModelRules": disabled, "manualProviderModelRules": []},
+            "defaultModelSelection": selection,
+        }}
+        write_text_atomic(profile, json.dumps(config))
+        profile.chmod(0o600)
+        builtin = pathlib.Path(directory) / "builtin.json"
+        write_text_atomic(builtin, json.dumps(catalog))
+        builtin.chmod(0o600)
+        yield {**launch_env, "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE": str(profile),
+               "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(builtin),
+               "ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE": ""}
+
+
+def _parse_zcode_reply(stdout: str) -> tuple[str, str]:
+    try:
+        result = json.loads(stdout)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("ZCode did not return a JSON summary") from exc
+    if not isinstance(result, dict):
+        raise ValueError("ZCode JSON summary must be an object")
+    session = result.get("sessionId")
+    response = result.get("response")
+    if not isinstance(session, str) or not _ZCODE_SESSION_ID_RE.fullmatch(session):
+        raise ValueError("ZCode JSON summary has no valid sessionId")
+    if not isinstance(response, str) or not response.strip():
+        raise ValueError("ZCode JSON summary has no assistant response")
+    projection = result.get("projection") or {}
+    if result.get("error") or not isinstance(projection, dict) or projection.get("status") in {"error", "failed"}:
+        raise ValueError("ZCode reported a failed turn")
+    return response, session
+
+
+def call_zcode(agent: Agent, system_prompt: str, message: str,
+               cwd: pathlib.Path, timeout: int, dry: bool,
+               reasoning: Optional[str] = None,
+               stderr_log_path: Optional[pathlib.Path] = None,
+               pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+    selection = _zcode_requested_selection(agent, reasoning)
+    pin = {"model": agent.model, "reasoning": reasoning}
+    if dry:
+        session = agent.session_id or "sess_dry_" + agent.name
+        agent.zcode_selection = pin
+        return (f"[dry-run zcode/{agent.name} reasoning={reasoning}] received {len(message)} chars\n"
+                "LGTM rationale: dry-run validates the launch only, not a model response.\n"
+                + DEFAULT_SENTINEL), session
+    try:
+        command, launch_env = _zcode_command()
+        native_cwd = pathlib.Path(agent.cwd_override or cwd)
+        denied, permission_inputs = _zcode_permission_denials(native_cwd)
+        command += ["--cwd", str(native_cwd), "--mode", "plan",
+                    "--workflow-mode", "disabled", "--json", "--no-color",
+                    "--disallowed-tools", ",".join(denied)]
+        if agent.session_id:
+            command += ["--resume", agent.session_id]
+        command += ["--prompt", f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"]
+        with _zcode_peer_profile(selection, launch_env) as env:
+            _zcode_check_permission_inputs(native_cwd, permission_inputs)
+            rc, out, err = _run(command, cwd=agent.cwd_override or cwd, stdin=None,
+                                timeout=timeout, stderr_log_path=stderr_log_path,
+                                pid_file_path=pid_file_path, env_overrides=env)
+        if rc != 0:
+            reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
+            raise AgentRunError(reason, _agent_exit_error("zcode", rc, out, err))
+        response, session = _parse_zcode_reply(out)
+        if agent.session_id and session != agent.session_id:
+            raise ValueError("ZCode changed its pinned sessionId; refusing an unrelated conversation")
+    except AgentRunError:
+        raise
+    except Exception as exc:
+        raise AgentRunError(FINISHED_AGENT_ERROR, f"ZCode invocation failed: {exc}") from exc
+    agent.zcode_selection = pin
+    _metrics_record_raw_output(agent, out)
+    return response, session
+
+
+def _call_zcode_backend(agent: Agent, system_prompt: str, message: str,
+                        cfg: DuetConfig, first_turn: bool,
+                        stderr_log_path: Optional[pathlib.Path],
+                        pid_file_path: Optional[pathlib.Path],
+                        reasoning: Optional[str]) -> tuple[str, Optional[str]]:
+    return call_zcode(agent, system_prompt, message, cfg.cwd,
+                      cfg.per_turn_timeout, cfg.dry_run, reasoning,
+                      stderr_log_path, pid_file_path)
+
+
 BACKENDS = {
     "claude": BackendAdapter(
         name="claude",
@@ -2499,6 +2828,10 @@ BACKENDS = {
         call=_call_copilot_backend,
         reasoning_map=COPILOT_REASONING_MAP,
         reasoning_prompt_prefix=COPILOT_REASONING_PROMPT_PREFIX,
+    ),
+    "zcode": BackendAdapter(
+        name="zcode", binary="zcode", call=_call_zcode_backend,
+        reasoning_map={level: level for level in REASONING_LEVELS}, reasoning_prompt_prefix={},
     ),
     "opencode": BackendAdapter(
         name="opencode",
@@ -6386,6 +6719,7 @@ def _agents_from_state(state: dict,
             role_prompt=(str(raw["role_prompt"]) if raw.get("role_prompt") else None),
             model=(str(raw["model"]) if raw.get("model") else None),
             session_id=(str(raw["session_id"]) if raw.get("session_id") else None),
+            zcode_selection=raw.get("zcode_selection"),
             extra_args=[str(x) for x in raw_extra_args],
             reasoning_effort=(str(raw["reasoning_effort"])
                               if raw.get("reasoning_effort") else None),
@@ -7119,9 +7453,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--task-from-cmd", metavar="CMD",
                     help="run shell command with cwd=--cwd and use stdout as the task")
     ap.add_argument("--partner", default=None,
-                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder, opencode:coder (default codex:coder)")
+                    help="partner agent spec, e.g. codex:coder, claude:reviewer, gemini:coder, copilot:coder, opencode:coder, zcode:reviewer (default codex:coder)")
     ap.add_argument("--lead", default=None,
-                    help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner (default; ignored if --resume-claude given)")
+                    help="lead agent spec, e.g. claude:planner, gemini:reviewer, copilot:planner, opencode:planner, zcode:reviewer (default; ignored if --resume-claude given)")
     ap.add_argument("--lead-model", metavar="MODEL", default=None,
                     help="lead backend model via --model; Claude defaults to 'sonnet'")
     ap.add_argument("--partner-model", metavar="MODEL", default=None,
@@ -7153,9 +7487,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                     help="atomically write the new run's schema-v1 launch JSON; "
                          "refuses to overwrite FILE")
     ap.add_argument("--sandbox", default=None,
-                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot/opencode.")
+                    help="codex --sandbox: read-only|workspace-write|danger-full-access. No-op for claude/gemini/copilot/opencode/zcode.")
     ap.add_argument("--permission-mode", default=None,
-                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot/opencode.")
+                    help="claude --permission-mode; gemini maps default/acceptEdits/plan/bypassPermissions to --approval-mode. No-op for copilot/opencode/zcode.")
     ap.add_argument("--config", help="optional YAML/JSON config (overrides flags except --resume-*)")
     worktree_group = ap.add_mutually_exclusive_group()
     worktree_group.add_argument(
@@ -7637,6 +7971,12 @@ def _warn_missing_backends(cfg: DuetConfig) -> None:
         return
     for backend in {a.backend for a in cfg.agents}:
         binary = backend_adapter(backend).binary
+        if backend == "zcode":
+            try:
+                _zcode_command()
+                continue
+            except ValueError:
+                pass
         if shutil.which(binary) is None:
             print(
                 f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "

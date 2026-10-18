@@ -199,3 +199,6 @@ end of the run.
 | The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --auto "..."`. Explicit permission denials still apply. |
 | No run directory appears | Check the original duet process. The recipe writes initial state before `/review`; use `duet --list` or a custom `--run-info-file` launch to discover it deterministically. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
+
+For a ZCode model peer, use the [native ZCode backend](ZCODE.md).
+Skill host support alone does not connect its account or select that backend.

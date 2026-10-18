@@ -8,7 +8,8 @@ and you get a saved transcript to inspect.
 
 Run **two different models through a single agent harness (CLI)**, such as
 Codex or OpenCode. You can also pair different CLIs, such as Claude Code and
-Codex. Gemini and Copilot are also supported.
+Codex. Gemini and Copilot are also supported. A native ZCode account can
+provide a [read-only review peer](https://github.com/volkan/duet/blob/main/docs/ZCODE.md).
 [See examples using one CLI](https://github.com/volkan/duet/blob/main/docs/USAGE.md#same-backend-peering).
 
 [![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
