@@ -39,6 +39,8 @@ CODEX_PLUGIN_DOC = ROOT / "docs" / "CODEX_PLUGIN.md"
 # slash-command arguments to that skill without duplicating the recipe.
 OPENCODE_COMMAND = PLUGIN_ROOT / "integrations" / "opencode" / "duet.md"
 OPENCODE_PLUGIN_DOC = ROOT / "docs" / "OPENCODE_PLUGIN.md"
+ZCODE_COMMAND = PLUGIN_ROOT / "integrations" / "zcode" / "duet.md"
+ZCODE_DOC = ROOT / "docs" / "ZCODE.md"
 PYPROJECT = ROOT / "pyproject.toml"
 DUET_PY = ROOT / "duet.py"
 FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
@@ -330,6 +332,15 @@ def _assert_opencode_command_metadata() -> None:
             _fail(f"OpenCode command wrapper is missing required text: {required!r}")
 
 
+def _assert_zcode_command_metadata() -> None:
+    if not ZCODE_DOC.exists() or not ZCODE_COMMAND.exists():
+        _fail("ZCode guide and optional command wrapper must exist")
+    command_text = ZCODE_COMMAND.read_text(encoding="utf-8")
+    for required in ("description:", "argument-hint:", "skills: [duet]", "`duet` skill"):
+        if required not in command_text:
+            _fail(f"ZCode command wrapper is missing required text: {required!r}")
+
+
 def _assert_source_metadata() -> str:
     pyproject = _load_pyproject()
     claude_plugin = _load_json(CLAUDE_PLUGIN_JSON)
@@ -346,6 +357,7 @@ def _assert_source_metadata() -> str:
     _assert_codex_plugin_metadata(codex_plugin, codex_marketplace, version)
     _assert_shared_skill()
     _assert_opencode_command_metadata()
+    _assert_zcode_command_metadata()
     _assert_no_forbidden_text()
     return version
 

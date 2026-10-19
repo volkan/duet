@@ -75,10 +75,15 @@ Start a new agent session after installing:
 | Claude Code | `/duet` |
 | Codex | `$duet` |
 | OpenCode | Ask: `Use the duet skill to review this repository.` |
-| ZCode | Ask: `Use the duet skill to review this repository.` |
+| ZCode | `/skill duet` followed by the task or Duet arguments |
+
+These are skill hosts. A ZCode model peer uses the separate native
+[ZCode backend](ZCODE.md), including standalone account initialization.
+Do not substitute OpenCode when the user requests ZCode.
 
 The [OpenCode guide](OPENCODE_PLUGIN.md) also provides an optional `/duet`
-command that loads this same skill.
+command that loads this same skill. The [ZCode guide](ZCODE.md#host-shortcuts)
+provides its optional `/duet` command. Both wrappers keep the workflow in the shared skill.
 
 The source lives at
 [`plugins/duet/skills/duet/SKILL.md`](../plugins/duet/skills/duet/SKILL.md).

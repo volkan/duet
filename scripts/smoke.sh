@@ -2001,5 +2001,7 @@ for path in (root / "home" / ".duet" / "metrics").rglob("*.json"):
     assert "private-claim-marker" not in text and "private-task-marker" not in text
 PY
 
+expect_stdout "zcode native review dry run" 0 "dry-run zcode/" "$DUET" --dry-run --no-worktree --lead zcode:reviewer --lead-model account:zai-individual-coding-plan/GLM-5.3 --partner codex:reviewer --reasoning max --task "read only" --cwd "$TMPD"
+
 echo "---"; echo "smoke: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

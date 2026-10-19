@@ -195,3 +195,10 @@ agents:
 #     # model: anthropic/claude-sonnet-4-6
 #     # session_id: opencode-session-id-from-state-json
 #     # extra_args: ["--agent", "build"]
+
+# Native ZCode read-only peer (see docs/ZCODE.md):
+# backend: zcode
+# role: reviewer
+# model: account:zai-individual-coding-plan/GLM-5.3
+# reasoning_effort: max
+# Complete native CLI login first; extra_args and coder roles are unsupported.

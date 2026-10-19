@@ -294,3 +294,6 @@ end of the run.
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
 | No run metadata appears | Check the original duet process. A valid launch atomically creates the requested run-info file before `/review`; never scrape banners as a fallback. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
+
+For a ZCode model peer, use the [native ZCode backend](ZCODE.md).
+Skill host support alone does not connect its account or select that backend.

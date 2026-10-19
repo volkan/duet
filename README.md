@@ -8,7 +8,8 @@ and you get a saved transcript to inspect.
 
 Run **two different models through a single agent harness (CLI)**, such as
 Codex or OpenCode. You can also pair different CLIs, such as Claude Code and
-Codex. Gemini and Copilot are also supported.
+Codex. Gemini and Copilot are also supported. A native ZCode account can
+provide a [read-only review peer](https://github.com/volkan/duet/blob/main/docs/ZCODE.md).
 [See examples using one CLI](https://github.com/volkan/duet/blob/main/docs/USAGE.md#same-backend-peering).
 
 [![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
@@ -49,12 +50,14 @@ npx skills add volkan/duet --skill duet --global \
   --agent claude-code --agent codex --agent opencode --agent zcode
 ```
 
-Start a new session, then use `/duet` in Claude Code, `$duet` in Codex, or ask
-OpenCode or ZCode to use the `duet` skill.
+Start a new session. Use `/duet` in Claude Code, `$duet` in Codex, or `/skill duet` in ZCode.
+Ask OpenCode to use the `duet` skill.
 [Installation details](https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md)
 cover `~/.agents/skills`, prerequisites, and alternative installers. See the
 [OpenCode guide](https://github.com/volkan/duet/blob/main/docs/OPENCODE_PLUGIN.md)
 for its native skill and optional command wrapper.
+The [ZCode guide](https://github.com/volkan/duet/blob/main/docs/ZCODE.md#host-shortcuts)
+provides its `/duet` shortcut and native peer setup.
 
 ## Native plugin installation
 

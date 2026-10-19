@@ -288,3 +288,6 @@ If native plugin installation is unavailable, use the same shared skill via
 The standalone skill appears as `/duet` in Claude Code. Its source is
 [`plugins/duet/skills/duet/SKILL.md`](../plugins/duet/skills/duet/SKILL.md);
 there is no separate Claude recipe to copy or keep in sync.
+
+For a ZCode model peer, use the [native ZCode backend](ZCODE.md).
+Skill host support alone does not connect its account or select that backend.

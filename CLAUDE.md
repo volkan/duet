@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-**duet** is a single-file Python harness (`duet.py`, ~7700 lines, stdlib-only, Python 3.9+) that runs two CLI agents — `claude` and `codex` by default, with `gemini`, `copilot`, and `opencode` available as additional backends and same-backend pairings supported — in alternating turns until both agents propose convergence in back-to-back turns with an LGTM rationale plus the sentinel (`<<<LGTM>>>` on its own line), hit `--turns`, time out, or get Ctrl-C'd. With `--on-turn-timeout continue` (the review recipe's default; plain runs default to `stop`) a single loop-turn timeout is not terminal: the timeout block — plus the worktree handoff/diff when the timed-out agent ran in a worktree — becomes that agent's reply and the partner takes the next turn, while two consecutive timeouts, a final-turn timeout, or a Ctrl-C during the timed-out turn still end the run with `reason=timeout` (`_timeout_may_continue` is the pre-call eligibility that also keeps an eligible timeout out of the persisted `finished_reason`; `_continue_after_timeout` re-checks the stop flag after the call so SIGINT beats continuation; seed extraction and forced turns are always terminal on timeout). A timed-out or errored turn does **not** mark the agent as seen — `seen_first_turn` flips only on a successful call, so a retry runs under first-turn rules and the same-cwd codex guards re-validate it. Each agent keeps its own conversation memory across turns: Claude via `--resume <session_id>` parsed from its JSON-wrapped output; Codex via `codex exec resume <uuid>` (UUID parsed out of Codex's stderr by `_parse_codex_session_id`) with a `codex exec resume --last` cwd-keyed fallback for builds that don't print one or for legacy continued runs; Gemini via JSON `session_id` from `gemini -p ... --output-format json` and `gemini --resume <session_id>`; Copilot via JSONL `sessionId` from `copilot -p ... --output-format json` and `copilot --resume=<sessionId>`; OpenCode via the top-level `sessionID` in the JSONL event stream from `opencode run --format json` and `opencode run -s <sessionID>` (the id is stable across turns, so resume is always id-keyed, never cwd-keyed).
+**duet** is a single-file Python harness (`duet.py`, stdlib-only, Python 3.9+) that runs two CLI agents — `claude` and `codex` by default, with `gemini`, `copilot`, `opencode`, and read-only `zcode` available as additional backends and same-backend pairings supported — in alternating turns until both agents propose convergence in back-to-back turns with an LGTM rationale plus the sentinel (`<<<LGTM>>>` on its own line), hit `--turns`, time out, or get Ctrl-C'd. With `--on-turn-timeout continue` (the review recipe's default; plain runs default to `stop`) a single loop-turn timeout is not terminal: the timeout block — plus the worktree handoff/diff when the timed-out agent ran in a worktree — becomes that agent's reply and the partner takes the next turn, while two consecutive timeouts, a final-turn timeout, or a Ctrl-C during the timed-out turn still end the run with `reason=timeout` (`_timeout_may_continue` is the pre-call eligibility that also keeps an eligible timeout out of the persisted `finished_reason`; `_continue_after_timeout` re-checks the stop flag after the call so SIGINT beats continuation; seed extraction and forced turns are always terminal on timeout). A timed-out or errored turn does **not** mark the agent as seen — `seen_first_turn` flips only on a successful call, so a retry runs under first-turn rules and the same-cwd codex guards re-validate it. Each agent keeps its own conversation memory across turns: Claude via `--resume <session_id>` parsed from its JSON-wrapped output; Codex via `codex exec resume <uuid>` (UUID parsed out of Codex's stderr by `_parse_codex_session_id`) with a `codex exec resume --last` cwd-keyed fallback for builds that don't print one or for legacy continued runs; Gemini via JSON `session_id` from `gemini -p ... --output-format json` and `gemini --resume <session_id>`; Copilot via JSONL `sessionId` from `copilot -p ... --output-format json` and `copilot --resume=<sessionId>`; OpenCode via the top-level `sessionID` in the JSONL event stream from `opencode run --format json` and `opencode run -s <sessionID>` (the id is stable across turns, so resume is always id-keyed, never cwd-keyed).
 
 The single-file shape is a hard constraint. PyYAML is the one optional import, gated behind `--config foo.yaml`; the smoke test uses JSON configs to stay stdlib-only. `README.md` has the user-facing pitch; `docs/USAGE.md` is the full flag reference; this file is for someone modifying `duet.py`.
 
@@ -15,10 +15,9 @@ optional `[yaml]` extra, zero runtime dependencies). Both marketplaces point
 at one narrowed plugin root, `plugins/duet/`, with Claude and Codex manifests
 and the shared `skills/duet/SKILL.md`. The `skills` installer distributes that
 same skill through `~/.agents/skills`, with host-specific links where needed.
-OpenCode and ZCode can load it natively;
-`plugins/duet/integrations/opencode/duet.md` is
-only an optional argument-forwarding command wrapper. Keep workflow logic in
-the shared skill. All hosts launch the PATH-installed CLI with
+OpenCode and ZCode can load it natively. Their optional command wrappers live
+under `plugins/duet/integrations/opencode/` and `plugins/duet/integrations/zcode/`.
+Keep workflow logic in the shared skill. All hosts launch the PATH-installed CLI with
 `--run-info-file`, validate schema 1, and poll `duet --status <run_dir> --json`.
 Keep both native manifest versions in lockstep with `duet.__version__`.
 [Installation and upgrades](docs/INSTALLATION.md) documents the shared and
@@ -106,7 +105,7 @@ The full how-to and the per-change matrix live in `docs/USAGE.md`
 
 ### Two state objects
 
-- **`Agent`** (dataclass) — `backend` (`claude`|`codex`|`gemini`|`copilot`|`opencode`), `role` (`planner`|`coder`|`reviewer`|`triage-reviewer`|custom), `session_id` (mutated across turns), `cwd_override` (set when this agent runs in a worktree), `reasoning_effort` (per-agent override of cfg-level reasoning), `extra_args`, `role_prompt`.
+- **`Agent`** (dataclass) — `backend` (`claude`|`codex`|`gemini`|`copilot`|`opencode`|`zcode`), `role` (`planner`|`coder`|`reviewer`|`triage-reviewer`|custom), `session_id` (mutated across turns), `cwd_override` (set when this agent runs in a worktree), `reasoning_effort` (per-agent override of cfg-level reasoning), `extra_args`, `role_prompt`.
 - **`DuetConfig`** (dataclass) — exactly 2 agents plus orchestration knobs (turns, sentinel, sandbox, permission_mode, deferred `task_from_cmd`, strict worktree settings, run-info path, add_dirs, reasoning).
 
 `run_duet()` is the loop. `_prepare_run` owns allocation, initial phase state, atomic run-info publication, worktree setup, and deferred kickoff before handing control to it. `_execute_turn`, `_derive_seed_or_failure`, `_dry_run_recap_state`, and `ask_force` own later phases; every payload still comes from `_build_run_state`. `build_run_status` builds the secret-minimized status schema and both human/JSON renderers consume it. `main()` delegates validation/config construction to named helpers. Keep this decomposition: the complexity gate fails when branch-heavy setup/status logic is inlined into `run_duet` or `main`.
@@ -268,6 +267,17 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
 - **JSONL `sessionId` is required.** `copilot -p ... --output-format json` emits a JSONL event stream; duet takes the last `assistant.message` content as the reply, the final `result.sessionId` as the resume handle, and treats nonzero `result.exitCode` as `agent_error`. Missing or malformed JSONL stops with `agent_error` because multi-turn memory would be unsafe. There is no `--resume-copilot` shortcut yet; use `--continue` from `state.json` or YAML `session_id:` for resumed Copilot agents.
 - **Permissions are Copilot-native.** `--sandbox` and `permission_mode` do not apply to Copilot. duet runs Copilot non-interactively with `--allow-all-tools`, sends the effective cwd via `-C`, and maps `add_dirs:` to repeated `--add-dir`. Use per-agent `extra_args` for Copilot's `--deny-tool`, URL/path policy, or broader `--allow-all` / `--yolo` modes.
 - **Reasoning names differ at the floor.** Copilot accepts `none`, `low`, `medium`, `high`, `xhigh`, and `max`; duet maps user-facing `minimal` to Copilot's `none`.
+
+## ZCode-specific quirks
+
+The native review backend uses headless JSON, an explicit `sess_` resume ID,
+and private credential-free provider profiles for model/effort. It supports
+account providers and read-only roles only. Keep its selection pin in
+`agent_state` and `_agents_from_state`; native resume cannot change it.
+The macOS fallback uses the installed desktop bundle through Node.js.
+Standalone login needs its own account identity binding. Host skill
+installation and desktop worker capabilities do not prove this binding.
+See [ZCode](docs/ZCODE.md) for limits, setup, and required live checks.
 
 ## OpenCode-specific quirks
 

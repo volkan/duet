@@ -169,6 +169,15 @@ def init_git_repo(repo: pathlib.Path) -> None:
     )
 
 
+def seed_zcode_review_policy(repo: pathlib.Path) -> None:
+    # Only the disposable fixture's native policy changes. User configuration
+    # and unrelated review targets stay untouched.
+    write_text(repo / "zcode.json", json.dumps({"features": {"mcp": False}}) + "\n")
+    checked(["git", "add", "zcode.json"], repo)
+    checked(["git", "-c", "user.name=duet-loop", "-c", "user.email=duet-loop@example.invalid",
+             "commit", "-m", "test: disable MCP in native review fixture"], repo)
+
+
 def common_files(repo: pathlib.Path, app_py: str, test_py: str) -> None:
     write_text(repo / "app.py", app_py)
     write_text(repo / "test_app.py", test_py)
@@ -649,7 +658,8 @@ def run_duet_normal(
     timeout: int,
 ) -> int:
     cmd = [sys.executable, str(duet_path), "--config", str(config_path),
-           "--metrics-kind", "test"]
+           "--metrics-kind", "test", "--run-info-file",
+           str(config_path.with_name("run-info.json"))]
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     with log_path.open("w", encoding="utf-8") as log:
@@ -673,7 +683,8 @@ def run_duet_with_force_pty(
     timeout: int,
 ) -> int:
     cmd = [sys.executable, str(duet_path), "--config", str(config_path),
-           "--metrics-kind", "test"]
+           "--metrics-kind", "test", "--run-info-file",
+           str(config_path.with_name("run-info.json"))]
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     master_fd, slave_fd = pty.openpty()
@@ -740,15 +751,26 @@ def run_duet_with_force_pty(
             pass
 
 
-RUN_DIR_RE = re.compile(r"^\[duet\] run(?: dir)?:\s+(.+)$", re.MULTILINE)
-
-
-def extract_run_dir(log_path: pathlib.Path) -> Optional[pathlib.Path]:
-    text = log_path.read_text(encoding="utf-8", errors="replace")
-    matches = RUN_DIR_RE.findall(text)
-    if not matches:
+def extract_run_dir(run_info_path: pathlib.Path) -> Optional[pathlib.Path]:
+    try:
+        info = json.loads(run_info_path.read_text(encoding="utf-8"))
+        if not isinstance(info, dict):
+            return None
+        schema_matches = (type(info.get("schema_version")) is int
+                          and info["schema_version"] == 1
+                          and info.get("kind") == "duet.run")
+        if not schema_matches:
+            return None
+        if not isinstance(info.get("run_id"), str) or not info["run_id"]:
+            return None
+        if type(info.get("pid")) is not int:
+            return None
+        paths = [pathlib.Path(info[key]) for key in ("run_dir", "state_path")]
+        if not all(path.is_absolute() for path in paths):
+            return None
+        return paths[0]
+    except (OSError, ValueError, TypeError, KeyError):
         return None
-    return pathlib.Path(matches[-1].strip()).expanduser().resolve()
 
 
 def git_status_clean(repo: pathlib.Path) -> tuple[bool, str]:
@@ -981,6 +1003,14 @@ def main() -> int:
     # not demand claude/codex be installed.
     required_cmds = ["git", *sorted({args.lead_backend, args.partner_backend})]
     for required in required_cmds:
+        if required == "zcode":
+            target = load_duet_module(duet_path)
+            try:
+                target._zcode_command()
+                continue
+            except ValueError as exc:
+                print(f"[test-loop] ZCode runtime unavailable: {exc}", file=sys.stderr)
+                return 2
         if shutil.which(required) is None:
             print(f"[test-loop] required command not on PATH: {required}", file=sys.stderr)
             return 2
@@ -1042,6 +1072,8 @@ def main() -> int:
             repo = scenario_root / "repo"
             repo.mkdir(parents=True, exist_ok=True)
             scenario.setup(repo)
+            if "zcode" in {args.lead_backend, args.partner_backend}:
+                seed_zcode_review_policy(repo)
             locked_hash = sha256_file(repo / "LOCKED.md")
 
             runs_dir = duet_runs_dir / label
@@ -1078,12 +1110,12 @@ def main() -> int:
                 with log_path.open("a", encoding="utf-8") as log:
                     log.write("\n[test-loop] duet subprocess timeout\n")
 
-            run_dir = extract_run_dir(log_path)
+            run_dir = extract_run_dir(config_path.with_name("run-info.json"))
             if run_dir is None:
                 ok = False
                 metrics = {
                     "scenario": label,
-                    "reason": "<no-run-dir>",
+                    "reason": "<invalid-run-info>",
                     "turns": 0,
                     "parser_converged_turns": 0,
                     "recap_converged_turns": 0,
