@@ -211,8 +211,8 @@ run.
 ## ZCode peers
 
 ZCode can host this skill and can also be a native read-only reviewer or
-planner peer. These are separate capabilities. Released Duet 0.2.16 has
-host support only; use a checkout that includes the `zcode` backend.
+planner peer. These are separate capabilities. Native peers require Duet
+0.2.17 or later. Host skill installation alone does not upgrade the CLI.
 Do not replace a requested ZCode peer with OpenCode or treat a pasted
 response passed through `--task-from-cmd` as an automatic two-peer loop.
 

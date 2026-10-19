@@ -2,9 +2,9 @@
 
 ZCode can load the shared Duet skill as a host. A ZCode peer also needs the
 native `zcode` backend. Host skill installation alone does not add a backend
-or connect another CLI's account. Duet 0.2.16 from PyPI predates this backend.
-Use this source checkout until a release includes it. Run `make install` from
-the checkout to put this source version on PATH.
+or connect another CLI's account. Native peers require Duet 0.2.17 or later.
+Upgrade `duet-cli` through your package manager. For a source install, run
+`make install` from the checkout.
 
 ## Host shortcuts
 
