@@ -2761,6 +2761,28 @@ def _zcode_peer_profile(selection: dict, launch_env: dict[str, str]):
                "ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE": ""}
 
 
+_ZCODE_FAILURE_HINTS = (
+    ("project_token_login_failed",
+     "[duet] hint: ZCode could not get a project token from the account service. "
+     "Make sure that the network is available. Then sign in again with the login "
+     "command in docs/ZCODE.md#account-initialization."),
+    ("project_token_login_required",
+     "[duet] hint: ZCode has no stored login token or account identity. "
+     "Sign in with the login command in docs/ZCODE.md#account-initialization."),
+    ("Select a model before",
+     "[duet] hint: ZCode has no usable model. Sign in again with the login command "
+     "in docs/ZCODE.md#account-initialization, and make sure that the provider ID "
+     "belongs to the connected account."),
+)
+
+
+def _zcode_failure_hint(rc: int, out: str, err: str) -> str:
+    if rc == 124:
+        return ""
+    text = out + "\n" + err
+    return next(("\n" + line for marker, line in _ZCODE_FAILURE_HINTS if marker in text), "")
+
+
 def _parse_zcode_reply(stdout: str) -> tuple[str, str]:
     try:
         result = json.loads(stdout)
@@ -2808,10 +2830,14 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
             rc, out, err = _run(command, cwd=agent.cwd_override or cwd, stdin=None,
                                 timeout=timeout, stderr_log_path=stderr_log_path,
                                 pid_file_path=pid_file_path, env_overrides=env)
+        hint = _zcode_failure_hint(rc, out, err)
         if rc != 0:
             reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-            raise AgentRunError(reason, _agent_exit_error("zcode", rc, out, err))
-        response, session = _parse_zcode_reply(out)
+            raise AgentRunError(reason, _agent_exit_error("zcode", rc, out, err, hint))
+        try:
+            response, session = _parse_zcode_reply(out)
+        except ValueError as exc:
+            raise ValueError(f"{exc}{hint}") from exc
         if agent.session_id and session != agent.session_id:
             raise ValueError("ZCode changed its pinned sessionId; refusing an unrelated conversation")
     except AgentRunError:

@@ -110,6 +110,10 @@ Complete the first-party OAuth approval. The native login owns credential
 storage. The separate profile contains model settings, not credentials.
 `Select a model before continuing` can also mean the account is not available;
 it does not prove that the requested model name is wrong.
+When a ZCode turn fails with `project_token_login_failed`,
+`project_token_login_required`, or `Select a model before continuing`, Duet adds
+a `[duet] hint:` line to the error. The line points to the login command. Duet
+adds no hint for a timeout.
 
 ## Desktop CLI in a terminal
 

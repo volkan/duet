@@ -159,8 +159,52 @@ class ZCodeBackendTests(unittest.TestCase):
             with self.assertRaises(duet.AgentRunError) as caught:
                 self.invoke()
         self.assertEqual(duet.FINISHED_AGENT_ERROR, caught.exception.finished_reason)
+        self.assertIn("\n[duet] hint: ZCode has no usable model.", str(caught.exception))
         self.assertFalse(paths[0].exists())
         self.assertIsNone(self.agent.zcode_selection)
+
+    def test_login_failures_add_sign_in_hint(self):
+        for marker, expected in (("project_token_login_failed", "could not get a project token"),
+                                 ("project_token_login_required", "no stored login token"),
+                                 ("Select a model before continuing", "no usable model")):
+            with self.subTest(marker=marker), \
+                    mock.patch.object(duet, "_run", return_value=(1, "", f"Error: {marker}")):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+            message = str(caught.exception)
+            self.assertTrue(message.splitlines()[-1].startswith("[duet] hint: ZCode "), message)
+            self.assertIn(expected, message)
+            self.assertEqual("project_token_login_failed" == marker, "network" in message)
+            self.assertNotIn("/model", message)
+
+    def test_error_summary_with_marker_adds_hint_at_rc_zero(self):
+        summary = json.dumps({"sessionId": "sess_a", "response": "partial",
+                              "error": "project_token_login_required"})
+        with mock.patch.object(duet, "_run", return_value=(0, summary, "")):
+            with self.assertRaisesRegex(duet.AgentRunError, "failed turn\n\\[duet\\] hint: ZCode has no stored login"):
+                self.invoke()
+
+    def test_timeout_never_adds_login_hint(self):
+        with mock.patch.object(duet, "_run", return_value=(124, "", "project_token_login_failed")):
+            with self.assertRaises(duet.AgentRunError) as caught:
+                self.invoke()
+        self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_failure_without_marker_has_no_hint(self):
+        for result in ((1, "", "something else"), (0, "not json", "")):
+            with self.subTest(result=result), mock.patch.object(duet, "_run", return_value=result):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+                self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_two_markers_add_one_hint_line(self):
+        err = "project_token_login_required then project_token_login_failed"
+        with mock.patch.object(duet, "_run", return_value=(1, "", err)):
+            with self.assertRaises(duet.AgentRunError) as caught:
+                self.invoke()
+        message = str(caught.exception)
+        self.assertEqual(1, message.count("[duet] hint:"))
+        self.assertIn("could not get a project token", message)
 
     def test_timeout_has_the_existing_timeout_contract(self):
         with mock.patch.object(duet, "_run", return_value=(124, "", "timeout")):
