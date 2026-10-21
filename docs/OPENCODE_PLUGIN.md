@@ -175,6 +175,8 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
 `artifacts.transcript` file and the stderr log that it names.
+For `setup_error` or `kickoff_error`, there is no such block. Report the
+`[duet] ERROR:` line from the Duet process output.
 
 You can also list recent runs:
 
