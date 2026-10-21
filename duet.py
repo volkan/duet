@@ -2686,14 +2686,18 @@ def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
         path for folder in directories for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
 
 
-def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Path]) -> ValueError:
+def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Path],
+                          cwd: pathlib.Path, origin: Optional[pathlib.Path]) -> ValueError:
     paths = list(fingerprints)
     project_features = features_path if features_path in paths[1:] else None
     start = paths.index(project_features) + 1 if project_features else 1
     target = next((path for path in reversed(paths[start:]) if fingerprints[path] is None), None)
     document = '{"features": {"mcp": false}}'
-    action = (f"create {target} with exactly {document}" if target
-              else f"change {project_features or paths[-1]} to exactly {document}")
+    verb, path = ("create", target) if target else ("change", project_features or paths[-1])
+    if origin:
+        verb += " and commit"
+        path = origin / path.relative_to(pathlib.Path(os.path.abspath(cwd)))
+    action = f"{verb} {path} {'with' if target else 'to'} exactly {document}"
     folders = ", ".join(str(path.parent) for path in paths[1::2])
     return ValueError(
         f"ZCode review requires native features.mcp=false: {action}\n"
@@ -2706,7 +2710,8 @@ def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Pa
         "See docs/ZCODE.md#native-mcp-prerequisite.")
 
 
-def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
+def _zcode_permission_denials(cwd: pathlib.Path,
+                              origin: Optional[pathlib.Path] = None) -> tuple[list[str], dict]:
     denied = list(_ZCODE_REVIEW_DENIED_TOOLS)
     fingerprints = {}
     mcp_disabled = False
@@ -2748,7 +2753,7 @@ def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
         except (ValueError, AttributeError, TypeError):
             raise ValueError("Unsupported native ZCode permission configuration; refusing to replace it") from None
     if not mcp_disabled:
-        raise _zcode_mcp_gate_error(fingerprints, features_path)
+        raise _zcode_mcp_gate_error(fingerprints, features_path, cwd, origin)
     return list(dict.fromkeys(denied)), fingerprints
 
 
@@ -2843,7 +2848,8 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, timeout: int, dry: bool,
                reasoning: Optional[str] = None,
                stderr_log_path: Optional[pathlib.Path] = None,
-               pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+               pid_file_path: Optional[pathlib.Path] = None,
+               origin: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     selection = _zcode_requested_selection(agent, reasoning)
     pin = {"model": agent.model, "reasoning": reasoning}
     if dry:
@@ -2855,7 +2861,7 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     try:
         command, launch_env = _zcode_command()
         native_cwd = pathlib.Path(agent.cwd_override or cwd)
-        denied, permission_inputs = _zcode_permission_denials(native_cwd)
+        denied, permission_inputs = _zcode_permission_denials(native_cwd, origin)
         command += ["--cwd", str(native_cwd), "--mode", "plan",
                     "--workflow-mode", "disabled", "--json", "--no-color",
                     "--disallowed-tools", ",".join(denied)]
@@ -2886,11 +2892,16 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     return response, session
 
 
+def _zcode_worktree_origin(agent: Agent, cfg: DuetConfig) -> Optional[pathlib.Path]:
+    created = cfg.worktree and not cfg.worktree_path
+    return cfg.cwd if created and agent.cwd_override else None
+
+
 def _zcode_launch_check(agent: Agent, cfg: DuetConfig, native_cwd: Optional[pathlib.Path]) -> None:
     selection = _zcode_requested_selection(agent, effective_reasoning(agent, cfg.reasoning))
     _, launch_env = _zcode_command()
     if native_cwd:
-        _zcode_permission_denials(native_cwd)
+        _zcode_permission_denials(native_cwd, _zcode_worktree_origin(agent, cfg))
     with _zcode_peer_profile(selection, launch_env):
         pass
 
@@ -2917,7 +2928,8 @@ def _call_zcode_backend(agent: Agent, system_prompt: str, message: str,
                         reasoning: Optional[str]) -> tuple[str, Optional[str]]:
     return call_zcode(agent, system_prompt, message, cfg.cwd,
                       cfg.per_turn_timeout, cfg.dry_run, reasoning,
-                      stderr_log_path, pid_file_path)
+                      stderr_log_path, pid_file_path,
+                      _zcode_worktree_origin(agent, cfg))
 
 
 BACKENDS = {

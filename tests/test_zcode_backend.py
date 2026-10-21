@@ -9,6 +9,7 @@ import importlib.util
 import types
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -621,7 +622,7 @@ class ZCodeBackendTests(unittest.TestCase):
 
     def git(self, *args):
         subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
-                       cwd=self.cwd, check=True)
+                       cwd=self.cwd, check=True, capture_output=True)
 
     def git_repo_with_seed(self):
         self.git("init", "-q")
@@ -718,15 +719,49 @@ class ZCodeBackendTests(unittest.TestCase):
                                wraps=duet._zcode_permission_denials) as denials:
             context, failure = self.prepare(cfg)
         self.assertEqual(context.wt_path, pathlib.Path(self.agent.cwd_override))
-        self.assertEqual([mock.call(context.wt_path)], denials.call_args_list)
+        self.assertEqual([mock.call(context.wt_path, self.cwd)], denials.call_args_list)
         return failure
 
     def test_worktree_peer_mcp_is_checked_after_worktree_setup(self):
         self.git_repo_with_seed()
         failure = self.prepare_worktree_peer()
         self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
-        self.assertIn("agent glm", failure["error"])
-        self.assertIn("native features.mcp=false", failure["error"])
+        self.assertEqual(
+            "ZCode launch check failed for agent glm: ZCode review requires native features.mcp=false: "
+            f"create and commit {self.cwd / '.zcode/config.json'} with exactly "
+            '{"features": {"mcp": false}}', failure["error"])
+
+    def test_advised_file_committed_in_the_main_checkout_reaches_a_new_worktree(self):
+        self.git_repo_with_seed()
+        failure = self.prepare_worktree_peer()
+        advised = pathlib.Path(re.search(r"create and commit (\S+) with exactly", failure["error"]).group(1))
+        self.assertEqual(self.cwd / ".zcode/config.json", advised)
+        self.git("worktree", "remove", "--force", self.agent.cwd_override)
+        self.git("branch", "-D", failure["worktree_branch"])
+        self.agent.cwd_override = None
+        advised.parent.mkdir()
+        advised.write_text(json.dumps({"features": {"mcp": False}}))
+        self.git("add", str(advised))
+        self.git("commit", "-qm", "policy")
+        self.assertIsNone(self.prepare_worktree_peer())
+
+    def test_reused_worktree_keeps_the_plain_mcp_advice(self):
+        self.git_repo_with_seed()
+        worktree = self.cwd / "reused"
+        self.git("worktree", "add", "-b", "reused", str(worktree))
+        cfg = self.config(agents=[duet.Agent(name="gpt", backend="codex", role="reviewer"), self.agent],
+                          worktree_path=worktree)
+        context, failure = self.prepare(cfg)
+        self.assertIn(f"create {worktree.resolve() / '.zcode/config.json'} with exactly", failure["error"])
+        self.assertNotIn("commit", failure["error"])
+
+    def test_per_turn_gate_names_the_main_checkout_for_a_new_worktree(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        worktree = self.cwd / "wt"
+        (worktree / ".git").mkdir(parents=True)
+        with self.assertRaisesRegex(duet.AgentRunError, "create and commit " + re.escape(
+                str(self.cwd / ".zcode/config.json"))):
+            self.invoke(cwd=worktree, origin=self.cwd)
 
     def test_committed_mcp_file_reaches_the_worktree_peer(self):
         self.git_repo_with_seed()
@@ -742,7 +777,7 @@ class ZCodeBackendTests(unittest.TestCase):
                                wraps=duet._zcode_permission_denials) as denials:
             context, failure = self.prepare(cfg)
         self.assertIsNone(context.wt_path)
-        self.assertEqual([mock.call(self.cwd)], denials.call_args_list)
+        self.assertEqual([mock.call(self.cwd, None)], denials.call_args_list)
         self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
         self.assertIn("agent glm", failure["error"])
 
