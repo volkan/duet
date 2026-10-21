@@ -4375,12 +4375,14 @@ def _zcode_preflight_failure(cfg: DuetConfig, context: _RunContext, *,
     message = _zcode_preflight(cfg, worktree_ready=worktree_ready)
     if message is None:
         return None
-    return _launch_failure_state(
+    state = _launch_failure_state(
         cfg, reason=FINISHED_SETUP_ERROR, message=message,
         history=context.history, transcript_path=context.transcript_path,
         recap_path=context.recap_path, state_path=context.state_path,
         wt_path=context.wt_path, wt_branch=context.wt_branch,
     )
+    _print_worktree_notice(cfg, context.wt_path, context.wt_branch)
+    return state
 
 
 def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
@@ -4493,6 +4495,16 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     )
     _write_run_state(state_path, setup_state)
     return context, None
+
+
+def _print_worktree_notice(cfg: DuetConfig, wt_path: Optional[pathlib.Path],
+                           wt_branch: Optional[str]) -> None:
+    if wt_path:
+        print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
+              f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
+              f"        review: git -C {wt_path} diff HEAD\n"
+              f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
+              f"git -C {cfg.cwd} branch -D {wt_branch}")
 
 
 def run_duet(cfg: DuetConfig) -> dict:
@@ -4614,12 +4626,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         print(f"[duet] recap: {recap_path}")
     print(f"[duet] resumable session ids — "
           + ", ".join(f"{a.name}={a.session_id}" for a in cfg.agents if a.session_id))
-    if wt_path:
-        print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
-              f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
-              f"        review: git -C {wt_path} diff HEAD\n"
-              f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
-              f"git -C {cfg.cwd} branch -D {wt_branch}")
+    _print_worktree_notice(cfg, wt_path, wt_branch)
     return state
 
 

@@ -634,7 +634,8 @@ class ZCodeBackendTests(unittest.TestCase):
             for name in ("_install_sigint", "_install_sigterm", "_install_run_stop_signal",
                          "_register_run_in_home_index"):
                 stack.enter_context(mock.patch.object(duet, name))
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            self.stdout = io.StringIO()
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             return duet._prepare_run(cfg)
 
@@ -748,6 +749,11 @@ class ZCodeBackendTests(unittest.TestCase):
             "ZCode launch check failed for agent glm: ZCode review requires native features.mcp=false: "
             f"create and commit {self.cwd / '.zcode/config.json'} with exactly "
             '{"features": {"mcp": false}}', failure["error"])
+        worktree, branch = self.agent.cwd_override, failure["worktree_branch"]
+        self.assertTrue(pathlib.Path(worktree).is_dir())
+        self.assertIn(f"[duet] worktree left intact at {worktree} (branch {branch}).", self.stdout.getvalue())
+        self.assertIn(f"drop:   git -C {self.cwd} worktree remove {worktree} && "
+                      f"git -C {self.cwd} branch -D {branch}", self.stdout.getvalue())
 
     def test_advised_file_committed_in_the_main_checkout_reaches_a_new_worktree(self):
         self.git_repo_with_seed()
