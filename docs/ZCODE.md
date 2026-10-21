@@ -225,7 +225,9 @@ unrelated invalid field. Duet refuses that uncertain state instead of assuming
 MCP is disabled.
 
 When the check fails, the error names one file to create or change, and its
-exact content. A new Duet worktree contains only committed files. When Duet
+exact content. When the error says to change a file, the file then holds only
+this document, so other settings in it are lost. Move any that you need to
+another file first. A new Duet worktree contains only committed files. When Duet
 creates the worktree, the error names the file under the repository root of
 the main checkout and tells you to create and commit it. A reused `--worktree-path` worktree reads its own
 files.

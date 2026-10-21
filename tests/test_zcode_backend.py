@@ -529,6 +529,7 @@ class ZCodeBackendTests(unittest.TestCase):
                                  '{"features": {"mcp": false}}', message.splitlines()[0])
                 self.assertIn(f"{user}, then zcode.json and .zcode/config.json in each of these folders: "
                               f"{self.cwd}.", message)
+                self.assertEqual("create" in action, "are lost" not in message)
                 cfg = self.config()
                 self.assertIn(str(fix), duet._error_summary(
                     duet._zcode_preflight(cfg, worktree_ready=False), "setup_error"))
@@ -536,6 +537,23 @@ class ZCodeBackendTests(unittest.TestCase):
                 fix.write_text(minimal)
                 duet._zcode_permission_denials(self.cwd)
                 self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+
+    def test_mcp_gate_change_advice_warns_that_other_settings_are_lost(self):
+        project = self.cwd / "zcode.json"
+        nested = self.cwd / ".zcode/config.json"
+        nested.parent.mkdir()
+        for path in (project, nested):
+            path.write_text(json.dumps({"permission": {"disallowedTools": ["Read"]}}))
+        with self.assertRaises(ValueError) as caught:
+            duet._zcode_permission_denials(self.cwd)
+        lines = str(caught.exception).splitlines()
+        self.assertEqual(f"ZCode review requires native features.mcp=false: change {nested} to exactly "
+                         '{"features": {"mcp": false}}', lines[0])
+        self.assertIn(f"Other settings in {nested} are lost, so move any that you need to another file first.",
+                      lines[1])
+        nested.write_text(json.dumps({"features": {"mcp": False}}))
+        denied, _ = duet._zcode_permission_denials(self.cwd)
+        self.assertIn("Read", denied)
 
     def test_mcp_gate_advice_lists_every_folder_and_targets_the_deepest(self):
         (self.cwd / ".git").mkdir()
