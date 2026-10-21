@@ -275,6 +275,7 @@ and private credential-free provider profiles for model/effort. It supports
 account providers and read-only roles only. Keep its selection pin in
 `agent_state` and `_agents_from_state`; native resume cannot change it.
 The macOS fallback uses the installed desktop bundle through Node.js.
+A PATH link to the desktop `glm/zcode.cjs` uses that bundle's own catalog; a wrapper never does.
 Standalone login needs its own account identity binding. Host skill
 installation and desktop worker capabilities do not prove this binding.
 See [ZCode](docs/ZCODE.md) for limits, setup, and required live checks.

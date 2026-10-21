@@ -2503,8 +2503,11 @@ def _zcode_command() -> tuple[list[str], dict[str, str]]:
         source = os.environ.get(key, "").strip()
         if not source:
             directory = pathlib.Path(cli).resolve().parent
-            candidates = (directory / "provider/zcode-builtin.json",
-                          (directory / "../../../../../config/provider/zcode-builtin.json").resolve())
+            candidates = [directory / "provider/zcode-builtin.json"]
+            if directory.name == "glm":
+                # Only the desktop bundle layout (resources/glm beside resources/config) may use a sibling catalog.
+                candidates.append(directory.parent / "config/provider/zcode-builtin.json")
+            candidates.append((directory / "../../../../../config/provider/zcode-builtin.json").resolve())
             source = next((str(path) for path in candidates if path.is_file()), "")
         if not source:
             raise ValueError("Cannot locate the PATH ZCode CLI's catalog; set "

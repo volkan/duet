@@ -120,7 +120,20 @@ Node.js. Bun cannot load it and fails with `No such built-in module: node:sea`.
 The desktop bundle has no terminal UI. With no command, it fails with
 `Cannot find package '@zcode/tui'`. Use it for commands such as `-p`, `login`,
 `logout`, `doctor`, and `app-server`. A terminal UI needs another ZCode
-installation. For terminal use, put this wrapper on PATH as `zcode`:
+installation.
+
+For headless use and for Duet, link the desktop entry file as `zcode` on PATH.
+This needs Node.js on PATH. The link command fails if the file exists.
+
+```bash
+ln -s /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ~/.local/bin/zcode
+```
+
+Duet follows the link to the same bundle and uses the catalog of that bundle.
+It needs no variable.
+
+If another installation supplies the terminal UI, do not link the desktop
+entry file. Put a wrapper on PATH as `zcode` instead:
 
 ```sh
 #!/usr/bin/env sh
@@ -185,6 +198,7 @@ remote catalog refresh for the child. Native fallback cannot select another mode
 An explicit effort also narrows the selected model to that validated level.
 Native resume then rejects an externally changed effort instead of using it.
 The macOS runtime supplies its builtin catalog. PATH CLI installations use their own bundled catalog.
+A PATH link to the desktop entry file uses the catalog of that desktop bundle.
 An explicit `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` overrides discovery.
 A self-contained executable or wrapper without an accessible bundled catalog needs this variable on the Duet command only:
 
