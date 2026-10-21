@@ -141,12 +141,20 @@ Duet follows the link to the same bundle and uses the catalog of that bundle.
 It needs no variable.
 
 If another installation supplies the terminal UI, do not link the desktop
-entry file. Put a wrapper on PATH as `zcode` instead:
+entry file. Put a wrapper on PATH as `zcode` that selects between the
+installations:
 
 ```sh
 #!/usr/bin/env sh
-exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"
+case "${1-}" in
+  ""|tui) exec /path/to/other/zcode "$@" ;;
+  *) exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@" ;;
+esac
 ```
+
+The terminal UI goes to the other installation. Headless commands, which are
+the commands that Duet runs, go to the desktop CLI. The catalog variable on the
+Duet command therefore names the desktop catalog.
 
 Duet uses `zcode` from PATH first. It finds the catalog only through the real
 executable path. A wrapper script hides that path, and Duet then fails with
