@@ -80,6 +80,9 @@ For different reasoning per peer, use a JSON config:
 This example names the Z.ai Individual provider. Use the native provider ID
 for the connected account. Model access and supported reasoning levels remain
 ZCode's responsibility; an unavailable selection must fail, not change providers.
+The error for an unsupported reasoning level lists the supported levels. A
+run-level `--reasoning` applies to both agents. To give one agent another level,
+set its `reasoning_effort` in a `--config` file.
 
 ## Account initialization
 

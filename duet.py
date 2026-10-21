@@ -2581,6 +2581,21 @@ def _zcode_resolved_provider(config: dict, provider: dict) -> dict:
     return resolved
 
 
+def _zcode_reasoning_error(selection: dict, requested: str, levels: list[str]) -> ValueError:
+    head = ("Requested ZCode reasoning level is absent from its native model catalog: "
+            f"{requested} for {selection['providerId']}/{selection['modelId']}.")
+    if levels:
+        return ValueError(
+            f"{head} Supported levels: {', '.join(levels)}.\n"
+            "A run-level --reasoning applies to both agents. To give this agent a supported level, "
+            "set its reasoning_effort in a --config file. See docs/ZCODE.md#native-review-peer.")
+    return ValueError(
+        f"{head} The catalog lists no reasoning levels for this model.\n"
+        "Do not set reasoning for this agent. A run-level --reasoning applies to both agents, "
+        "so set reasoning_effort only for the other agent in a --config file. "
+        "See docs/ZCODE.md#native-review-peer.")
+
+
 def _zcode_catalog(selection: dict, launch_env: dict[str, str]) -> dict:
     source = launch_env.get("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE") or os.environ.get(
         "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")
@@ -2600,7 +2615,7 @@ def _zcode_catalog(selection: dict, launch_env: dict[str, str]) -> dict:
     levels = _zcode_catalog_reasoning(config["modelConfigRules"], provider, selection["modelId"])
     requested = selection.get("options", {}).get("reasoningLevel")
     if requested is not None and requested not in levels:
-        raise ValueError("Requested ZCode reasoning level is absent from its native model catalog")
+        raise _zcode_reasoning_error(selection, requested, levels)
     return data
 
 

@@ -240,9 +240,14 @@ class ZCodeBackendTests(unittest.TestCase):
     def test_invalid_catalog_selection_never_starts_a_model(self):
         for level in ("minimal", "medium", "xhigh"):
             with self.subTest(level=level), mock.patch.object(duet, "_run") as run:
-                with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent"):
+                with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent") as caught:
                     self.invoke(reasoning=level)
                 run.assert_not_called()
+            message = str(caught.exception)
+            self.assertIn(f"catalog: {level} for account:zai-individual-coding-plan/GLM-5.3. "
+                          "Supported levels: low, high, max.\n", message)
+            self.assertIn("set its reasoning_effort in a --config file", message)
+            self.assertIn("docs/ZCODE.md#native-review-peer", message)
         self.agent.model = "account:zai-individual-coding-plan/missing-model"
         with mock.patch.object(duet, "_run") as run:
             with self.assertRaisesRegex(duet.AgentRunError, "account model is absent"):
@@ -440,9 +445,15 @@ class ZCodeBackendTests(unittest.TestCase):
             "config": {"optionSpecs": {"reasoningLevel": None}}}]
         self.catalog.write_text(json.dumps(data))
         with mock.patch.object(duet, "_run") as run:
-            with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent"):
+            with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent") as caught:
                 self.invoke()
             run.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("catalog: max for account:zai-individual-coding-plan/GLM-5.3. "
+                      "The catalog lists no reasoning levels for this model.\n", message)
+        self.assertIn("Do not set reasoning for this agent.", message)
+        self.assertIn("set reasoning_effort only for the other agent in a --config file", message)
+        self.assertNotIn("Supported levels", message)
 
     def test_native_null_reasoning_values_clear_inherited_levels(self):
         provider = {"providerId": "account:a", "config": {}}
