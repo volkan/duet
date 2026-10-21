@@ -19,12 +19,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # duet targets Python 3.9+. Pin the floor, a mid, and a recent release.
+        # duet targets Python 3.9+. Test a mid and a recent release here; the 3.9 floor is in include.
         python-version: ["3.11", "3.13"]
         os: [ubuntu-latest]
         include:
-          # Workaround: ubuntu-26.04 (ubuntu-latest) has no Python 3.9 build.
-          # Proper fix: drop Python 3.9 support, then run all entries on ubuntu-latest.
+          # Workaround: ubuntu-26.04 (ubuntu-latest) has no Python 3.9 build. GitHub will
+          # retire ubuntu-24.04, which breaks this pin. Proper fix: drop Python 3.9 support.
           - python-version: "3.9"
             os: ubuntu-24.04
     steps:
