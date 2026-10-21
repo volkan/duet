@@ -334,6 +334,24 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertEqual([str(link)], command)
         self.assertEqual(str(catalog.resolve()), env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"])
 
+    def test_other_entry_in_a_glm_folder_does_not_use_the_sibling_catalog(self):
+        self.launch.stop()
+        resources = self.cwd / "Resources"
+        entry = resources / "glm/other.cjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("// other entry")
+        catalog = resources / "config/provider/zcode-builtin.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(self.catalog.read_text())
+        link = self.cwd / "bin/zcode"
+        link.parent.mkdir()
+        link.symlink_to(entry)
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(link)), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+                duet._zcode_command()
+
     def test_wrapper_beside_a_config_folder_does_not_use_it(self):
         self.launch.stop()
         wrapper = self.cwd / "install/bin/zcode"
