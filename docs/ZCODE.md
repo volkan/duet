@@ -129,21 +129,27 @@ exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"
 
 Duet uses `zcode` from PATH first. It finds the catalog only through the real
 executable path. A wrapper script hides that path, and Duet then fails with
-`Cannot locate the PATH ZCode CLI's catalog`. With such a wrapper, export this
-variable in the shell that runs Duet:
+`Cannot locate the PATH ZCode CLI's catalog`. With such a wrapper, set this
+variable on the Duet command only:
 
 ```bash
-export ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json \
+  duet --lead zcode:reviewer ...
 ```
 
-Without `zcode` on PATH, Duet uses the desktop runtime directly and needs no
-variable.
+Use the catalog of the installation that runs headless calls. A wrapper can
+send other commands, for example the terminal UI, to another installation. An
+exported variable also reaches that installation, which then reads a catalog
+that is not its own.
+
+On macOS, if `zcode` is not on PATH, Duet runs the desktop CLI through Node.js
+and needs no variable.
 
 The desktop app and the CLI read the same credential store,
 `~/.zcode/v2/credentials.json`. The CLI login adds its account identity to that
 store. For the login command, see [account initialization](#account-initialization).
-`zcode logout` removes the shared login credentials, so it also affects the
-desktop app. Do not copy tokens between installations.
+The help text of `zcode logout` is "Remove the shared Z.AI login credentials".
+Do not copy tokens between installations.
 
 Check the CLI with these commands:
 
@@ -156,12 +162,15 @@ zcode -p 'Reply with OK.' --mode plan
 this check.
 
 Before the model request, the CLI sends the stored login token to the account
-service to get a project token. The error `project_token_login_failed` means
-this step did not return a project token. The service rejected the stored
-token, or the CLI could not reach the service. The error
-`project_token_login_required` means no login token is stored. For either
-error, make sure that the network is available. Then run the login command from
-[account initialization](#account-initialization) again, and repeat the check.
+service to get a project token. Two errors can come from this step:
+
+- `project_token_login_required`: the credential store has no login token or
+  no account identity. Run the login command from
+  [account initialization](#account-initialization), then repeat the check.
+- `project_token_login_failed`: this step did not return a project token. The
+  service rejected the stored token, or the CLI could not reach the service.
+  Make sure that the network is available. Then log in again and repeat the
+  check.
 
 ## Session and safety contract
 
@@ -177,13 +186,13 @@ An explicit effort also narrows the selected model to that validated level.
 Native resume then rejects an externally changed effort instead of using it.
 The macOS runtime supplies its builtin catalog. PATH CLI installations use their own bundled catalog.
 An explicit `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` overrides discovery.
-A self-contained executable or wrapper without an accessible bundled catalog needs this variable:
+A self-contained executable or wrapper without an accessible bundled catalog needs this variable on the Duet command only:
 
 ```bash
-export ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/provider/zcode-builtin.json
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/provider/zcode-builtin.json duet ...
 ```
 
-Use the public JSON catalog from that CLI installation. A PATH CLI never borrows the desktop installation's catalog.
+Use the public JSON catalog from the installation that runs headless calls. A PATH CLI never borrows the desktop installation's catalog.
 
 Native plan mode allows some MCP tools that do not declare themselves
 destructive, including tools with missing annotations. It is not a read-only
