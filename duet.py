@@ -2823,6 +2823,30 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     return response, session
 
 
+def _zcode_launch_check(agent: Agent, cfg: DuetConfig, native_cwd: Optional[pathlib.Path]) -> None:
+    selection = _zcode_requested_selection(agent, effective_reasoning(agent, cfg.reasoning))
+    _, launch_env = _zcode_command()
+    if native_cwd:
+        _zcode_permission_denials(native_cwd)
+    with _zcode_peer_profile(selection, launch_env):
+        pass
+
+
+def _zcode_preflight(cfg: DuetConfig, *, worktree_ready: bool) -> Optional[str]:
+    if cfg.dry_run:
+        return None
+    deferred = _worktree_agent_index(cfg) if cfg.worktree or cfg.worktree_path else -1
+    for index, agent in enumerate(cfg.agents):
+        if agent.backend != "zcode" or (worktree_ready and index != deferred):
+            continue
+        native_cwd = None if index == deferred and not worktree_ready else pathlib.Path(agent.cwd_override or cfg.cwd)
+        try:
+            _zcode_launch_check(agent, cfg, native_cwd)
+        except Exception as exc:
+            return f"ZCode launch check failed for agent {agent.name}: {exc}"
+    return None
+
+
 def _call_zcode_backend(agent: Agent, system_prompt: str, message: str,
                         cfg: DuetConfig, first_turn: bool,
                         stderr_log_path: Optional[pathlib.Path],
@@ -3260,6 +3284,10 @@ def _worktree_setup_failed(cfg: DuetConfig, message: str) -> None:
           file=sys.stderr)
 
 
+def _worktree_agent_index(cfg: DuetConfig) -> int:
+    return {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
+
+
 def _setup_run_worktree(
     cfg: DuetConfig, run_id: str, run_dir: pathlib.Path,
 ) -> tuple[Optional[pathlib.Path], Optional[str]]:
@@ -3272,7 +3300,7 @@ def _setup_run_worktree(
     with a durable setup failure. A failed *create* still reports the intended
     branch name, matching the pre-extraction behavior.
     """
-    wt_idx = {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
+    wt_idx = _worktree_agent_index(cfg)
     if cfg.worktree_path:
         existing = pathlib.Path(cfg.worktree_path).expanduser().resolve()
         if not existing.is_dir():
@@ -4266,6 +4294,19 @@ def _print_run_banner(cfg: DuetConfig, context: _RunContext) -> None:
               f"{cfg.agents[0].session_id}")
 
 
+def _zcode_preflight_failure(cfg: DuetConfig, context: _RunContext, *,
+                             worktree_ready: bool) -> Optional[dict]:
+    message = _zcode_preflight(cfg, worktree_ready=worktree_ready)
+    if message is None:
+        return None
+    return _launch_failure_state(
+        cfg, reason=FINISHED_SETUP_ERROR, message=message,
+        history=context.history, transcript_path=context.transcript_path,
+        recap_path=context.recap_path, state_path=context.state_path,
+        wt_path=context.wt_path, wt_branch=context.wt_branch,
+    )
+
+
 def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     """Allocate, publish launch metadata, isolate, and run deferred kickoff."""
     _validate_run_info_target(cfg)
@@ -4326,6 +4367,9 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
         return context, state
 
     _print_run_banner(cfg, context)
+    failure = _zcode_preflight_failure(cfg, context, worktree_ready=False)
+    if failure is not None:
+        return context, failure
     _probe_run_metrics(cfg)
     failure = _run_kickoff_command(
         cfg, run_dir=run_dir, transcript_path=transcript_path,
@@ -4362,6 +4406,9 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
         )
         return context, state
 
+    failure = _zcode_preflight_failure(cfg, context, worktree_ready=True)
+    if failure is not None:
+        return context, failure
     setup_state = _build_run_state(
         cfg, turns_used=0, history=history, finished_reason=None,
         transcript_path=transcript_path, recap_path=recap_path,
@@ -8003,14 +8050,9 @@ def _validate_ready_config(cfg: DuetConfig,
 def _warn_missing_backends(cfg: DuetConfig) -> None:
     if cfg.dry_run:
         return
-    for backend in {a.backend for a in cfg.agents}:
+    # The ZCode launch check reports the real ZCode error.
+    for backend in {a.backend for a in cfg.agents} - {"zcode"}:
         binary = backend_adapter(backend).binary
-        if backend == "zcode":
-            try:
-                _zcode_command()
-                continue
-            except ValueError:
-                pass
         if shutil.which(binary) is None:
             print(
                 f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "

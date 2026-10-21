@@ -234,6 +234,10 @@ coder roles, custom API providers, `extra_args`,
 untracked sessions, and model/effort changes on resume. Complete the real
 affected-backend loop before reporting ZCode integration verified.
 
+Duet checks each ZCode peer before the first agent call. A failed check ends
+the run with `setup_error`. Report the `[duet] ERROR:` text to the user. It
+names the agent and the fix.
+
 ## Model selection
 
 Use `--lead-model` for the declared lead and `--partner-model` for the

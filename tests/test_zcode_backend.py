@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import importlib.util
 import types
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -488,6 +491,178 @@ class ZCodeBackendTests(unittest.TestCase):
         restored = duet._agents_from_state({"agents": [state, partner]},
                                             argparse.ArgumentParser(), "--continue")[0]
         self.assertEqual(self.agent.zcode_selection, restored.zcode_selection)
+
+    def config(self, agents=None, **overrides):
+        partner = duet.Agent(name="gpt", backend="codex", role="reviewer")
+        args = dict(cwd=self.cwd, agents=agents or [self.agent, partner], reasoning="max",
+                    runs_dir=self.cwd / "runs", metrics_enabled=False)
+        args.update(overrides)
+        return duet.DuetConfig(**args)
+
+    def prepare(self, cfg):
+        with contextlib.ExitStack() as stack:
+            for name in ("_install_sigint", "_install_sigterm", "_install_run_stop_signal",
+                         "_register_run_in_home_index"):
+                stack.enter_context(mock.patch.object(duet, name))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            return duet._prepare_run(cfg)
+
+    def git(self, *args):
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+                       cwd=self.cwd, check=True)
+
+    def git_repo_with_seed(self):
+        self.git("init", "-q")
+        (self.cwd / "seed.txt").write_text("seed\n")
+        self.git("add", "seed.txt")
+        self.git("commit", "-qm", "seed")
+
+    def test_launch_check_uses_the_per_turn_predicate(self):
+        prefix = "ZCode launch check failed for agent glm: "
+        catalog_text = self.catalog.read_text()
+        model = self.agent.model
+
+        def broken_template():
+            data = json.loads(catalog_text)
+            data["config"]["providerConfigRules"]["providerRules"][1]["templateId"] = "missing"
+            self.catalog.write_text(json.dumps(data))
+
+        def set_model(value):
+            return lambda: setattr(self.agent, "model", value)
+
+        cases = [
+            ("passes", "max", lambda: None, None),
+            ("mcp file is empty", "max", lambda: (self.cwd / "zcode.json").write_text("{}"), None),
+            ("level is absent", "xhigh", lambda: None, None),
+            ("model is not in the catalog", "max",
+             set_model("account:zai-individual-coding-plan/missing-model"), None),
+            ("model ID is missing", "max", set_model(None), None),
+            ("template is broken on another provider", "max", broken_template, None),
+            ("runtime is missing", "max", lambda: None, ValueError("no ZCode runtime")),
+        ]
+        for name, reasoning, change, command_error in cases:
+            with self.subTest(case=name):
+                self.catalog.write_text(catalog_text)
+                (self.cwd / "zcode.json").write_text(json.dumps({"features": {"mcp": False}}))
+                self.agent.model = model
+                change()
+                cfg = self.config(reasoning=reasoning)
+                with contextlib.ExitStack() as stack:
+                    run = stack.enter_context(mock.patch.object(duet, "_run", return_value=self.result()))
+                    if command_error:
+                        stack.enter_context(mock.patch.object(duet, "_zcode_command", side_effect=command_error))
+                    preflight = duet._zcode_preflight(cfg, worktree_ready=False)
+                    run.assert_not_called()
+                    try:
+                        self.invoke(reasoning=reasoning)
+                        turn_error = None
+                    except (duet.AgentRunError, ValueError) as exc:
+                        turn_error = str(exc)
+                        run.assert_not_called()
+                if turn_error is None:
+                    self.assertIsNone(preflight)
+                else:
+                    self.assertTrue(preflight.startswith(prefix), preflight)
+                    self.assertEqual(turn_error.removeprefix("ZCode invocation failed: "),
+                                     preflight[len(prefix):])
+
+    def test_launch_check_stops_before_kickoff_and_first_turn(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        info = self.cwd / "run.json"
+        cfg = self.config(task_from_cmd="printf seed", run_info_file=info)
+        with mock.patch.object(duet, "run_task_from_cmd", side_effect=AssertionError("kickoff ran")) as kickoff, \
+                mock.patch.object(duet, "call_agent", side_effect=AssertionError("turn ran")) as turn, \
+                mock.patch.object(duet, "_install_sigint"), mock.patch.object(duet, "_install_sigterm"), \
+                mock.patch.object(duet, "_install_run_stop_signal"), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            state = duet.run_duet(cfg)
+        kickoff.assert_not_called()
+        turn.assert_not_called()
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, state["finished_reason"])
+        self.assertEqual("finished", state["phase"])
+        self.assertEqual(0, state["turns_used"])
+        self.assertTrue(state["error"].startswith("ZCode launch check failed for agent glm: "))
+        self.assertIn("native features.mcp=false", state["error"])
+        self.assertIn("[duet] ERROR: ZCode launch check failed for agent glm", stderr.getvalue())
+        run_info = json.loads(info.read_text())
+        self.assertEqual(1, run_info["schema_version"])
+        status = duet.build_run_status(run_info["run_dir"])
+        self.assertEqual(("terminal", 0), (status["health"], status["exit_code"]))
+        self.assertEqual("run finished with setup_error; inspect artifacts", status["error"])
+
+    def test_dry_run_skips_launch_check(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        cfg = self.config(dry_run=True)
+        with mock.patch.object(duet, "_zcode_launch_check", side_effect=AssertionError("checked")) as check:
+            self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+        check.assert_not_called()
+
+    def prepare_worktree_peer(self):
+        lead = duet.Agent(name="gpt", backend="codex", role="reviewer")
+        cfg = self.config(agents=[lead, self.agent], worktree=True, require_worktree=True)
+        with mock.patch.object(duet, "_zcode_permission_denials",
+                               wraps=duet._zcode_permission_denials) as denials:
+            context, failure = self.prepare(cfg)
+        self.assertEqual(context.wt_path, pathlib.Path(self.agent.cwd_override))
+        self.assertEqual([mock.call(context.wt_path)], denials.call_args_list)
+        return failure
+
+    def test_worktree_peer_mcp_is_checked_after_worktree_setup(self):
+        self.git_repo_with_seed()
+        failure = self.prepare_worktree_peer()
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
+        self.assertIn("agent glm", failure["error"])
+        self.assertIn("native features.mcp=false", failure["error"])
+
+    def test_committed_mcp_file_reaches_the_worktree_peer(self):
+        self.git_repo_with_seed()
+        self.git("add", "zcode.json")
+        self.git("commit", "-qm", "policy")
+        self.assertIsNone(self.prepare_worktree_peer())
+
+    def test_worktree_fallback_checks_the_main_checkout(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        cfg = self.config(worktree=True)
+        cfg.agents.reverse()
+        with mock.patch.object(duet, "_zcode_permission_denials",
+                               wraps=duet._zcode_permission_denials) as denials:
+            context, failure = self.prepare(cfg)
+        self.assertIsNone(context.wt_path)
+        self.assertEqual([mock.call(self.cwd)], denials.call_args_list)
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
+        self.assertIn("agent glm", failure["error"])
+
+    def test_launch_check_names_the_failed_agent_in_two_zcode_configs(self):
+        other = duet.Agent(name="other", backend="zcode", role="reviewer",
+                           model="account:zai-individual-coding-plan/missing-model")
+        cfg = self.config(agents=[self.agent, other])
+        self.assertIn("agent other: Requested ZCode account model is absent",
+                      duet._zcode_preflight(cfg, worktree_ready=False))
+        self.agent.model = "account:zai-individual-coding-plan/also-missing"
+        self.assertIn("agent glm: Requested ZCode account model is absent",
+                      duet._zcode_preflight(cfg, worktree_ready=False))
+
+    def test_launch_check_keeps_resume_state(self):
+        pin = {"model": self.agent.model, "reasoning": "max"}
+        self.agent.session_id = "sess_abc"
+        self.agent.zcode_selection = dict(pin)
+        cfg = self.config()
+        self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+        self.assertEqual(("sess_abc", pin), (self.agent.session_id, self.agent.zcode_selection))
+        self.agent.zcode_selection = {"model": self.agent.model, "reasoning": "high"}
+        self.assertIn("original model/effort pin", duet._zcode_preflight(cfg, worktree_ready=False))
+        self.assertEqual("sess_abc", self.agent.session_id)
+
+    def test_missing_backend_warning_leaves_zcode_to_launch_check(self):
+        with mock.patch.object(duet.shutil, "which", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            duet._warn_missing_backends(self.config())
+        duet._zcode_command.assert_not_called()
+        self.assertIn("'codex' not on PATH", stderr.getvalue())
+        self.assertNotIn("zcode", stderr.getvalue())
 
     def test_dry_run_does_not_start_zcode(self):
         with mock.patch.object(duet, "_run") as run:

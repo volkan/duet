@@ -185,6 +185,24 @@ service to get a project token. Two errors can come from this step:
   Make sure that the network is available. Then log in again and repeat the
   check.
 
+## Launch check
+
+Before the first agent call, Duet checks each ZCode peer. The check repeats
+the local checks of each turn:
+
+- the role and the model ID;
+- the ZCode runtime;
+- the MCP prerequisite;
+- the native catalog, with the requested reasoning level.
+
+The check makes no model call. It runs before a configured kickoff command. For
+a peer in a new worktree, the MCP prerequisite is checked after the worktree
+exists. The kickoff command runs before that, so this failure appears after the
+kickoff.
+
+A failed check ends the run with `setup_error` and exit code 1. The error names
+the agent and the fix. `--dry-run` skips the check. Each turn repeats it.
+
 ## Session and safety contract
 
 Headless ZCode has no model/effort CLI flags. Duet supplies the requested
