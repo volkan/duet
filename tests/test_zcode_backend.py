@@ -801,6 +801,23 @@ class ZCodeBackendTests(unittest.TestCase):
                 str(self.cwd / ".zcode/config.json"))):
             self.invoke(cwd=worktree, origin=self.cwd)
 
+    def test_turn_backend_passes_the_main_checkout_for_a_new_worktree(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        worktree = self.cwd / "wt"
+        (worktree / ".git").mkdir(parents=True)
+        self.agent.cwd_override = worktree
+        cfg = self.config(worktree=True)
+        with mock.patch.object(duet, "_run") as run:
+            with self.assertRaisesRegex(duet.AgentRunError, "create and commit " + re.escape(
+                    str(self.cwd / ".zcode/config.json"))):
+                duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
+            run.assert_not_called()
+        cfg.worktree_path = worktree
+        with mock.patch.object(duet, "_run") as run:
+            with self.assertRaisesRegex(duet.AgentRunError, "create " + re.escape(
+                    str(worktree / ".zcode/config.json"))):
+                duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
+
     def test_committed_mcp_file_reaches_the_worktree_peer(self):
         self.git_repo_with_seed()
         self.git("add", "zcode.json")
