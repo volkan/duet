@@ -542,8 +542,8 @@ class ZCodeBackendTests(unittest.TestCase):
         project = self.cwd / "zcode.json"
         nested = self.cwd / ".zcode/config.json"
         nested.parent.mkdir()
-        for path in (project, nested):
-            path.write_text(json.dumps({"permission": {"disallowedTools": ["Read"]}}))
+        for path, rule in ((project, "Read"), (nested, "Grep")):
+            path.write_text(json.dumps({"permission": {"disallowedTools": [rule]}}))
         with self.assertRaises(ValueError) as caught:
             duet._zcode_permission_denials(self.cwd)
         lines = str(caught.exception).splitlines()
@@ -554,6 +554,7 @@ class ZCodeBackendTests(unittest.TestCase):
         nested.write_text(json.dumps({"features": {"mcp": False}}))
         denied, _ = duet._zcode_permission_denials(self.cwd)
         self.assertIn("Read", denied)
+        self.assertNotIn("Grep", denied)
 
     def test_mcp_gate_advice_lists_every_folder_and_targets_the_deepest(self):
         (self.cwd / ".git").mkdir()
@@ -812,11 +813,13 @@ class ZCodeBackendTests(unittest.TestCase):
                     str(self.cwd / ".zcode/config.json"))):
                 duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
             run.assert_not_called()
+        cfg.worktree = False
         cfg.worktree_path = worktree
         with mock.patch.object(duet, "_run") as run:
             with self.assertRaisesRegex(duet.AgentRunError, "create " + re.escape(
                     str(worktree / ".zcode/config.json"))):
                 duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
+            run.assert_not_called()
 
     def test_committed_mcp_file_reaches_the_worktree_peer(self):
         self.git_repo_with_seed()
