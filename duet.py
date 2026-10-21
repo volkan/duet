@@ -2495,6 +2495,25 @@ _ZCODE_REVIEW_DENIED_TOOLS = CLAUDE_DENIED_DELEGATION_TOOLS + (
 )
 
 
+def _zcode_missing_catalog_error(cli: str) -> ValueError:
+    example = "  ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/path/to/that/installation/zcode-builtin.json duet ..."
+    head = "Cannot locate the PATH ZCode CLI's catalog"
+    if os.path.islink(cli):
+        lines = [f"{head}: no catalog is in a known place for its entry file {pathlib.Path(cli).resolve()}.",
+                 "Set the catalog on the Duet command only, to that installation's JSON catalog:", example]
+    else:
+        lines = [f"{head}: {cli} is not a link to a ZCode entry file, for example because it is a wrapper script.",
+                 f"If {cli} runs one ZCode installation, replace it with a symbolic link to that installation's entry file.",
+                 "If it selects between installations or is a self-contained executable, set the catalog on the "
+                 "Duet command only, for the installation that runs headless calls:", example]
+        desktop = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"
+        if sys.platform == "darwin" and desktop.is_file():
+            lines.append(f"If that installation is the macOS desktop app, its catalog is {desktop}.")
+    lines.append("Do not export the variable in a shell where a wrapper selects between installations. "
+                 "Duet never uses another installation's catalog. See docs/ZCODE.md#desktop-cli-in-a-terminal.")
+    return ValueError("\n".join(lines))
+
+
 def _zcode_command() -> tuple[list[str], dict[str, str]]:
     """Use the official CLI, or the installed macOS app's headless runtime."""
     cli = shutil.which("zcode")
@@ -2510,8 +2529,7 @@ def _zcode_command() -> tuple[list[str], dict[str, str]]:
             candidates.append((directory / "../../../../../config/provider/zcode-builtin.json").resolve())
             source = next((str(path) for path in candidates if path.is_file()), "")
         if not source:
-            raise ValueError("Cannot locate the PATH ZCode CLI's catalog; set "
-                             "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE to that installation's JSON catalog")
+            raise _zcode_missing_catalog_error(cli)
         return [cli], {key: source}
     entry = _ZCODE_DESKTOP_RESOURCES / "glm" / "zcode.cjs"
     builtin = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"

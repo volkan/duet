@@ -304,11 +304,40 @@ class ZCodeBackendTests(unittest.TestCase):
         entry = desktop / "glm/zcode.cjs"
         entry.parent.mkdir()
         entry.write_text("// desktop entry")
-        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", desktop), \
-                mock.patch.object(duet.shutil, "which", return_value=str(self.cwd / "cli/zcode")), \
+        wrapper = self.cwd / "cli/zcode"
+        wrapper.parent.mkdir()
+        wrapper.write_text("#!/bin/sh\n")
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", desktop), \
+                        mock.patch.object(duet.sys, "platform", platform), \
+                        mock.patch.object(duet.shutil, "which", return_value=str(wrapper)), \
+                        mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+                    with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog") as caught:
+                        duet._zcode_command()
+                message = str(caught.exception)
+                self.assertIn("symbolic link", message)
+                self.assertIn("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=", message)
+                self.assertEqual(platform == "darwin", str(catalog) in message)
+
+    def test_linked_cli_without_catalog_names_its_entry_file(self):
+        self.launch.stop()
+        entry = self.cwd / "native/zcode.cjs"
+        entry.parent.mkdir()
+        entry.write_text("// native entry")
+        link = self.cwd / "bin/zcode"
+        link.parent.mkdir()
+        link.symlink_to(entry)
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(link)), \
                 mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
-            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog") as caught:
                 duet._zcode_command()
+        message = str(caught.exception)
+        self.assertIn(str(entry.resolve()), message)
+        self.assertIn("no catalog is in a known place", message)
+        self.assertIn("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=", message)
+        self.assertNotIn("symbolic link", message)
 
     def test_catalog_snapshot_freezes_validation_and_disables_remote_refresh(self):
         before = json.loads(self.catalog.read_text())

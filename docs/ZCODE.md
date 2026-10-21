@@ -142,8 +142,8 @@ exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"
 
 Duet uses `zcode` from PATH first. It finds the catalog only through the real
 executable path. A wrapper script hides that path, and Duet then fails with
-`Cannot locate the PATH ZCode CLI's catalog`. With such a wrapper, set this
-variable on the Duet command only:
+`Cannot locate the PATH ZCode CLI's catalog`. The error text names two fixes:
+replace the wrapper with a link, or set this variable on the Duet command only:
 
 ```bash
 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json \
