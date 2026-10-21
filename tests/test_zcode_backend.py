@@ -857,6 +857,16 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
         self.assertIn("agent glm", failure["error"])
 
+    def test_peer_in_the_main_checkout_is_checked_only_before_the_kickoff(self):
+        (self.cwd / "zcode.json").unlink()
+        cfg = self.config(worktree=True)
+        failure = duet._zcode_preflight(cfg, worktree_ready=False)
+        self.assertIn("ZCode launch check failed for agent glm: ZCode review requires native "
+                      f"features.mcp=false: create {self.cwd / '.zcode/config.json'} with exactly", failure)
+        with mock.patch.object(duet, "_zcode_permission_denials") as denials:
+            self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=True))
+        denials.assert_not_called()
+
     def test_launch_check_names_the_failed_agent_in_two_zcode_configs(self):
         other = duet.Agent(name="other", backend="zcode", role="reviewer",
                            model="account:zai-individual-coding-plan/missing-model")
