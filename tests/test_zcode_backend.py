@@ -724,9 +724,10 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertEqual(("terminal", 0), (status["health"], status["exit_code"]))
         self.assertEqual("run finished with setup_error; inspect artifacts", status["error"])
 
-    def prepare_worktree_peer(self):
+    def prepare_worktree_peer(self, cwd=None):
         lead = duet.Agent(name="gpt", backend="codex", role="reviewer")
-        cfg = self.config(agents=[lead, self.agent], worktree=True, require_worktree=True)
+        cfg = self.config(agents=[lead, self.agent], worktree=True, require_worktree=True,
+                          cwd=cwd or self.cwd)
         with mock.patch.object(duet, "_zcode_permission_denials",
                                wraps=duet._zcode_permission_denials) as denials:
             context, failure = self.prepare(cfg)
@@ -748,9 +749,11 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertIn(f"drop:   git -C {self.cwd} worktree remove {worktree} && "
                       f"git -C {self.cwd} branch -D {branch}", self.stdout.getvalue())
 
-    def test_advised_file_committed_in_the_main_checkout_reaches_a_new_worktree(self):
+    def test_advised_file_committed_from_a_subfolder_reaches_a_new_worktree(self):
         self.git_repo_with_seed()
-        failure = self.prepare_worktree_peer()
+        subfolder = self.cwd / "sub"
+        subfolder.mkdir()
+        failure = self.prepare_worktree_peer(subfolder)
         advised = pathlib.Path(re.search(r"create and commit (\S+) with exactly", failure["error"]).group(1))
         self.assertEqual(self.cwd / ".zcode/config.json", advised)
         self.git("worktree", "remove", "--force", self.agent.cwd_override)
@@ -760,7 +763,7 @@ class ZCodeBackendTests(unittest.TestCase):
         advised.write_text(json.dumps({"features": {"mcp": False}}))
         self.git("add", str(advised))
         self.git("commit", "-qm", "policy")
-        self.assertIsNone(self.prepare_worktree_peer())
+        self.assertIsNone(self.prepare_worktree_peer(subfolder))
 
     def test_reused_worktree_keeps_the_plain_mcp_advice(self):
         self.git_repo_with_seed()

@@ -2675,16 +2675,19 @@ def _zcode_catalog_reasoning(rules: dict, provider: dict, model: str) -> list[st
     return levels
 
 
-def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
+def _zcode_project_directories(cwd: pathlib.Path) -> list[pathlib.Path]:
     directory = pathlib.Path(os.path.abspath(cwd))
     ancestors = [directory, *directory.parents]
-    directories = [directory]
     for index, parent in enumerate(ancestors):
         if (parent / ".git").exists():
-            directories = list(reversed(ancestors[:index + 1]))
-            break
+            return list(reversed(ancestors[:index + 1]))
+    return [directory]
+
+
+def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
     return [pathlib.Path.home() / ".zcode/cli/config.json", *[
-        path for folder in directories for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
+        path for folder in _zcode_project_directories(cwd)
+        for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
 
 
 def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Path],
@@ -2895,7 +2898,7 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
 
 def _zcode_worktree_origin(agent: Agent, cfg: DuetConfig) -> Optional[pathlib.Path]:
     created = cfg.worktree and not cfg.worktree_path
-    return cfg.cwd if created and agent.cwd_override else None
+    return _zcode_project_directories(cfg.cwd)[0] if created and agent.cwd_override else None
 
 
 def _zcode_launch_check(agent: Agent, cfg: DuetConfig, native_cwd: Optional[pathlib.Path]) -> None:
