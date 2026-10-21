@@ -240,8 +240,9 @@ coder roles, custom API providers, `extra_args`,
 untracked sessions, and model/effort changes on resume. Complete the real
 affected-backend loop before reporting ZCode integration verified.
 
-Duet checks each ZCode peer before the first agent call. A failed check ends
-the run with `setup_error`. Report the full `[duet] ERROR:` message to the
+Duet checks each ZCode peer before the first agent call. For a peer in a
+worktree, the MCP check runs after the configured kickoff command, which can
+call a model. A failed check ends the run with `setup_error`. Report the full `[duet] ERROR:` message to the
 user, with all of its lines. It names the agent and the fix. If the MCP error
 names a file, report that file and its exact content. A file that is not
 committed does not reach a new Duet worktree. If the error says that Duet

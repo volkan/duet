@@ -991,7 +991,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
 | per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
-| a ZCode peer fails its launch check | error names the agent and the fix, no agent runs, run stops with `reason=setup_error` and exit code 1; `--dry-run` skips the check |
+| a ZCode peer fails its launch check | error names the agent and the fix, no agent runs, run stops with `reason=setup_error` and exit code 1; for a peer in a worktree, the MCP check runs after the configured kickoff command; `--dry-run` skips the check |
 
 `force_stop` is reserved for intentional human interruption: Ctrl-C or a
 user-requested force-prompt stop. Agent/runtime failures are recorded as

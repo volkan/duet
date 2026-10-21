@@ -247,8 +247,8 @@ the local checks of each turn:
 
 The check makes no model call. It runs before a configured kickoff command. For
 a peer in a worktree (a new one or `--worktree-path`), the MCP prerequisite is
-checked after the worktree exists. The kickoff command runs before that, so this failure appears after the
-kickoff.
+checked after the worktree exists. The kickoff command runs before that, so
+this failure appears after the kickoff.
 
 A failed check ends the run with `setup_error` and exit code 1. The error names
 the agent and the fix. `--dry-run` skips the check. Each turn repeats it.
