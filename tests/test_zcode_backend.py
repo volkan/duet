@@ -185,6 +185,23 @@ class ZCodeBackendTests(unittest.TestCase):
             with self.assertRaisesRegex(duet.AgentRunError, "failed turn\n\\[duet\\] hint: ZCode has no stored login"):
                 self.invoke()
 
+    def test_reply_text_never_adds_login_hint(self):
+        quoted = json.dumps({"sessionId": "sess_a", "error": "boom",
+                             "response": "The code mentions project_token_login_failed."})
+        for result in ((0, quoted, ""), (1, quoted, "other failure"), (1, "project_token_login_failed", "")):
+            with self.subTest(result=result), mock.patch.object(duet, "_run", return_value=result):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+                self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_summary_error_field_adds_hint_for_a_model_prefix(self):
+        summary = json.dumps({"sessionId": "sess_a", "response": "partial",
+                              "error": "Select a model before sending a message"})
+        for rc in (0, 1):
+            with self.subTest(rc=rc), mock.patch.object(duet, "_run", return_value=(rc, summary, "")):
+                with self.assertRaisesRegex(duet.AgentRunError, r"\n\[duet\] hint: ZCode has no usable model"):
+                    self.invoke()
+
     def test_timeout_never_adds_login_hint(self):
         with mock.patch.object(duet, "_run", return_value=(124, "", "project_token_login_failed")):
             with self.assertRaises(duet.AgentRunError) as caught:

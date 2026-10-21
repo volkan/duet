@@ -2827,7 +2827,12 @@ _ZCODE_FAILURE_HINTS = (
 def _zcode_failure_hint(rc: int, out: str, err: str) -> str:
     if rc == 124:
         return ""
-    text = out + "\n" + err
+    try:
+        result = json.loads(out)
+    except (ValueError, TypeError):
+        result = None
+    text = str(result.get("error") or "") if isinstance(result, dict) else ""
+    text += "\n" + err
     return next(("\n" + line for marker, line in _ZCODE_FAILURE_HINTS if marker in text), "")
 
 
