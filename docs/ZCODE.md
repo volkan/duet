@@ -111,6 +111,58 @@ storage. The separate profile contains model settings, not credentials.
 `Select a model before continuing` can also mean the account is not available;
 it does not prove that the requested model name is wrong.
 
+## Desktop CLI in a terminal
+
+The macOS ZCode desktop app includes a CLI at
+`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Run it with
+Node.js. Bun cannot load it and fails with `No such built-in module: node:sea`.
+
+The desktop bundle has no terminal UI. With no command, it fails with
+`Cannot find package '@zcode/tui'`. Use it for commands such as `-p`, `login`,
+`logout`, `doctor`, and `app-server`. A terminal UI needs another ZCode
+installation. For terminal use, put this wrapper on PATH as `zcode`:
+
+```sh
+#!/usr/bin/env sh
+exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@"
+```
+
+Duet uses `zcode` from PATH first. It finds the catalog only through the real
+executable path. A wrapper script hides that path, and Duet then fails with
+`Cannot locate the PATH ZCode CLI's catalog`. With such a wrapper, export this
+variable in the shell that runs Duet:
+
+```bash
+export ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json
+```
+
+Without `zcode` on PATH, Duet uses the desktop runtime directly and needs no
+variable.
+
+The desktop app and the CLI read the same credential store,
+`~/.zcode/v2/credentials.json`. The CLI login adds its account identity to that
+store. For the login command, see [account initialization](#account-initialization).
+`zcode logout` removes the shared login credentials, so it also affects the
+desktop app. Do not copy tokens between installations.
+
+Check the CLI with these commands:
+
+```bash
+zcode doctor
+zcode -p 'Reply with OK.' --mode plan
+```
+
+`-p` uses the `yolo` permission mode by default. Always pass `--mode plan` for
+this check.
+
+Before the model request, the CLI sends the stored login token to the account
+service to get a project token. The error `project_token_login_failed` means
+this step did not return a project token. The service rejected the stored
+token, or the CLI could not reach the service. The error
+`project_token_login_required` means no login token is stored. For either
+error, make sure that the network is available. Then run the login command from
+[account initialization](#account-initialization) again, and repeat the check.
+
 ## Session and safety contract
 
 Headless ZCode has no model/effort CLI flags. Duet supplies the requested
