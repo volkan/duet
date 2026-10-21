@@ -227,10 +227,11 @@ MCP is disabled.
 When the check fails, the error names one file to create or change, and its
 exact content. When the error says to change a file, the file then holds only
 this document, so other settings in it are lost. Move any that you need to
-another file first. A new Duet worktree contains only committed files. When Duet
-creates the worktree, the error names the file under the repository root of
-the main checkout and tells you to create and commit it. A reused `--worktree-path` worktree reads its own
-files.
+another file first. A new Duet worktree contains only committed files. When
+Duet creates the worktree, the error names the file under the repository root
+of the main checkout and tells you to create and commit it. In this case, the
+folders that the error lists are the folders of the worktree. A reused
+`--worktree-path` worktree reads its own files.
 
 ## Launch check
 
@@ -243,8 +244,8 @@ the local checks of each turn:
 - the native catalog, with the requested reasoning level.
 
 The check makes no model call. It runs before a configured kickoff command. For
-a peer in a new worktree, the MCP prerequisite is checked after the worktree
-exists. The kickoff command runs before that, so this failure appears after the
+a peer in a worktree (a new one or `--worktree-path`), the MCP prerequisite is
+checked after the worktree exists. The kickoff command runs before that, so this failure appears after the
 kickoff.
 
 A failed check ends the run with `setup_error` and exit code 1. The error names

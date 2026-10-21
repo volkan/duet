@@ -799,8 +799,9 @@ class ZCodeBackendTests(unittest.TestCase):
         worktree = self.cwd / "wt"
         (worktree / ".git").mkdir(parents=True)
         with self.assertRaisesRegex(duet.AgentRunError, "create and commit " + re.escape(
-                str(self.cwd / ".zcode/config.json"))):
+                str(self.cwd / ".zcode/config.json"))) as caught:
             self.invoke(cwd=worktree, origin=self.cwd)
+        self.assertIn(f"in each of these folders of the worktree: {worktree}.", str(caught.exception))
 
     def test_turn_backend_passes_the_main_checkout_for_a_new_worktree(self):
         (self.cwd / "zcode.json").write_text("{}")

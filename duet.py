@@ -2704,11 +2704,12 @@ def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Pa
     action = f"{verb} {path} {'with' if target else 'to'} exactly {document}"
     lost = "" if target else f" Other settings in {path} are lost, so move any that you need to another file first."
     folders = ", ".join(str(path.parent) for path in paths[1::2])
+    scope = " of the worktree" if origin else ""
     return ValueError(
         f"ZCode review requires native features.mcp=false: {action}\n"
         "The file must contain only this document. Duet does not accept MCP=false from a file "
         f"that has other settings.{lost}\n"
-        f"Duet reads {paths[0]}, then zcode.json and .zcode/config.json in each of these folders: "
+        f"Duet reads {paths[0]}, then zcode.json and .zcode/config.json in each of these folders{scope}: "
         f"{folders}. The last file that sets \"features\" decides.\n"
         "Plan mode permits some MCP writes, so Duet does not start a ZCode review without this setting.\n"
         "A file that is not committed does not reach a new Duet worktree. "
