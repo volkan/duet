@@ -460,9 +460,65 @@ class ZCodeBackendTests(unittest.TestCase):
                      {"features": {"mcp": 0}}):
             with self.subTest(data=data), mock.patch.object(duet, "_run") as run:
                 path.write_text(json.dumps(data))
-                with self.assertRaisesRegex(duet.AgentRunError, "native features.mcp=false"):
+                with self.assertRaisesRegex(duet.AgentRunError, "native features.mcp=false") as caught:
                     self.invoke()
                 run.assert_not_called()
+                first_line = str(caught.exception).splitlines()[0]
+                self.assertIn(f"create {self.cwd / '.zcode/config.json'} with exactly "
+                              '{"features": {"mcp": false}}', first_line)
+                self.assertIn("A file that is not committed does not reach a new Duet worktree.",
+                              str(caught.exception))
+
+    def test_mcp_gate_advice_makes_the_check_pass(self):
+        project = self.cwd / "zcode.json"
+        nested = self.cwd / ".zcode/config.json"
+        user = self.home / ".zcode/cli/config.json"
+        minimal = json.dumps({"features": {"mcp": False}})
+        permission_only = json.dumps({"permission": {"disallowedTools": ["Read"]}})
+        cases = [
+            ("user file enables MCP, no project file", {user: json.dumps({"features": {"mcp": True}})},
+             f"create {nested} with exactly", nested),
+            ("project file has only permissions", {nested: permission_only},
+             f"create {project} with exactly", project),
+            ("project file has other features", {project: json.dumps({"features": {"mcp": False, "skill": False}}),
+                                                  nested: permission_only},
+             f"change {project} to exactly", project),
+        ]
+        for name, files, action, fix in cases:
+            with self.subTest(case=name):
+                project.unlink(missing_ok=True)
+                for path in (nested, user):
+                    path.unlink(missing_ok=True)
+                for path, text in files.items():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+                with self.assertRaises(ValueError) as caught:
+                    duet._zcode_permission_denials(self.cwd)
+                message = str(caught.exception)
+                self.assertEqual(f"ZCode review requires native features.mcp=false: {action} "
+                                 '{"features": {"mcp": false}}', message.splitlines()[0])
+                self.assertIn(f"{user}, then zcode.json and .zcode/config.json in each of these folders: "
+                              f"{self.cwd}.", message)
+                cfg = self.config()
+                self.assertIn(str(fix), duet._error_summary(
+                    duet._zcode_preflight(cfg, worktree_ready=False), "setup_error"))
+                fix.parent.mkdir(parents=True, exist_ok=True)
+                fix.write_text(minimal)
+                duet._zcode_permission_denials(self.cwd)
+                self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+
+    def test_mcp_gate_advice_lists_every_folder_and_targets_the_deepest(self):
+        (self.cwd / ".git").mkdir()
+        (self.cwd / "zcode.json").unlink()
+        child = self.cwd / "subdir"
+        child.mkdir()
+        with self.assertRaises(ValueError) as caught:
+            duet._zcode_permission_denials(child)
+        message = str(caught.exception)
+        self.assertEqual(f"ZCode review requires native features.mcp=false: create "
+                         f"{child / '.zcode/config.json'} with exactly "
+                         '{"features": {"mcp": false}}', message.splitlines()[0])
+        self.assertIn(f"each of these folders: {self.cwd}, {child}.", message)
 
     def test_utf16_policy_cannot_certify_native_utf8_configuration(self):
         (self.cwd / "zcode.json").write_bytes('{"features":{"mcp":false}}'.encode("utf-16"))

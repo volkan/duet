@@ -2671,10 +2671,31 @@ def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
         path for folder in directories for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
 
 
+def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Path]) -> ValueError:
+    paths = list(fingerprints)
+    project_features = features_path if features_path in paths[1:] else None
+    start = paths.index(project_features) + 1 if project_features else 1
+    target = next((path for path in reversed(paths[start:]) if fingerprints[path] is None), None)
+    document = '{"features": {"mcp": false}}'
+    action = (f"create {target} with exactly {document}" if target
+              else f"change {project_features or paths[-1]} to exactly {document}")
+    folders = ", ".join(str(path.parent) for path in paths[1::2])
+    return ValueError(
+        f"ZCode review requires native features.mcp=false: {action}\n"
+        "The file must contain only this document. Duet does not accept MCP=false from a file "
+        "that has other settings.\n"
+        f"Duet reads {paths[0]}, then zcode.json and .zcode/config.json in each of these folders: "
+        f"{folders}. The last file that sets \"features\" decides.\n"
+        "Plan mode permits some MCP writes, so Duet does not start a ZCode review without this setting.\n"
+        "A file that is not committed does not reach a new Duet worktree. "
+        "See docs/ZCODE.md#native-mcp-prerequisite.")
+
+
 def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
     denied = list(_ZCODE_REVIEW_DENIED_TOOLS)
     fingerprints = {}
     mcp_disabled = False
+    features_path = None
     for path in _zcode_permission_paths(cwd):
         try:
             raw = path.read_bytes()
@@ -2695,6 +2716,7 @@ def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
             if "features" in data:
                 if not isinstance(data["features"], dict):
                     raise ValueError()
+                features_path = path
                 # Native ignores a whole invalid document. Certify only the
                 # minimal schema we validate completely, not a richer file
                 # whose unrelated fields could cause MCP=false to be skipped.
@@ -2711,7 +2733,7 @@ def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
         except (ValueError, AttributeError, TypeError):
             raise ValueError("Unsupported native ZCode permission configuration; refusing to replace it") from None
     if not mcp_disabled:
-        raise ValueError("ZCode review requires native features.mcp=false; plan mode permits some MCP writes")
+        raise _zcode_mcp_gate_error(fingerprints, features_path)
     return list(dict.fromkeys(denied)), fingerprints
 
 

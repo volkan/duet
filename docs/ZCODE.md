@@ -34,7 +34,8 @@ Duet uses the official `zcode` executable on PATH. On macOS, it can also use
 the headless runtime in `/Applications/ZCode.app` through an installed Node.js.
 It does not install a community CLI or copy account credentials.
 
-Complete [account initialization](#account-initialization) and the native MCP prerequisite below before launching a peer.
+Complete [account initialization](#account-initialization) and the
+[native MCP prerequisite](#native-mcp-prerequisite) before launching a peer.
 Duet finds the PATH CLI's bundled catalog through its real executable path, including symlinks.
 It never pairs a PATH CLI with another installation's catalog.
 
@@ -189,6 +190,32 @@ service to get a project token. Two errors can come from this step:
   Make sure that the network is available. Then log in again and repeat the
   check.
 
+## Native MCP prerequisite
+
+Native plan mode allows some MCP tools that do not declare themselves
+destructive, including tools with missing annotations. It is not a read-only
+MCP boundary. Review execution therefore requires effective native
+`features.mcp: false` in the target's ZCode configuration. Duet checks this
+prerequisite and does not change the user's settings. Existing MCP-enabled
+projects need an explicit native configuration decision before using this backend.
+To avoid duplicating the whole native schema, Duet certifies MCP=false only
+from this complete minimal document, for example in `.zcode/config.json`:
+
+```json
+{"features": {"mcp": false}}
+```
+
+Duet reads `~/.zcode/cli/config.json` first. Then it reads `zcode.json` and
+`.zcode/config.json` in each folder, from the repository root down to the
+target folder. Without a repository root, it reads only the target folder.
+The last file that sets `features` decides, and it must be the minimal
+document. A richer file could be ignored by native validation because of an
+unrelated invalid field. Duet refuses that uncertain state instead of assuming
+MCP is disabled.
+
+When the check fails, the error names one file to create or change, and its
+exact content. A file that is not committed does not reach a new Duet worktree.
+
 ## Launch check
 
 Before the first agent call, Duet checks each ZCode peer. The check repeats
@@ -229,23 +256,6 @@ ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/pro
 ```
 
 Use the public JSON catalog from the installation that runs headless calls. A PATH CLI never borrows the desktop installation's catalog.
-
-Native plan mode allows some MCP tools that do not declare themselves
-destructive, including tools with missing annotations. It is not a read-only
-MCP boundary. Review execution therefore requires effective native
-`features.mcp: false` in the target's ZCode configuration. Duet checks this
-prerequisite and does not change the user's settings. Existing MCP-enabled
-projects need an explicit native configuration decision before using this backend.
-To avoid duplicating the whole native schema, Duet certifies MCP=false only
-from this complete minimal document, for example in `.zcode/config.json`:
-
-```json
-{"features": {"mcp": false}}
-```
-
-Any later features-bearing file must also be this minimal document. A richer
-file could be ignored by native validation because of an unrelated invalid
-field. Duet refuses that uncertain state instead of assuming MCP is disabled.
 
 Calls use plan mode, disable dynamic workflows, and deny delegation,
 shell, write, web, and workflow tools. This limits the native tool surface;
