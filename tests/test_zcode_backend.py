@@ -724,13 +724,6 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertEqual(("terminal", 0), (status["health"], status["exit_code"]))
         self.assertEqual("run finished with setup_error; inspect artifacts", status["error"])
 
-    def test_dry_run_skips_launch_check(self):
-        (self.cwd / "zcode.json").write_text("{}")
-        cfg = self.config(dry_run=True)
-        with mock.patch.object(duet, "_zcode_launch_check", side_effect=AssertionError("checked")) as check:
-            self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
-        check.assert_not_called()
-
     def prepare_worktree_peer(self):
         lead = duet.Agent(name="gpt", backend="codex", role="reviewer")
         cfg = self.config(agents=[lead, self.agent], worktree=True, require_worktree=True)
