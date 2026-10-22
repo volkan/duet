@@ -178,6 +178,12 @@ original duet process result and the final status snapshot; surface
 invalid, report that control-plane failure and retain the original process
 result; do not inspect `state.json` as a replacement interface.
 
+For `agent_error` or `timeout`, status reports only `inspect artifacts`.
+Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in
+`artifacts.transcript` and the stderr log that it names.
+For `setup_error` or `kickoff_error`, there is no such block. Report the
+full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+
 For an active turn, also surface `budget_seconds` and `remaining_seconds`.
 When `last_timeout` is non-null, report its turn and agent; it remains present
 when the review recipe continues past one non-final coder timeout so the
@@ -233,6 +239,21 @@ selectable; unavailable models or efforts fail before a prompt. It refuses
 coder roles, custom API providers, `extra_args`,
 untracked sessions, and model/effort changes on resume. Complete the real
 affected-backend loop before reporting ZCode integration verified.
+
+Duet checks each ZCode peer before the first agent call. For a peer in a
+worktree, the MCP check runs after the configured kickoff command, which can
+call a model. A failed check ends the run with `setup_error`. Report the full `[duet] ERROR:` message to the
+user, with all of its lines. It names the agent and the fix. If the MCP error
+names a file, report that file and its exact content. A file that is not
+committed does not reach a new Duet worktree. If the error says that Duet
+cannot locate the PATH ZCode CLI's catalog, a wrapper hides the real
+installation. Tell the user to link `zcode` to the entry file of one
+installation, or to set `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` on the Duet
+command only.
+
+A failed ZCode turn (`agent_error`) can add a `[duet] hint:` line to its
+`[duet] AGENT ERROR` block. This line does not come from the launch check.
+Relay that line to the user as written.
 
 ## Model selection
 

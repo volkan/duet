@@ -2495,6 +2495,25 @@ _ZCODE_REVIEW_DENIED_TOOLS = CLAUDE_DENIED_DELEGATION_TOOLS + (
 )
 
 
+def _zcode_missing_catalog_error(cli: str) -> ValueError:
+    example = "  ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/path/to/that/installation/zcode-builtin.json duet ..."
+    head = "Cannot locate the PATH ZCode CLI's catalog"
+    if os.path.islink(cli):
+        lines = [f"{head}: no catalog is in a known place for its entry file {pathlib.Path(cli).resolve()}.",
+                 "Set the catalog on the Duet command only, to that installation's JSON catalog:", example]
+    else:
+        lines = [f"{head}: {cli} is not a link to a ZCode entry file, for example because it is a wrapper script.",
+                 f"If {cli} runs one ZCode installation, replace it with a symbolic link to that installation's entry file.",
+                 "If it selects between installations or is a self-contained executable, set the catalog on the "
+                 "Duet command only, for the installation that runs headless calls:", example]
+        desktop = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"
+        if sys.platform == "darwin" and desktop.is_file():
+            lines.append(f"If that installation is the macOS desktop app, its catalog is {desktop}.")
+    lines.append("Do not export the variable in a shell where a wrapper selects between installations. "
+                 "Duet never uses another installation's catalog. See docs/ZCODE.md#desktop-cli-in-a-terminal.")
+    return ValueError("\n".join(lines))
+
+
 def _zcode_command() -> tuple[list[str], dict[str, str]]:
     """Use the official CLI, or the installed macOS app's headless runtime."""
     cli = shutil.which("zcode")
@@ -2502,13 +2521,16 @@ def _zcode_command() -> tuple[list[str], dict[str, str]]:
         key = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"
         source = os.environ.get(key, "").strip()
         if not source:
-            directory = pathlib.Path(cli).resolve().parent
-            candidates = (directory / "provider/zcode-builtin.json",
-                          (directory / "../../../../../config/provider/zcode-builtin.json").resolve())
+            entry = pathlib.Path(cli).resolve()
+            directory = entry.parent
+            candidates = [directory / "provider/zcode-builtin.json"]
+            if directory.name == "glm" and entry.name == "zcode.cjs":
+                # Only the desktop bundle layout (resources/glm/zcode.cjs beside resources/config) may use a sibling catalog.
+                candidates.append(directory.parent / "config/provider/zcode-builtin.json")
+            candidates.append((directory / "../../../../../config/provider/zcode-builtin.json").resolve())
             source = next((str(path) for path in candidates if path.is_file()), "")
         if not source:
-            raise ValueError("Cannot locate the PATH ZCode CLI's catalog; set "
-                             "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE to that installation's JSON catalog")
+            raise _zcode_missing_catalog_error(cli)
         return [cli], {key: source}
     entry = _ZCODE_DESKTOP_RESOURCES / "glm" / "zcode.cjs"
     builtin = _ZCODE_DESKTOP_RESOURCES / "config" / "provider" / "zcode-builtin.json"
@@ -2560,6 +2582,21 @@ def _zcode_resolved_provider(config: dict, provider: dict) -> dict:
     return resolved
 
 
+def _zcode_reasoning_error(selection: dict, requested: str, levels: list[str]) -> ValueError:
+    head = ("Requested ZCode reasoning level is absent from its native model catalog: "
+            f"{requested} for {selection['providerId']}/{selection['modelId']}.")
+    if levels:
+        return ValueError(
+            f"{head} Supported levels: {', '.join(levels)}.\n"
+            "A run-level --reasoning applies to both agents. To give this agent a supported level, "
+            "set its reasoning_effort in a --config file. See docs/ZCODE.md#native-review-peer.")
+    return ValueError(
+        f"{head} The catalog lists no reasoning levels for this model.\n"
+        "Do not set reasoning for this agent. A run-level --reasoning applies to both agents, "
+        "so set reasoning_effort only for the other agent in a --config file. "
+        "See docs/ZCODE.md#native-review-peer.")
+
+
 def _zcode_catalog(selection: dict, launch_env: dict[str, str]) -> dict:
     source = launch_env.get("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE") or os.environ.get(
         "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE")
@@ -2579,7 +2616,7 @@ def _zcode_catalog(selection: dict, launch_env: dict[str, str]) -> dict:
     levels = _zcode_catalog_reasoning(config["modelConfigRules"], provider, selection["modelId"])
     requested = selection.get("options", {}).get("reasoningLevel")
     if requested is not None and requested not in levels:
-        raise ValueError("Requested ZCode reasoning level is absent from its native model catalog")
+        raise _zcode_reasoning_error(selection, requested, levels)
     return data
 
 
@@ -2638,22 +2675,53 @@ def _zcode_catalog_reasoning(rules: dict, provider: dict, model: str) -> list[st
     return levels
 
 
-def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
+def _zcode_project_directories(cwd: pathlib.Path) -> list[pathlib.Path]:
     directory = pathlib.Path(os.path.abspath(cwd))
     ancestors = [directory, *directory.parents]
-    directories = [directory]
     for index, parent in enumerate(ancestors):
         if (parent / ".git").exists():
-            directories = list(reversed(ancestors[:index + 1]))
-            break
+            return list(reversed(ancestors[:index + 1]))
+    return [directory]
+
+
+def _zcode_permission_paths(cwd: pathlib.Path) -> list[pathlib.Path]:
     return [pathlib.Path.home() / ".zcode/cli/config.json", *[
-        path for folder in directories for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
+        path for folder in _zcode_project_directories(cwd)
+        for path in (folder / "zcode.json", folder / ".zcode/config.json")]]
 
 
-def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
+def _zcode_mcp_gate_error(fingerprints: dict, features_path: Optional[pathlib.Path],
+                          cwd: pathlib.Path, origin: Optional[pathlib.Path]) -> ValueError:
+    paths = list(fingerprints)
+    project_features = features_path if features_path in paths[1:] else None
+    start = paths.index(project_features) + 1 if project_features else 1
+    target = next((path for path in reversed(paths[start:]) if fingerprints[path] is None), None)
+    document = '{"features": {"mcp": false}}'
+    verb, path = ("create", target) if target else ("change", project_features or paths[-1])
+    if origin:
+        verb += " and commit"
+        path = origin / path.relative_to(pathlib.Path(os.path.abspath(cwd)))
+    action = f"{verb} {path} {'with' if target else 'to'} exactly {document}"
+    lost = "" if target else f" Other settings in {path} are lost, so move any that you need to another file first."
+    folders = ", ".join(str(path.parent) for path in paths[1::2])
+    scope = " of the worktree" if origin else ""
+    return ValueError(
+        f"ZCode review requires native features.mcp=false: {action}\n"
+        "The file must contain only this document. Duet does not accept MCP=false from a file "
+        f"that has other settings.{lost}\n"
+        f"Duet reads {paths[0]}, then zcode.json and .zcode/config.json in each of these folders{scope}: "
+        f"{folders}. The last file that sets \"features\" decides.\n"
+        "Plan mode permits some MCP writes, so Duet does not start a ZCode review without this setting.\n"
+        "A file that is not committed does not reach a new Duet worktree. "
+        "See docs/ZCODE.md#native-mcp-prerequisite.")
+
+
+def _zcode_permission_denials(cwd: pathlib.Path,
+                              origin: Optional[pathlib.Path] = None) -> tuple[list[str], dict]:
     denied = list(_ZCODE_REVIEW_DENIED_TOOLS)
     fingerprints = {}
     mcp_disabled = False
+    features_path = None
     for path in _zcode_permission_paths(cwd):
         try:
             raw = path.read_bytes()
@@ -2674,6 +2742,7 @@ def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
             if "features" in data:
                 if not isinstance(data["features"], dict):
                     raise ValueError()
+                features_path = path
                 # Native ignores a whole invalid document. Certify only the
                 # minimal schema we validate completely, not a richer file
                 # whose unrelated fields could cause MCP=false to be skipped.
@@ -2690,7 +2759,7 @@ def _zcode_permission_denials(cwd: pathlib.Path) -> tuple[list[str], dict]:
         except (ValueError, AttributeError, TypeError):
             raise ValueError("Unsupported native ZCode permission configuration; refusing to replace it") from None
     if not mcp_disabled:
-        raise ValueError("ZCode review requires native features.mcp=false; plan mode permits some MCP writes")
+        raise _zcode_mcp_gate_error(fingerprints, features_path, cwd, origin)
     return list(dict.fromkeys(denied)), fingerprints
 
 
@@ -2740,6 +2809,33 @@ def _zcode_peer_profile(selection: dict, launch_env: dict[str, str]):
                "ZCODE_BUILTIN_PROVIDER_BUNDLED_CONFIG_FILE": ""}
 
 
+_ZCODE_FAILURE_HINTS = (
+    ("project_token_login_failed",
+     "[duet] hint: ZCode could not get a project token from the account service. "
+     "Make sure that the network is available. Then sign in again with the login "
+     "command in docs/ZCODE.md#account-initialization."),
+    ("project_token_login_required",
+     "[duet] hint: ZCode has no stored login token or account identity. "
+     "Sign in with the login command in docs/ZCODE.md#account-initialization."),
+    ("Select a model before",
+     "[duet] hint: ZCode has no usable model. Sign in again with the login command "
+     "in docs/ZCODE.md#account-initialization, and make sure that the provider ID "
+     "belongs to the connected account."),
+)
+
+
+def _zcode_failure_hint(rc: int, out: str, err: str) -> str:
+    if rc == 124:
+        return ""
+    try:
+        result = json.loads(out)
+    except (ValueError, TypeError):
+        result = None
+    text = str(result.get("error") or "") if isinstance(result, dict) else ""
+    text += "\n" + err
+    return next(("\n" + line for marker, line in _ZCODE_FAILURE_HINTS if marker in text), "")
+
+
 def _parse_zcode_reply(stdout: str) -> tuple[str, str]:
     try:
         result = json.loads(stdout)
@@ -2763,7 +2859,8 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
                cwd: pathlib.Path, timeout: int, dry: bool,
                reasoning: Optional[str] = None,
                stderr_log_path: Optional[pathlib.Path] = None,
-               pid_file_path: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
+               pid_file_path: Optional[pathlib.Path] = None,
+               origin: Optional[pathlib.Path] = None) -> tuple[str, Optional[str]]:
     selection = _zcode_requested_selection(agent, reasoning)
     pin = {"model": agent.model, "reasoning": reasoning}
     if dry:
@@ -2775,7 +2872,7 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     try:
         command, launch_env = _zcode_command()
         native_cwd = pathlib.Path(agent.cwd_override or cwd)
-        denied, permission_inputs = _zcode_permission_denials(native_cwd)
+        denied, permission_inputs = _zcode_permission_denials(native_cwd, origin)
         command += ["--cwd", str(native_cwd), "--mode", "plan",
                     "--workflow-mode", "disabled", "--json", "--no-color",
                     "--disallowed-tools", ",".join(denied)]
@@ -2787,10 +2884,14 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
             rc, out, err = _run(command, cwd=agent.cwd_override or cwd, stdin=None,
                                 timeout=timeout, stderr_log_path=stderr_log_path,
                                 pid_file_path=pid_file_path, env_overrides=env)
+        hint = _zcode_failure_hint(rc, out, err)
         if rc != 0:
             reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
-            raise AgentRunError(reason, _agent_exit_error("zcode", rc, out, err))
-        response, session = _parse_zcode_reply(out)
+            raise AgentRunError(reason, _agent_exit_error("zcode", rc, out, err, hint))
+        try:
+            response, session = _parse_zcode_reply(out)
+        except ValueError as exc:
+            raise ValueError(f"{exc}{hint}") from exc
         if agent.session_id and session != agent.session_id:
             raise ValueError("ZCode changed its pinned sessionId; refusing an unrelated conversation")
     except AgentRunError:
@@ -2802,6 +2903,35 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     return response, session
 
 
+def _zcode_worktree_origin(agent: Agent, cfg: DuetConfig) -> Optional[pathlib.Path]:
+    created = cfg.worktree and not cfg.worktree_path
+    return _zcode_project_directories(cfg.cwd)[0] if created and agent.cwd_override else None
+
+
+def _zcode_launch_check(agent: Agent, cfg: DuetConfig, native_cwd: Optional[pathlib.Path]) -> None:
+    selection = _zcode_requested_selection(agent, effective_reasoning(agent, cfg.reasoning))
+    _, launch_env = _zcode_command()
+    if native_cwd:
+        _zcode_permission_denials(native_cwd, _zcode_worktree_origin(agent, cfg))
+    with _zcode_peer_profile(selection, launch_env):
+        pass
+
+
+def _zcode_preflight(cfg: DuetConfig, *, worktree_ready: bool) -> Optional[str]:
+    if cfg.dry_run:
+        return None
+    deferred = _worktree_agent_index(cfg) if cfg.worktree or cfg.worktree_path else -1
+    for index, agent in enumerate(cfg.agents):
+        if agent.backend != "zcode" or (worktree_ready and index != deferred):
+            continue
+        native_cwd = None if index == deferred and not worktree_ready else pathlib.Path(agent.cwd_override or cfg.cwd)
+        try:
+            _zcode_launch_check(agent, cfg, native_cwd)
+        except Exception as exc:
+            return f"ZCode launch check failed for agent {agent.name}: {exc}"
+    return None
+
+
 def _call_zcode_backend(agent: Agent, system_prompt: str, message: str,
                         cfg: DuetConfig, first_turn: bool,
                         stderr_log_path: Optional[pathlib.Path],
@@ -2809,7 +2939,8 @@ def _call_zcode_backend(agent: Agent, system_prompt: str, message: str,
                         reasoning: Optional[str]) -> tuple[str, Optional[str]]:
     return call_zcode(agent, system_prompt, message, cfg.cwd,
                       cfg.per_turn_timeout, cfg.dry_run, reasoning,
-                      stderr_log_path, pid_file_path)
+                      stderr_log_path, pid_file_path,
+                      _zcode_worktree_origin(agent, cfg))
 
 
 BACKENDS = {
@@ -3239,6 +3370,10 @@ def _worktree_setup_failed(cfg: DuetConfig, message: str) -> None:
           file=sys.stderr)
 
 
+def _worktree_agent_index(cfg: DuetConfig) -> int:
+    return {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
+
+
 def _setup_run_worktree(
     cfg: DuetConfig, run_id: str, run_dir: pathlib.Path,
 ) -> tuple[Optional[pathlib.Path], Optional[str]]:
@@ -3251,7 +3386,7 @@ def _setup_run_worktree(
     with a durable setup failure. A failed *create* still reports the intended
     branch name, matching the pre-extraction behavior.
     """
-    wt_idx = {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
+    wt_idx = _worktree_agent_index(cfg)
     if cfg.worktree_path:
         existing = pathlib.Path(cfg.worktree_path).expanduser().resolve()
         if not existing.is_dir():
@@ -4245,6 +4380,21 @@ def _print_run_banner(cfg: DuetConfig, context: _RunContext) -> None:
               f"{cfg.agents[0].session_id}")
 
 
+def _zcode_preflight_failure(cfg: DuetConfig, context: _RunContext, *,
+                             worktree_ready: bool) -> Optional[dict]:
+    message = _zcode_preflight(cfg, worktree_ready=worktree_ready)
+    if message is None:
+        return None
+    state = _launch_failure_state(
+        cfg, reason=FINISHED_SETUP_ERROR, message=message,
+        history=context.history, transcript_path=context.transcript_path,
+        recap_path=context.recap_path, state_path=context.state_path,
+        wt_path=context.wt_path, wt_branch=context.wt_branch,
+    )
+    _print_worktree_notice(cfg, context.wt_path, context.wt_branch)
+    return state
+
+
 def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     """Allocate, publish launch metadata, isolate, and run deferred kickoff."""
     _validate_run_info_target(cfg)
@@ -4305,6 +4455,9 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
         return context, state
 
     _print_run_banner(cfg, context)
+    failure = _zcode_preflight_failure(cfg, context, worktree_ready=False)
+    if failure is not None:
+        return context, failure
     _probe_run_metrics(cfg)
     failure = _run_kickoff_command(
         cfg, run_dir=run_dir, transcript_path=transcript_path,
@@ -4341,6 +4494,9 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
         )
         return context, state
 
+    failure = _zcode_preflight_failure(cfg, context, worktree_ready=True)
+    if failure is not None:
+        return context, failure
     setup_state = _build_run_state(
         cfg, turns_used=0, history=history, finished_reason=None,
         transcript_path=transcript_path, recap_path=recap_path,
@@ -4349,6 +4505,16 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
     )
     _write_run_state(state_path, setup_state)
     return context, None
+
+
+def _print_worktree_notice(cfg: DuetConfig, wt_path: Optional[pathlib.Path],
+                           wt_branch: Optional[str]) -> None:
+    if wt_path:
+        print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
+              f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
+              f"        review: git -C {wt_path} diff HEAD\n"
+              f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
+              f"git -C {cfg.cwd} branch -D {wt_branch}")
 
 
 def run_duet(cfg: DuetConfig) -> dict:
@@ -4470,12 +4636,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         print(f"[duet] recap: {recap_path}")
     print(f"[duet] resumable session ids — "
           + ", ".join(f"{a.name}={a.session_id}" for a in cfg.agents if a.session_id))
-    if wt_path:
-        print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
-              f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
-              f"        review: git -C {wt_path} diff HEAD\n"
-              f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
-              f"git -C {cfg.cwd} branch -D {wt_branch}")
+    _print_worktree_notice(cfg, wt_path, wt_branch)
     return state
 
 
@@ -7982,14 +8143,9 @@ def _validate_ready_config(cfg: DuetConfig,
 def _warn_missing_backends(cfg: DuetConfig) -> None:
     if cfg.dry_run:
         return
-    for backend in {a.backend for a in cfg.agents}:
+    # The ZCode launch check reports the real ZCode error.
+    for backend in {a.backend for a in cfg.agents} - {"zcode"}:
         binary = backend_adapter(backend).binary
-        if backend == "zcode":
-            try:
-                _zcode_command()
-                continue
-            except ValueError:
-                pass
         if shutil.which(binary) is None:
             print(
                 f"[duet] WARNING: '{binary}' not on PATH — this run will fail. "

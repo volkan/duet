@@ -34,7 +34,8 @@ Duet uses the official `zcode` executable on PATH. On macOS, it can also use
 the headless runtime in `/Applications/ZCode.app` through an installed Node.js.
 It does not install a community CLI or copy account credentials.
 
-Complete [account initialization](#account-initialization) and the native MCP prerequisite below before launching a peer.
+Complete [account initialization](#account-initialization) and the
+[native MCP prerequisite](#native-mcp-prerequisite) before launching a peer.
 Duet finds the PATH CLI's bundled catalog through its real executable path, including symlinks.
 It never pairs a PATH CLI with another installation's catalog.
 
@@ -79,6 +80,9 @@ For different reasoning per peer, use a JSON config:
 This example names the Z.ai Individual provider. Use the native provider ID
 for the connected account. Model access and supported reasoning levels remain
 ZCode's responsibility; an unavailable selection must fail, not change providers.
+The error for an unsupported reasoning level lists the supported levels. A
+run-level `--reasoning` applies to both agents. To give one agent another level,
+set its `reasoning_effort` in a `--config` file.
 
 ## Account initialization
 
@@ -110,28 +114,95 @@ Complete the first-party OAuth approval. The native login owns credential
 storage. The separate profile contains model settings, not credentials.
 `Select a model before continuing` can also mean the account is not available;
 it does not prove that the requested model name is wrong.
+When a ZCode turn fails and the error output or the `error` field of its JSON
+summary contains `project_token_login_failed`, `project_token_login_required`,
+or `Select a model before`, Duet adds a `[duet] hint:` line to the error. Duet
+matches each marker as a substring. It does not search the reply text. The line
+points to the login command. Duet adds no hint for a timeout.
 
-## Session and safety contract
+## Desktop CLI in a terminal
 
-Headless ZCode has no model/effort CLI flags. Duet supplies the requested
-selection through a private, credential-free provider profile using the
-official configuration schema. The shared account store stays in place.
-The profile is removed after each turn. Global provider files are unchanged.
-The native catalog validates the requested account model and effort before
-launch. The peer profile disables every other catalog model, including models
-on hidden providers. It snapshots the validated public catalog and disables
-remote catalog refresh for the child. Native fallback cannot select another model.
-An explicit effort also narrows the selected model to that validated level.
-Native resume then rejects an externally changed effort instead of using it.
-The macOS runtime supplies its builtin catalog. PATH CLI installations use their own bundled catalog.
-An explicit `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` overrides discovery.
-A self-contained executable or wrapper without an accessible bundled catalog needs this variable:
+The macOS ZCode desktop app includes a CLI at
+`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Run it with
+Node.js. Bun cannot load it and fails with `No such built-in module: node:sea`.
+
+The desktop bundle has no terminal UI. With no command, it fails with
+`Cannot find package '@zcode/tui'`. Use it for commands such as `-p`, `login`,
+`logout`, `doctor`, and `app-server`. A terminal UI needs another ZCode
+installation.
+
+For headless use and for Duet, link the desktop entry file as `zcode` on PATH.
+This needs Node.js on PATH. The link command fails if the file exists.
 
 ```bash
-export ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/provider/zcode-builtin.json
+ln -s /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs ~/.local/bin/zcode
 ```
 
-Use the public JSON catalog from that CLI installation. A PATH CLI never borrows the desktop installation's catalog.
+Duet follows the link to the same bundle and uses the catalog of that bundle.
+It needs no variable.
+
+If another installation supplies the terminal UI, do not link the desktop
+entry file. Put a wrapper on PATH as `zcode` that selects between the
+installations:
+
+```sh
+#!/usr/bin/env sh
+case "${1-}" in
+  ""|tui) exec /path/to/other/zcode "$@" ;;
+  *) exec node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs "$@" ;;
+esac
+```
+
+The terminal UI goes to the other installation. Headless commands, which are
+the commands that Duet runs, go to the desktop CLI. The catalog variable on the
+Duet command therefore names the desktop catalog.
+
+Duet uses `zcode` from PATH first. It finds the catalog only through the real
+executable path. A wrapper script hides that path, and Duet then fails with
+`Cannot locate the PATH ZCode CLI's catalog`. The error text names two fixes:
+replace the wrapper with a link, or set this variable on the Duet command only:
+
+```bash
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json \
+  duet --lead zcode:reviewer ...
+```
+
+Use the catalog of the installation that runs headless calls. A wrapper can
+send other commands, for example the terminal UI, to another installation. An
+exported variable also reaches that installation, which then reads a catalog
+that is not its own.
+
+On macOS, if `zcode` is not on PATH, Duet runs the desktop CLI through Node.js
+and needs no variable.
+
+The desktop app and the CLI read the same credential store,
+`~/.zcode/v2/credentials.json`. The CLI login adds its account identity to that
+store. For the login command, see [account initialization](#account-initialization).
+The help text of `zcode logout` is "Remove the shared Z.AI login credentials".
+Do not copy tokens between installations.
+
+Check the CLI with these commands:
+
+```bash
+zcode doctor
+zcode -p 'Reply with OK.' --mode plan
+```
+
+`-p` uses the `yolo` permission mode by default. Always pass `--mode plan` for
+this check.
+
+Before the model request, the CLI sends the stored login token to the account
+service to get a project token. Two errors can come from this step:
+
+- `project_token_login_required`: the credential store has no login token or
+  no account identity. Run the login command from
+  [account initialization](#account-initialization), then repeat the check.
+- `project_token_login_failed`: this step did not return a project token. The
+  service rejected the stored token, or the CLI could not reach the service.
+  Make sure that the network is available. Then log in again and repeat the
+  check.
+
+## Native MCP prerequisite
 
 Native plan mode allows some MCP tools that do not declare themselves
 destructive, including tools with missing annotations. It is not a read-only
@@ -146,9 +217,63 @@ from this complete minimal document, for example in `.zcode/config.json`:
 {"features": {"mcp": false}}
 ```
 
-Any later features-bearing file must also be this minimal document. A richer
-file could be ignored by native validation because of an unrelated invalid
-field. Duet refuses that uncertain state instead of assuming MCP is disabled.
+Duet reads `~/.zcode/cli/config.json` first. Then it reads `zcode.json` and
+`.zcode/config.json` in each folder, from the repository root down to the
+target folder. Without a repository root, it reads only the target folder.
+The last file that sets `features` decides, and it must be the minimal
+document. A richer file could be ignored by native validation because of an
+unrelated invalid field. Duet refuses that uncertain state instead of assuming
+MCP is disabled.
+
+When the check fails, the error names one file to create or change, and its
+exact content. When the error says to change a file, the file then holds only
+this document, so other settings in it are lost. Move any that you need to
+another file first. A new Duet worktree contains only committed files. When
+Duet creates the worktree, the error names the file under the repository root
+of the main checkout and tells you to create and commit it. In this case, the
+folders that the error lists are the folders of the worktree. A reused
+`--worktree-path` worktree reads its own files.
+
+## Launch check
+
+Before the first agent call, Duet checks each ZCode peer. The check repeats
+the local checks of each turn:
+
+- the role and the model ID;
+- the ZCode runtime;
+- the MCP prerequisite;
+- the native catalog, with the requested reasoning level.
+
+The check makes no model call. It runs before a configured kickoff command. For
+a peer in a worktree (a new one or `--worktree-path`), the MCP prerequisite is
+checked after the worktree exists. The kickoff command runs before that, so
+this failure appears after the kickoff.
+
+A failed check ends the run with `setup_error` and exit code 1. The error names
+the agent and the fix. `--dry-run` skips the check. Each turn repeats it.
+
+## Session and safety contract
+
+Headless ZCode has no model/effort CLI flags. Duet supplies the requested
+selection through a private, credential-free provider profile using the
+official configuration schema. The shared account store stays in place.
+The profile is removed after each turn. Global provider files are unchanged.
+The native catalog validates the requested account model and effort before
+launch. The peer profile disables every other catalog model, including models
+on hidden providers. It snapshots the validated public catalog and disables
+remote catalog refresh for the child. Native fallback cannot select another model.
+An explicit effort also narrows the selected model to that validated level.
+Native resume then rejects an externally changed effort instead of using it.
+The macOS runtime supplies its builtin catalog. PATH CLI installations use their own bundled catalog.
+A PATH link to the desktop entry file uses the catalog of that desktop bundle.
+An explicit `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE` overrides discovery.
+A self-contained executable or wrapper without an accessible bundled catalog needs this variable on the Duet command only:
+
+```bash
+ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=/absolute/path/to/that/zcode/installation/provider/zcode-builtin.json duet ...
+```
+
+Use the public JSON catalog from the installation that runs headless calls. A PATH CLI never borrows the desktop installation's catalog.
 
 Calls use plan mode, disable dynamic workflows, and deny delegation,
 shell, write, web, and workflow tools. This limits the native tool surface;

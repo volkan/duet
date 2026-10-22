@@ -317,6 +317,32 @@ state = json.loads(pathlib.Path(info["state_path"]).read_text())
 assert state["finished_reason"] == "setup_error", state
 assert state["phase"] == "finished", state
 PY
+ZCODE_FAKE_BIN="$TMPD/zcode-wrapper/a/b/c/d/bin"
+mkdir -p "$ZCODE_FAKE_BIN" "$TMPD/zcode-target"
+printf '#!/bin/sh\nexit 99\n' > "$ZCODE_FAKE_BIN/zcode"
+chmod +x "$ZCODE_FAKE_BIN/zcode"
+ZCODE_CHECK_ARGS=(--lead zcode:reviewer --lead-model account:zai-individual-coding-plan/GLM-5.3
+  --partner zcode:reviewer --partner-model account:zai-individual-coding-plan/GLM-5.3
+  --task "read only" --no-metrics --cwd "$TMPD/zcode-target")
+expect "zcode launch check fails closed"     1 env -u ZCODE_BUILTIN_PROVIDER_CONFIG_FILE PATH="$ZCODE_FAKE_BIN:$PATH" \
+  "$DUET" "${ZCODE_CHECK_ARGS[@]}" --run-info-file "$CONTROL_DIR/zcode-launch-check.json"
+expect "zcode launch check persisted"        0 python3 - "$CONTROL_DIR/zcode-launch-check.json" <<'PY'
+import json
+import pathlib
+import sys
+
+info = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state = json.loads(pathlib.Path(info["state_path"]).read_text())
+assert state["finished_reason"] == "setup_error", state
+assert state["phase"] == "finished", state
+assert state["turns_used"] == 0, state
+assert state["history"] == [], state
+assert state["error"].startswith("ZCode launch check failed for agent "), state
+assert "PATH ZCode CLI's catalog" in state["error"], state
+PY
+expect_stdout "zcode dry run skips launch check" 0 "dry-run zcode/" \
+  env -u ZCODE_BUILTIN_PROVIDER_CONFIG_FILE PATH="$ZCODE_FAKE_BIN:$PATH" \
+  "$DUET" "${ZCODE_CHECK_ARGS[@]}" --dry-run
 cat > "$TMPD/cfg-dupe-agents.json" <<EOF
 {"cwd":"$TMPD","dry_run":true,"task":"x","agents":[{"name":"same","backend":"codex","role":"planner"},{"name":"same","backend":"codex","role":"coder"}]}
 EOF

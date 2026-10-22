@@ -255,6 +255,12 @@ For a live turn, `active_turn.budget_seconds` reports the saved budget and
 the review recipe continues after one non-final coder timeout so the partner
 can inspect its failure block and worktree handoff.
 
+For `agent_error` or `timeout`, status reports only `inspect artifacts`.
+Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
+`artifacts.transcript` file and the stderr log that it names.
+For `setup_error` or `kickoff_error`, there is no such block. Report the
+full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+
 You can also list recent runs:
 
 ```bash

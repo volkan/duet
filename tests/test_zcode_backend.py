@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import importlib.util
 import types
 import os
 import pathlib
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -156,8 +160,69 @@ class ZCodeBackendTests(unittest.TestCase):
             with self.assertRaises(duet.AgentRunError) as caught:
                 self.invoke()
         self.assertEqual(duet.FINISHED_AGENT_ERROR, caught.exception.finished_reason)
+        self.assertIn("\n[duet] hint: ZCode has no usable model.", str(caught.exception))
         self.assertFalse(paths[0].exists())
         self.assertIsNone(self.agent.zcode_selection)
+
+    def test_login_failures_add_sign_in_hint(self):
+        for marker, expected in (("project_token_login_failed", "could not get a project token"),
+                                 ("project_token_login_required", "no stored login token"),
+                                 ("Select a model before continuing", "no usable model")):
+            with self.subTest(marker=marker), \
+                    mock.patch.object(duet, "_run", return_value=(1, "", f"Error: {marker}")):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+            message = str(caught.exception)
+            self.assertTrue(message.splitlines()[-1].startswith("[duet] hint: ZCode "), message)
+            self.assertIn(expected, message)
+            self.assertEqual("project_token_login_failed" == marker, "network" in message)
+            self.assertNotIn("/model", message)
+
+    def test_error_summary_with_marker_adds_hint_at_rc_zero(self):
+        summary = json.dumps({"sessionId": "sess_a", "response": "partial",
+                              "error": "project_token_login_required"})
+        with mock.patch.object(duet, "_run", return_value=(0, summary, "")):
+            with self.assertRaisesRegex(duet.AgentRunError, "failed turn\n\\[duet\\] hint: ZCode has no stored login"):
+                self.invoke()
+
+    def test_reply_text_never_adds_login_hint(self):
+        quoted = json.dumps({"sessionId": "sess_a", "error": "boom",
+                             "response": "The code mentions project_token_login_failed."})
+        for result in ((0, quoted, ""), (1, quoted, "other failure"), (1, "project_token_login_failed", "")):
+            with self.subTest(result=result), mock.patch.object(duet, "_run", return_value=result):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+                self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_summary_error_field_adds_hint_for_a_model_prefix(self):
+        summary = json.dumps({"sessionId": "sess_a", "response": "partial",
+                              "error": "Select a model before sending a message"})
+        for rc in (0, 1):
+            with self.subTest(rc=rc), mock.patch.object(duet, "_run", return_value=(rc, summary, "")):
+                with self.assertRaisesRegex(duet.AgentRunError, r"\n\[duet\] hint: ZCode has no usable model"):
+                    self.invoke()
+
+    def test_timeout_never_adds_login_hint(self):
+        with mock.patch.object(duet, "_run", return_value=(124, "", "project_token_login_failed")):
+            with self.assertRaises(duet.AgentRunError) as caught:
+                self.invoke()
+        self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_failure_without_marker_has_no_hint(self):
+        for result in ((1, "", "something else"), (0, "not json", "")):
+            with self.subTest(result=result), mock.patch.object(duet, "_run", return_value=result):
+                with self.assertRaises(duet.AgentRunError) as caught:
+                    self.invoke()
+                self.assertNotIn("[duet] hint", str(caught.exception))
+
+    def test_two_markers_add_one_hint_line(self):
+        err = "project_token_login_required then project_token_login_failed"
+        with mock.patch.object(duet, "_run", return_value=(1, "", err)):
+            with self.assertRaises(duet.AgentRunError) as caught:
+                self.invoke()
+        message = str(caught.exception)
+        self.assertEqual(1, message.count("[duet] hint:"))
+        self.assertIn("could not get a project token", message)
 
     def test_timeout_has_the_existing_timeout_contract(self):
         with mock.patch.object(duet, "_run", return_value=(124, "", "timeout")):
@@ -193,9 +258,14 @@ class ZCodeBackendTests(unittest.TestCase):
     def test_invalid_catalog_selection_never_starts_a_model(self):
         for level in ("minimal", "medium", "xhigh"):
             with self.subTest(level=level), mock.patch.object(duet, "_run") as run:
-                with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent"):
+                with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent") as caught:
                     self.invoke(reasoning=level)
                 run.assert_not_called()
+            message = str(caught.exception)
+            self.assertIn(f"catalog: {level} for account:zai-individual-coding-plan/GLM-5.3. "
+                          "Supported levels: low, high, max.\n", message)
+            self.assertIn("set its reasoning_effort in a --config file", message)
+            self.assertIn("docs/ZCODE.md#native-review-peer", message)
         self.agent.model = "account:zai-individual-coding-plan/missing-model"
         with mock.patch.object(duet, "_run") as run:
             with self.assertRaisesRegex(duet.AgentRunError, "account model is absent"):
@@ -262,6 +332,57 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertEqual(["/runtime/zcode"], command)
         self.assertEqual(str(self.catalog), env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"])
 
+    def test_path_link_into_desktop_bundle_uses_that_bundle_catalog(self):
+        self.launch.stop()
+        resources = self.cwd / "Resources"
+        entry = resources / "glm/zcode.cjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("// desktop entry")
+        catalog = resources / "config/provider/zcode-builtin.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(self.catalog.read_text())
+        link = self.cwd / "bin/zcode"
+        link.parent.mkdir()
+        link.symlink_to(entry)
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(link)), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+            command, env = duet._zcode_command()
+        self.assertEqual([str(link)], command)
+        self.assertEqual(str(catalog.resolve()), env["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"])
+
+    def test_other_entry_in_a_glm_folder_does_not_use_the_sibling_catalog(self):
+        self.launch.stop()
+        resources = self.cwd / "Resources"
+        entry = resources / "glm/other.cjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("// other entry")
+        catalog = resources / "config/provider/zcode-builtin.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(self.catalog.read_text())
+        link = self.cwd / "bin/zcode"
+        link.parent.mkdir()
+        link.symlink_to(entry)
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(link)), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+                duet._zcode_command()
+
+    def test_wrapper_beside_a_config_folder_does_not_use_it(self):
+        self.launch.stop()
+        wrapper = self.cwd / "install/bin/zcode"
+        wrapper.parent.mkdir(parents=True)
+        wrapper.write_text("#!/bin/sh\n")
+        catalog = self.cwd / "install/config/provider/zcode-builtin.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(self.catalog.read_text())
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(wrapper)), \
+                mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+                duet._zcode_command()
+
     def test_missing_path_catalog_does_not_borrow_desktop_catalog(self):
         self.launch.stop()
         desktop = self.cwd / "desktop"
@@ -271,11 +392,40 @@ class ZCodeBackendTests(unittest.TestCase):
         entry = desktop / "glm/zcode.cjs"
         entry.parent.mkdir()
         entry.write_text("// desktop entry")
-        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", desktop), \
-                mock.patch.object(duet.shutil, "which", return_value=str(self.cwd / "cli/zcode")), \
+        wrapper = self.cwd / "cli/zcode"
+        wrapper.parent.mkdir()
+        wrapper.write_text("#!/bin/sh\n")
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform):
+                with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", desktop), \
+                        mock.patch.object(duet.sys, "platform", platform), \
+                        mock.patch.object(duet.shutil, "which", return_value=str(wrapper)), \
+                        mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
+                    with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog") as caught:
+                        duet._zcode_command()
+                message = str(caught.exception)
+                self.assertIn("symbolic link", message)
+                self.assertIn("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=", message)
+                self.assertEqual(platform == "darwin", str(catalog) in message)
+
+    def test_linked_cli_without_catalog_names_its_entry_file(self):
+        self.launch.stop()
+        entry = self.cwd / "native/zcode.cjs"
+        entry.parent.mkdir()
+        entry.write_text("// native entry")
+        link = self.cwd / "bin/zcode"
+        link.parent.mkdir()
+        link.symlink_to(entry)
+        with mock.patch.object(duet, "_ZCODE_DESKTOP_RESOURCES", self.cwd / "elsewhere"), \
+                mock.patch.object(duet.shutil, "which", return_value=str(link)), \
                 mock.patch.dict(os.environ, {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": ""}):
-            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog"):
+            with self.assertRaisesRegex(ValueError, "PATH ZCode CLI's catalog") as caught:
                 duet._zcode_command()
+        message = str(caught.exception)
+        self.assertIn(str(entry.resolve()), message)
+        self.assertIn("no catalog is in a known place", message)
+        self.assertIn("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=", message)
+        self.assertNotIn("symbolic link", message)
 
     def test_catalog_snapshot_freezes_validation_and_disables_remote_refresh(self):
         before = json.loads(self.catalog.read_text())
@@ -331,9 +481,15 @@ class ZCodeBackendTests(unittest.TestCase):
             "config": {"optionSpecs": {"reasoningLevel": None}}}]
         self.catalog.write_text(json.dumps(data))
         with mock.patch.object(duet, "_run") as run:
-            with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent"):
+            with self.assertRaisesRegex(duet.AgentRunError, "reasoning level is absent") as caught:
                 self.invoke()
             run.assert_not_called()
+        message = str(caught.exception)
+        self.assertIn("catalog: max for account:zai-individual-coding-plan/GLM-5.3. "
+                      "The catalog lists no reasoning levels for this model.\n", message)
+        self.assertIn("Do not set reasoning for this agent.", message)
+        self.assertIn("set reasoning_effort only for the other agent in a --config file", message)
+        self.assertNotIn("Supported levels", message)
 
     def test_native_null_reasoning_values_clear_inherited_levels(self):
         provider = {"providerId": "account:a", "config": {}}
@@ -351,9 +507,84 @@ class ZCodeBackendTests(unittest.TestCase):
                      {"features": {"mcp": 0}}):
             with self.subTest(data=data), mock.patch.object(duet, "_run") as run:
                 path.write_text(json.dumps(data))
-                with self.assertRaisesRegex(duet.AgentRunError, "native features.mcp=false"):
+                with self.assertRaisesRegex(duet.AgentRunError, "native features.mcp=false") as caught:
                     self.invoke()
                 run.assert_not_called()
+                first_line = str(caught.exception).splitlines()[0]
+                self.assertIn(f"create {self.cwd / '.zcode/config.json'} with exactly "
+                              '{"features": {"mcp": false}}', first_line)
+                self.assertIn("A file that is not committed does not reach a new Duet worktree.",
+                              str(caught.exception))
+
+    def test_mcp_gate_advice_makes_the_check_pass(self):
+        project = self.cwd / "zcode.json"
+        nested = self.cwd / ".zcode/config.json"
+        user = self.home / ".zcode/cli/config.json"
+        minimal = json.dumps({"features": {"mcp": False}})
+        permission_only = json.dumps({"permission": {"disallowedTools": ["Read"]}})
+        cases = [
+            ("user file enables MCP, no project file", {user: json.dumps({"features": {"mcp": True}})},
+             f"create {nested} with exactly", nested),
+            ("project file has only permissions", {nested: permission_only},
+             f"create {project} with exactly", project),
+            ("project file has other features", {project: json.dumps({"features": {"mcp": False, "skill": False}}),
+                                                  nested: permission_only},
+             f"change {project} to exactly", project),
+        ]
+        for name, files, action, fix in cases:
+            with self.subTest(case=name):
+                project.unlink(missing_ok=True)
+                for path in (nested, user):
+                    path.unlink(missing_ok=True)
+                for path, text in files.items():
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+                with self.assertRaises(ValueError) as caught:
+                    duet._zcode_permission_denials(self.cwd)
+                message = str(caught.exception)
+                self.assertEqual(f"ZCode review requires native features.mcp=false: {action} "
+                                 '{"features": {"mcp": false}}', message.splitlines()[0])
+                self.assertIn(f"{user}, then zcode.json and .zcode/config.json in each of these folders: "
+                              f"{self.cwd}.", message)
+                self.assertEqual("create" in action, "are lost" not in message)
+                cfg = self.config()
+                self.assertIn(str(fix), duet._error_summary(
+                    duet._zcode_preflight(cfg, worktree_ready=False), "setup_error"))
+                fix.parent.mkdir(parents=True, exist_ok=True)
+                fix.write_text(minimal)
+                duet._zcode_permission_denials(self.cwd)
+                self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+
+    def test_mcp_gate_change_advice_warns_that_other_settings_are_lost(self):
+        project = self.cwd / "zcode.json"
+        nested = self.cwd / ".zcode/config.json"
+        nested.parent.mkdir()
+        for path, rule in ((project, "Read"), (nested, "Grep")):
+            path.write_text(json.dumps({"permission": {"disallowedTools": [rule]}}))
+        with self.assertRaises(ValueError) as caught:
+            duet._zcode_permission_denials(self.cwd)
+        lines = str(caught.exception).splitlines()
+        self.assertEqual(f"ZCode review requires native features.mcp=false: change {nested} to exactly "
+                         '{"features": {"mcp": false}}', lines[0])
+        self.assertIn(f"Other settings in {nested} are lost, so move any that you need to another file first.",
+                      lines[1])
+        nested.write_text(json.dumps({"features": {"mcp": False}}))
+        denied, _ = duet._zcode_permission_denials(self.cwd)
+        self.assertIn("Read", denied)
+        self.assertNotIn("Grep", denied)
+
+    def test_mcp_gate_advice_lists_every_folder_and_targets_the_deepest(self):
+        (self.cwd / ".git").mkdir()
+        (self.cwd / "zcode.json").unlink()
+        child = self.cwd / "subdir"
+        child.mkdir()
+        with self.assertRaises(ValueError) as caught:
+            duet._zcode_permission_denials(child)
+        message = str(caught.exception)
+        self.assertEqual(f"ZCode review requires native features.mcp=false: create "
+                         f"{child / '.zcode/config.json'} with exactly "
+                         '{"features": {"mcp": false}}', message.splitlines()[0])
+        self.assertIn(f"each of these folders: {self.cwd}, {child}.", message)
 
     def test_utf16_policy_cannot_certify_native_utf8_configuration(self):
         (self.cwd / "zcode.json").write_bytes('{"features":{"mcp":false}}'.encode("utf-16"))
@@ -426,6 +657,244 @@ class ZCodeBackendTests(unittest.TestCase):
         restored = duet._agents_from_state({"agents": [state, partner]},
                                             argparse.ArgumentParser(), "--continue")[0]
         self.assertEqual(self.agent.zcode_selection, restored.zcode_selection)
+
+    def config(self, agents=None, **overrides):
+        partner = duet.Agent(name="gpt", backend="codex", role="reviewer")
+        args = dict(cwd=self.cwd, agents=agents or [self.agent, partner], reasoning="max",
+                    runs_dir=self.cwd / "runs", metrics_enabled=False)
+        args.update(overrides)
+        return duet.DuetConfig(**args)
+
+    def prepare(self, cfg):
+        with contextlib.ExitStack() as stack:
+            for name in ("_install_sigint", "_install_sigterm", "_install_run_stop_signal",
+                         "_register_run_in_home_index"):
+                stack.enter_context(mock.patch.object(duet, name))
+            self.stdout = io.StringIO()
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            return duet._prepare_run(cfg)
+
+    def git(self, *args):
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", *args],
+                       cwd=self.cwd, check=True, capture_output=True)
+
+    def git_repo_with_seed(self):
+        self.git("init", "-q")
+        (self.cwd / "seed.txt").write_text("seed\n")
+        self.git("add", "seed.txt")
+        self.git("commit", "-qm", "seed")
+
+    def test_launch_check_uses_the_per_turn_predicate(self):
+        prefix = "ZCode launch check failed for agent glm: "
+        catalog_text = self.catalog.read_text()
+        model = self.agent.model
+
+        def broken_template():
+            data = json.loads(catalog_text)
+            data["config"]["providerConfigRules"]["providerRules"][1]["templateId"] = "missing"
+            self.catalog.write_text(json.dumps(data))
+
+        def set_model(value):
+            return lambda: setattr(self.agent, "model", value)
+
+        cases = [
+            ("passes", "max", lambda: None, None),
+            ("mcp file is empty", "max", lambda: (self.cwd / "zcode.json").write_text("{}"), None),
+            ("level is absent", "xhigh", lambda: None, None),
+            ("model is not in the catalog", "max",
+             set_model("account:zai-individual-coding-plan/missing-model"), None),
+            ("model ID is missing", "max", set_model(None), None),
+            ("template is broken on another provider", "max", broken_template, None),
+            ("runtime is missing", "max", lambda: None, ValueError("no ZCode runtime")),
+        ]
+        for name, reasoning, change, command_error in cases:
+            with self.subTest(case=name):
+                self.catalog.write_text(catalog_text)
+                (self.cwd / "zcode.json").write_text(json.dumps({"features": {"mcp": False}}))
+                self.agent.model = model
+                change()
+                cfg = self.config(reasoning=reasoning)
+                with contextlib.ExitStack() as stack:
+                    run = stack.enter_context(mock.patch.object(duet, "_run", return_value=self.result()))
+                    if command_error:
+                        stack.enter_context(mock.patch.object(duet, "_zcode_command", side_effect=command_error))
+                    preflight = duet._zcode_preflight(cfg, worktree_ready=False)
+                    run.assert_not_called()
+                    try:
+                        self.invoke(reasoning=reasoning)
+                        turn_error = None
+                    except (duet.AgentRunError, ValueError) as exc:
+                        turn_error = str(exc)
+                        run.assert_not_called()
+                if turn_error is None:
+                    self.assertIsNone(preflight)
+                else:
+                    self.assertTrue(preflight.startswith(prefix), preflight)
+                    self.assertEqual(turn_error.removeprefix("ZCode invocation failed: "),
+                                     preflight[len(prefix):])
+
+    def test_launch_check_stops_before_kickoff_and_first_turn(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        info = self.cwd / "run.json"
+        cfg = self.config(task_from_cmd="printf seed", run_info_file=info)
+        with mock.patch.object(duet, "run_task_from_cmd", side_effect=AssertionError("kickoff ran")) as kickoff, \
+                mock.patch.object(duet, "call_agent", side_effect=AssertionError("turn ran")) as turn, \
+                mock.patch.object(duet, "_install_sigint"), mock.patch.object(duet, "_install_sigterm"), \
+                mock.patch.object(duet, "_install_run_stop_signal"), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            state = duet.run_duet(cfg)
+        kickoff.assert_not_called()
+        turn.assert_not_called()
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, state["finished_reason"])
+        self.assertEqual("finished", state["phase"])
+        self.assertEqual(0, state["turns_used"])
+        self.assertTrue(state["error"].startswith("ZCode launch check failed for agent glm: "))
+        self.assertIn("native features.mcp=false", state["error"])
+        self.assertIn("[duet] ERROR: ZCode launch check failed for agent glm", stderr.getvalue())
+        run_info = json.loads(info.read_text())
+        self.assertEqual(1, run_info["schema_version"])
+        status = duet.build_run_status(run_info["run_dir"])
+        self.assertEqual(("terminal", 0), (status["health"], status["exit_code"]))
+        self.assertEqual("run finished with setup_error; inspect artifacts", status["error"])
+
+    def prepare_worktree_peer(self, cwd=None):
+        lead = duet.Agent(name="gpt", backend="codex", role="reviewer")
+        cfg = self.config(agents=[lead, self.agent], worktree=True, require_worktree=True,
+                          cwd=cwd or self.cwd)
+        with mock.patch.object(duet, "_zcode_permission_denials",
+                               wraps=duet._zcode_permission_denials) as denials:
+            context, failure = self.prepare(cfg)
+        self.assertEqual(context.wt_path, pathlib.Path(self.agent.cwd_override))
+        self.assertEqual([mock.call(context.wt_path, self.cwd)], denials.call_args_list)
+        return failure
+
+    def test_worktree_peer_mcp_is_checked_after_worktree_setup(self):
+        self.git_repo_with_seed()
+        failure = self.prepare_worktree_peer()
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
+        self.assertEqual(
+            "ZCode launch check failed for agent glm: ZCode review requires native features.mcp=false: "
+            f"create and commit {self.cwd / '.zcode/config.json'} with exactly "
+            '{"features": {"mcp": false}}', failure["error"])
+        worktree, branch = self.agent.cwd_override, failure["worktree_branch"]
+        self.assertTrue(pathlib.Path(worktree).is_dir())
+        self.assertIn(f"[duet] worktree left intact at {worktree} (branch {branch}).", self.stdout.getvalue())
+        self.assertIn(f"drop:   git -C {self.cwd} worktree remove {worktree} && "
+                      f"git -C {self.cwd} branch -D {branch}", self.stdout.getvalue())
+
+    def test_advised_file_committed_from_a_subfolder_reaches_a_new_worktree(self):
+        self.git_repo_with_seed()
+        subfolder = self.cwd / "sub"
+        subfolder.mkdir()
+        failure = self.prepare_worktree_peer(subfolder)
+        advised = pathlib.Path(re.search(r"create and commit (\S+) with exactly", failure["error"]).group(1))
+        self.assertEqual(self.cwd / ".zcode/config.json", advised)
+        self.git("worktree", "remove", "--force", self.agent.cwd_override)
+        self.git("branch", "-D", failure["worktree_branch"])
+        self.agent.cwd_override = None
+        advised.parent.mkdir()
+        advised.write_text(json.dumps({"features": {"mcp": False}}))
+        self.git("add", str(advised))
+        self.git("commit", "-qm", "policy")
+        self.assertIsNone(self.prepare_worktree_peer(subfolder))
+
+    def test_reused_worktree_keeps_the_plain_mcp_advice(self):
+        self.git_repo_with_seed()
+        worktree = self.cwd / "reused"
+        self.git("worktree", "add", "-b", "reused", str(worktree))
+        cfg = self.config(agents=[duet.Agent(name="gpt", backend="codex", role="reviewer"), self.agent],
+                          worktree_path=worktree)
+        context, failure = self.prepare(cfg)
+        self.assertIn(f"create {worktree.resolve() / '.zcode/config.json'} with exactly", failure["error"])
+        self.assertNotIn("commit", failure["error"])
+
+    def test_per_turn_gate_names_the_main_checkout_for_a_new_worktree(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        worktree = self.cwd / "wt"
+        (worktree / ".git").mkdir(parents=True)
+        with self.assertRaisesRegex(duet.AgentRunError, "create and commit " + re.escape(
+                str(self.cwd / ".zcode/config.json"))) as caught:
+            self.invoke(cwd=worktree, origin=self.cwd)
+        self.assertIn(f"in each of these folders of the worktree: {worktree}.", str(caught.exception))
+
+    def test_turn_backend_passes_the_main_checkout_for_a_new_worktree(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        worktree = self.cwd / "wt"
+        (worktree / ".git").mkdir(parents=True)
+        self.agent.cwd_override = worktree
+        cfg = self.config(worktree=True)
+        with mock.patch.object(duet, "_run") as run:
+            with self.assertRaisesRegex(duet.AgentRunError, "create and commit " + re.escape(
+                    str(self.cwd / ".zcode/config.json"))):
+                duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
+            run.assert_not_called()
+        cfg.worktree = False
+        cfg.worktree_path = worktree
+        with mock.patch.object(duet, "_run") as run:
+            with self.assertRaisesRegex(duet.AgentRunError, "create " + re.escape(
+                    str(worktree / ".zcode/config.json"))):
+                duet._call_zcode_backend(self.agent, "system", "message", cfg, True, None, None, "max")
+            run.assert_not_called()
+
+    def test_committed_mcp_file_reaches_the_worktree_peer(self):
+        self.git_repo_with_seed()
+        self.git("add", "zcode.json")
+        self.git("commit", "-qm", "policy")
+        self.assertIsNone(self.prepare_worktree_peer())
+
+    def test_worktree_fallback_checks_the_main_checkout(self):
+        (self.cwd / "zcode.json").write_text("{}")
+        cfg = self.config(worktree=True)
+        cfg.agents.reverse()
+        with mock.patch.object(duet, "_zcode_permission_denials",
+                               wraps=duet._zcode_permission_denials) as denials:
+            context, failure = self.prepare(cfg)
+        self.assertIsNone(context.wt_path)
+        self.assertEqual([mock.call(self.cwd, None)], denials.call_args_list)
+        self.assertEqual(duet.FINISHED_SETUP_ERROR, failure["finished_reason"])
+        self.assertIn("agent glm", failure["error"])
+
+    def test_peer_in_the_main_checkout_is_checked_only_before_the_kickoff(self):
+        (self.cwd / "zcode.json").unlink()
+        cfg = self.config(worktree=True)
+        failure = duet._zcode_preflight(cfg, worktree_ready=False)
+        self.assertIn("ZCode launch check failed for agent glm: ZCode review requires native "
+                      f"features.mcp=false: create {self.cwd / '.zcode/config.json'} with exactly", failure)
+        with mock.patch.object(duet, "_zcode_permission_denials") as denials:
+            self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=True))
+        denials.assert_not_called()
+
+    def test_launch_check_names_the_failed_agent_in_two_zcode_configs(self):
+        other = duet.Agent(name="other", backend="zcode", role="reviewer",
+                           model="account:zai-individual-coding-plan/missing-model")
+        cfg = self.config(agents=[self.agent, other])
+        self.assertIn("agent other: Requested ZCode account model is absent",
+                      duet._zcode_preflight(cfg, worktree_ready=False))
+        self.agent.model = "account:zai-individual-coding-plan/also-missing"
+        self.assertIn("agent glm: Requested ZCode account model is absent",
+                      duet._zcode_preflight(cfg, worktree_ready=False))
+
+    def test_launch_check_keeps_resume_state(self):
+        pin = {"model": self.agent.model, "reasoning": "max"}
+        self.agent.session_id = "sess_abc"
+        self.agent.zcode_selection = dict(pin)
+        cfg = self.config()
+        self.assertIsNone(duet._zcode_preflight(cfg, worktree_ready=False))
+        self.assertEqual(("sess_abc", pin), (self.agent.session_id, self.agent.zcode_selection))
+        self.agent.zcode_selection = {"model": self.agent.model, "reasoning": "high"}
+        self.assertIn("original model/effort pin", duet._zcode_preflight(cfg, worktree_ready=False))
+        self.assertEqual("sess_abc", self.agent.session_id)
+
+    def test_missing_backend_warning_leaves_zcode_to_launch_check(self):
+        with mock.patch.object(duet.shutil, "which", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            duet._warn_missing_backends(self.config())
+        duet._zcode_command.assert_not_called()
+        self.assertIn("'codex' not on PATH", stderr.getvalue())
+        self.assertNotIn("zcode", stderr.getvalue())
 
     def test_dry_run_does_not_start_zcode(self):
         with mock.patch.object(duet, "_run") as run:
