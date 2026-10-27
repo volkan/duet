@@ -1,0 +1,26 @@
+{
+  "interface": {
+    "websiteURL": "https://github.com/volkan/duet",
+    "supportURL": "https://github.com/volkan/duet/issues",
+    "logo": "./assets/icon.png",
+    "composerIcon": "./assets/icon.png",
+    "defaultPrompt": [
+      "Use Duet for ChatGPT. Spawn native reviewer and coder subagents. Use internal ChatGPT models only. Limit to six turns.",
+      "Review these files with two native ChatGPT subagents. Do not edit them; return findings with evidence.",
+      "Use two native ChatGPT subagents to improve this draft. Preserve unresolved claims and stop after six turns."
+    ]
+  },
+  "review": {
+    "prompts": [
+      "Review the attached files with two native ChatGPT subagents. Keep the review read-only and return supported findings with sources.",
+      "Use Duet for ChatGPT to implement the attached specification with a native reviewer and coder, then run the relevant checks.",
+      "Review this draft with two native ChatGPT peers. Keep unresolved claims visible and stop after six turns."
+    ],
+    "commerce": false,
+    "commerce_description": "This plugin does not sell products, process payments, or offer purchases."
+  },
+  "publication": {
+    "countries": [],
+    "release_notes": "Initial ChatGPT Work release with native reviewer and coder turns, local state records, revision fingerprints, bounded agreement, and source-package test validation."
+  }
+}

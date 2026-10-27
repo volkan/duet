@@ -1,0 +1,10 @@
+include scripts/bump_release_version.py
+include scripts/duet_loop_e2e.py
+include scripts/package_chatgpt_plugin.py
+include scripts/check_distribution_metadata.py
+include scripts/check_sdist_tests.py
+include plugins/duet-chatgpt/plugin.json
+include plugins/duet-chatgpt/LICENSE
+recursive-include plugins/duet-chatgpt/skills *.md *.py
+recursive-include packaging/duet-chatgpt *.json *.png
+global-exclude *.py[cod]

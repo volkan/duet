@@ -3,6 +3,10 @@
 The Codex plugin installs the `duet` skill. It does not install Duet or backend
 binaries. The skill shells out to the `duet` CLI on your PATH.
 
+The marketplace also lists [Duet for ChatGPT](CHATGPT_PLUGIN.md). Choose that
+separate package for ChatGPT Work's native peers. It requires the ChatGPT
+host and does not run in Codex.
+
 For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
 see [Shared skill installation](INSTALLATION.md#shared-skill).
 

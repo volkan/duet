@@ -24,6 +24,8 @@ rework itself are no-ops. When a push is release-worthy the jobs run in order:
 
 1. `gate` — fast `make ci`.
 2. `build` — sdist + wheel, then `check_distribution_metadata.py --artifacts dist`.
+   Local `make package-check` also validates the installed wheel and runs the
+   full unit suite from the extracted sdist. Keep test resources in `MANIFEST.in`.
 3. `pypi-publish` — uploads to PyPI; pauses on the protected `pypi` environment
    for **manual approval** first.
 4. `create-release` — runs only **after** PyPI succeeds; auto-creates the

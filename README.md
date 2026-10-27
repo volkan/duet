@@ -109,6 +109,7 @@ native marketplace plugins, follow the
 
 ## Go further
 
+- [Duet inside ChatGPT Work, using internal models](https://github.com/volkan/duet/blob/main/docs/CHATGPT_PLUGIN.md)
 - [Installation, recipes, and CLI reference](https://github.com/volkan/duet/blob/main/docs/USAGE.md)
 - [Review reports and feedback](https://github.com/volkan/duet/blob/main/docs/FINDINGS.md) · [Recorded workflow demo](https://github.com/volkan/duet/blob/main/docs/demos/README.md)
 - [Local metrics and privacy](https://github.com/volkan/duet/blob/main/docs/METRICS.md) · [Usage evidence](https://github.com/volkan/duet/blob/main/docs/USAGE_EVIDENCE.md)
