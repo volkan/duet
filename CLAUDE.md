@@ -23,6 +23,19 @@ Keep both native manifest versions in lockstep with `duet.__version__`.
 [Installation and upgrades](docs/INSTALLATION.md) documents the shared and
 native routes.
 
+`plugins/duet-chatgpt/` is a separate portable skills-only package for ChatGPT
+Work's native peers. Its bundled `scripts/control.py` is a standalone stdlib
+state helper; it must never call models, agent CLIs, or network services.
+It does not extend `duet.py` or share the CLI status schema. Its package version
+is independent of `duet.__version__`. `scripts/package_chatgpt_plugin.py`
+validates and exports only that package. See `docs/CHATGPT_PLUGIN.md` for host
+requirements, private installation, and the required real ChatGPT acceptance.
+Public upload settings and the PNG icon live under `packaging/duet-chatgpt/`.
+The `--public` builder applies them to a separate copy and validates its
+inventory, listing lengths, icon, confirmed country targeting, and commerce
+declaration. Keep private and public exports separate. Unpublished policy
+drafts live in `docs/publication/duet-chatgpt/`; never claim that they are URLs.
+
 ## Common commands
 
 ```bash
@@ -36,6 +49,9 @@ make reasoning-check    # reasoning-effort translation check (scripts/check_reas
 make distribution-check # validate pyproject/plugin manifests and source metadata
 make package-check      # build sdist/wheel and validate packaged metadata
 make plugin-check       # validate the Claude Code plugin manifest with claude
+make chatgpt-plugin-check # validate the separate portable ChatGPT-native plugin
+make chatgpt-plugin     # build and inspect its private ZIP in dist/
+make chatgpt-plugin-public # build and inspect the public upload ZIP in dist/openai/
 make loop-test          # real E2E loop suite (default Claude/Codex; any backend via --lead-backend/--partner-backend); slow, writes runs/test-loop/
 make build              # sdist+wheel into dist/ (needs: python3 -m pip install build)
 make uninstall
@@ -53,9 +69,14 @@ Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the ru
 1. `tests/` (run via `make unit-test`) — stdlib `unittest` only. Outside `make`, always prefix `DUET_METRICS=0` (one class: `DUET_METRICS=0 python3 -m unittest tests.test_duet.TestReasoningHelpers`); without it the suite writes metrics snapshots and home-index symlinks into your real `~/.duet/`. `test_duet.py` covers pure helpers; `test_zcode_backend.py` covers the native ZCode backend and its launch check; `test_control_plane.py` covers the recipe, run-info/status schemas, deferred kickoff, strict worktree failure, and secret exclusion; `test_stop_control_plane.py` covers `--stop`; `test_no_subagents.py` covers delegation controls; `test_metrics_*.py` and `test_backend_metrics.py` cover central metrics; `test_finding_*.py` and `test_feedback_concurrency.py` cover findings and feedback. Add tests in the same commit as contract changes.
 2. `scripts/smoke.sh` (run via `make smoke-test` or as part of `make test`) — the integration net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
 3. `scripts/check_reasoning_levels.py` (run via `make reasoning-check`) — monkey-patches `_run` and asserts each reasoning level emits the right backend cmd; the executable half of invariant 1 below.
-4. `scripts/check_distribution_metadata.py` validates source/plugin/artifact metadata; `scripts/check_installed_wheel.py` installs the wheel into a temp venv and checks runtime version plus run-info/status JSON. `make package-check` runs both after building.
+4. `scripts/check_distribution_metadata.py` validates source/plugin/artifact metadata; `scripts/check_installed_wheel.py` installs the wheel into a temp venv and checks runtime version plus run-info/status JSON. `scripts/check_sdist_tests.py` extracts the built sdist and runs its full unit suite outside the checkout. `MANIFEST.in` includes the scripts and native plugin resources imported by those tests. `make package-check` runs all three checks after building.
 5. `claude plugin validate .` and `claude plugin validate plugins/duet` (run via `make plugin-check`) — validates the Claude Code plugin with the real Claude Code CLI. CI installs the pinned CLI before running this job.
 6. `scripts/check_complexity.py` (run via `make complexity`) — stdlib AST cyclomatic-complexity/length gate (budget: CC ≤ 25, length ≤ 160). duet is single-file, so the only defense against sprawl is keeping individual functions small; this fails CI if any function exceeds budget. Before adding branches to a function, run `python3 scripts/check_complexity.py --top 10` to see headroom — several functions (e.g. `build_continue_config`) sit at or near CC 25, so one inline `if` can trip the gate.
+
+`make ci` also runs `chatgpt-plugin-check`. The unit suite includes native
+ChatGPT control-plane tests and a subprocess smoke, without model calls.
+The distribution CI job builds and inspects both ChatGPT ZIP variants. These
+checks do not replace a real native-peer loop in the ChatGPT Work host.
 
 ## Required GitHub workflow for agents
 

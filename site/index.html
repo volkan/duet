@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Support and publication information for Duet for ChatGPT.">
+  <title>Duet for ChatGPT</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+    body { margin: 0; background: #f4f7ff; color: #172033; }
+    main { max-width: 760px; margin: 10vh auto; padding: 2rem; }
+    article { padding: clamp(1.5rem, 5vw, 3rem); border: 1px solid #d9e2f5; border-radius: 24px; background: white; box-shadow: 0 20px 60px #17367512; }
+    .mark { color: #2563eb; font-size: 2rem; font-weight: 800; letter-spacing: -.05em; }
+    h1 { margin: 1.2rem 0 .5rem; font-size: clamp(2rem, 6vw, 3rem); line-height: 1.1; }
+    p { max-width: 62ch; color: #45516a; }
+    nav { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 2rem; }
+    a { color: #174fc4; }
+    nav a { padding: .7rem 1rem; border-radius: 12px; background: #edf3ff; font-weight: 650; text-decoration: none; }
+    nav a:hover { background: #dce8ff; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #101727; color: #edf2ff; }
+      article { border-color: #2a3854; background: #182238; box-shadow: none; }
+      p { color: #bdc9df; }
+      a { color: #9fbcff; }
+      nav a { background: #243654; }
+      nav a:hover { background: #30476e; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <div class="mark" aria-hidden="true">duet</div>
+      <h1>Two peers. One clearer result.</h1>
+      <p>Duet for ChatGPT coordinates a reviewer and a coder inside ChatGPT Work. The peers alternate turns, track findings and checks, and require two rationale-backed approvals for the same revision.</p>
+      <p>The plugin uses ChatGPT's native peers and internal model routing. Its local helper records run state and does not make model or network calls. The host must provide native subagents and Python file execution.</p>
+      <nav aria-label="Plugin information">
+        <a href="https://github.com/volkan/duet">Source project</a>
+        <a href="support/">Support</a>
+        <a href="privacy/">Privacy</a>
+        <a href="terms/">Terms</a>
+      </nav>
+    </article>
+  </main>
+</body>
+</html>

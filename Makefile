@@ -2,7 +2,7 @@ PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin/duet
 SRC := $(abspath duet.py)
 
-.PHONY: install uninstall help test ci unit-test smoke-test complexity reasoning-check distribution-check package-check plugin-check loop-test build
+.PHONY: install uninstall help test ci unit-test smoke-test complexity reasoning-check distribution-check package-check plugin-check chatgpt-plugin-check chatgpt-plugin chatgpt-plugin-public loop-test build
 install:  ## symlink duet.py to $(BIN) (PREFIX=... to override)
 	@mkdir -p $(dir $(BIN))
 	@ln -sfn $(SRC) $(BIN)
@@ -12,7 +12,7 @@ install:  ## symlink duet.py to $(BIN) (PREFIX=... to override)
 uninstall: ## remove the symlink
 	@rm -f $(BIN) && echo "removed $(BIN)"
 test: unit-test smoke-test ## run unit tests then scripts/smoke.sh
-ci: unit-test reasoning-check smoke-test complexity distribution-check ## run the fast local merge gate
+ci: unit-test reasoning-check smoke-test complexity distribution-check chatgpt-plugin-check ## run the fast local merge gate
 unit-test: ## run pure-function unit tests (stdlib unittest, no agents)
 	@DUET_METRICS=0 python3 -m unittest discover -s tests
 smoke-test: ## run scripts/smoke.sh dry-run regression checks
@@ -23,13 +23,20 @@ reasoning-check: ## verify the reasoning-effort translation layer (no agents)
 	@python3 scripts/check_reasoning_levels.py
 distribution-check: ## validate pyproject/plugin manifests and source metadata
 	@python3 scripts/check_distribution_metadata.py
-package-check: ## build artifacts and validate wheel/sdist metadata
+package-check: ## build artifacts, validate metadata, and run the sdist unit suite
 	@if command -v uv >/dev/null 2>&1; then uv build; else python3 -m build; fi
 	@python3 scripts/check_distribution_metadata.py --artifacts dist
 	@python3 scripts/check_installed_wheel.py dist
+	@python3 scripts/check_sdist_tests.py dist
 plugin-check: ## validate the Claude Code plugin (root marketplace + narrowed plugin root)
 	@claude plugin validate .
 	@claude plugin validate plugins/duet
+chatgpt-plugin-check: ## validate the portable ChatGPT-native plugin without model calls
+	@python3 scripts/package_chatgpt_plugin.py
+chatgpt-plugin: ## build and inspect the private ChatGPT-native plugin ZIP in dist/
+	@python3 scripts/package_chatgpt_plugin.py --output-dir dist
+chatgpt-plugin-public: ## build and inspect the public OpenAI upload ZIP in dist/openai/
+	@python3 scripts/package_chatgpt_plugin.py --public --output-dir dist/openai
 loop-test: ## run real end-to-end loop scenarios (default Claude/Codex; retarget any backend via LOOP_TEST_ARGS="--lead-backend … --partner-backend …"; slow, costs model turns)
 	@python3 scripts/duet_loop_e2e.py $(LOOP_TEST_ARGS)
 build: ## build sdist+wheel into dist/ (needs current python3 to import build: python3 -m pip install build)

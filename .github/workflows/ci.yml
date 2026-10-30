@@ -55,6 +55,8 @@ jobs:
           python-version: "3.11"
       - name: Source metadata and manifest validation
         run: make distribution-check
+      - name: Validate and export ChatGPT plugin packages
+        run: make chatgpt-plugin chatgpt-plugin-public
       - name: Install build frontend
         run: python -m pip install build
       - name: Build sdist/wheel and validate artifacts

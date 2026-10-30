@@ -1,0 +1,25 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "duet-chatgpt",
+  "version": "0.1.0",
+  "description": "Run Duet review and implementation loops with two native ChatGPT Work peers, using only ChatGPT's internal models.",
+  "author": {"name": "Volkan Altan"},
+  "homepage": "https://github.com/volkan/duet",
+  "repository": "https://github.com/volkan/duet",
+  "license": "MIT",
+  "keywords": ["chatgpt", "review", "pair-programming", "agents"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Duet for ChatGPT",
+        "shortDescription": "Two native ChatGPT peers",
+        "longDescription": "Coordinate a reviewer and coder inside ChatGPT Work. Alternate native peer turns, preserve their host handles, track findings and checks, and require consecutive rationale-backed agreement on the same revision. The bundled Python helper records state; it makes no model or network calls. Requires native subagents and Python file execution in the ChatGPT host.",
+        "developerName": "Volkan Altan",
+        "category": "Developer Tools",
+        "capabilities": [],
+        "defaultPrompt": "Use Duet for ChatGPT. Spawn native reviewer and coder subagents. Use internal ChatGPT models only. Limit to six turns.",
+        "brandColor": "#2563EB"
+      }
+    }
+  }
+}

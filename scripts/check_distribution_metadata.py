@@ -411,6 +411,18 @@ def _assert_sdist_members(sdist_path: Path, version: str) -> None:
         f"{prefix}pyproject.toml",
         f"{prefix}tests/test_control_plane.py",
         f"{prefix}tests/test_duet.py",
+        f"{prefix}scripts/bump_release_version.py",
+        f"{prefix}scripts/duet_loop_e2e.py",
+        f"{prefix}scripts/package_chatgpt_plugin.py",
+        f"{prefix}scripts/check_sdist_tests.py",
+        f"{prefix}scripts/check_distribution_metadata.py",
+        f"{prefix}plugins/duet-chatgpt/plugin.json",
+        f"{prefix}plugins/duet-chatgpt/LICENSE",
+        f"{prefix}plugins/duet-chatgpt/skills/duet-chatgpt/SKILL.md",
+        f"{prefix}plugins/duet-chatgpt/skills/duet-chatgpt/references/peer-brief.md",
+        f"{prefix}plugins/duet-chatgpt/skills/duet-chatgpt/scripts/control.py",
+        f"{prefix}packaging/duet-chatgpt/openai.json",
+        f"{prefix}packaging/duet-chatgpt/assets/icon.png",
     }
     with tarfile.open(sdist_path, "r:gz") as sdist:
         names = set(sdist.getnames())

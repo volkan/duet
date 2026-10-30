@@ -4,6 +4,10 @@ Duet has two parts: the `duet-cli` Python package runs the agents, and the
 optional `duet` skill lets an assistant launch and supervise it. Install the
 CLI first; the skill uses the `duet` executable on PATH.
 
+For a loop inside ChatGPT Work using only internal models, use
+[Duet for ChatGPT](CHATGPT_PLUGIN.md). That separate package uses native
+subagents and a local state helper. It requires no agent CLI or API key.
+
 ## Prerequisites
 
 Use Python 3.9+ and Git. Install and sign in to the CLIs for your chosen pair:
