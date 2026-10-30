@@ -1,7 +1,9 @@
 {
   "interface": {
-    "websiteURL": "https://github.com/volkan/duet",
-    "supportURL": "https://github.com/volkan/duet/issues",
+    "websiteURL": "https://volkan.github.io/duet/",
+    "supportURL": "https://volkan.github.io/duet/support/",
+    "privacyPolicyURL": "https://volkan.github.io/duet/privacy/",
+    "termsOfServiceURL": "https://volkan.github.io/duet/terms/",
     "logo": "./assets/icon.png",
     "composerIcon": "./assets/icon.png",
     "defaultPrompt": [

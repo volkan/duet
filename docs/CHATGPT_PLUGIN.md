@@ -59,9 +59,9 @@ does not require all four site URLs or MCP cases and demo materials.
 A primary icon is required before submission. The plugin guidelines still
 require a published privacy policy and verified publisher identity.
 
-[Publication materials](publication/duet-chatgpt/README.md) contain the listing
-and unpublished page drafts. Their absence as public URLs is disclosed;
-the package does not contain invented privacy or terms addresses.
+[Publication materials](publication/duet-chatgpt/README.md) track the listing and
+the GitHub Pages source under `site/`. The public build includes website,
+support, privacy, and terms URLs. Verify the deployed pages before uploading.
 Host acceptance and publisher attestations remain separate from ZIP validation.
 
 ## Install privately

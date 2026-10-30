@@ -106,6 +106,13 @@ class TestChatGPTPluginPackage(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "presentation"):
                     package.validate_interface(interface)
 
+    def test_public_listing_requires_all_four_https_urls(self):
+        manifest, files = package.package_contents(self.plugin, public=True)
+        interface = manifest["extensions"]["com.openai"]["interface"]
+        interface.pop("privacyPolicyURL")
+        with self.assertRaisesRegex(ValueError, "privacyPolicyURL"):
+            package.validate_public(manifest, files)
+
     def test_png_rejects_corrupt_chunks_and_invalid_image_layout(self):
         def chunk(kind, data):
             return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))

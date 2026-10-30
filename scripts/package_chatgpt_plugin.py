@@ -130,6 +130,11 @@ def validate_public(manifest, files):
     if any(settings.get(key) is not None for key in ("apps", "hooks")):
         raise ValueError("public uploads cannot contain app bindings or lifecycle hooks")
     interface = settings["interface"]
+    for key in ("websiteURL", "supportURL", "privacyPolicyURL", "termsOfServiceURL"):
+        value = interface.get(key)
+        if (not isinstance(value, str) or not value.startswith("https://")
+                or len(value) > 1024):
+            raise ValueError("public package requires a valid HTTPS listing URL: " + key)
     if any(interface.get(key) != "./assets/icon.png" for key in ("logo", "composerIcon")):
         raise ValueError("public icon references must point to the packaged icon")
     validate_png(files["assets/icon.png"])

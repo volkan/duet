@@ -1,8 +1,8 @@
 # Duet for ChatGPT publication materials
 
-The page files in this folder are unpublished drafts for the publisher's review.
-They are not listing URLs. Do not claim that a privacy policy is published
-until the chosen host serves the approved page publicly.
+The Markdown files in this folder are the source drafts for the Duet for
+ChatGPT GitHub Pages site in `site/`. The package listing uses the Pages URLs;
+do not call them published until deployment succeeds and each page is verified.
 
 The publisher confirmed these values on 2026-10-26:
 
@@ -10,10 +10,9 @@ The publisher confirmed these values on 2026-10-26:
 - Countries: all countries supported by OpenAI, encoded as `publication.countries: []`.
 - Commerce: no payments or purchases, encoded as `review.commerce: false`.
 
-The public package uses the existing public project and issue tracker for
-`websiteURL` and `supportURL`. Their repository owner and issue availability
-were checked through GitHub. Privacy and terms URLs remain absent because the
-publisher has no published pages for them.
+The public package uses `https://volkan.github.io/duet/` for the site and its
+support, privacy, and terms pages. These links become valid only after Pages
+deployment. Verify all four destinations after deployment.
 
 The current [OpenAI submission reference](https://developers.openai.com/plugins/deploy/submission#manifest-fields)
 does not require all four listing URLs for skills-only ZIP metadata validation.
@@ -62,11 +61,10 @@ mark flat, minimal, centered, and legible at 48 pixels. Use no text, arrows,
 watermark, or OpenAI or ChatGPT logo.
 ```
 
-## Remaining publication work
+## Publication status
 
-Review the privacy, terms, and support drafts before publishing them.
-Choose their hosting destination, then verify their public pages and add the
-actual URLs to the public metadata. No hosting service was selected or deployed.
+Review the privacy, terms, and support pages before public release. Deployment
+uses GitHub Pages through `.github/workflows/pages.yml`.
 
 Install and run the [ChatGPT acceptance task](../../CHATGPT_PLUGIN.md#validation)
 against the packaged version. The portal's identity checks and policy
