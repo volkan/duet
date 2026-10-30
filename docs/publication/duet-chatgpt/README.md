@@ -1,8 +1,7 @@
 # Duet for ChatGPT publication materials
 
-The Markdown files in this folder are the source drafts for the Duet for
-ChatGPT GitHub Pages site in `site/`. The package listing uses the Pages URLs;
-do not call them published until deployment succeeds and each page is verified.
+The Markdown files in this folder are the content sources for the Duet for
+ChatGPT GitHub Pages site in `site/`. The site is published at the package URLs.
 
 The publisher confirmed these values on 2026-10-26:
 
@@ -11,8 +10,7 @@ The publisher confirmed these values on 2026-10-26:
 - Commerce: no payments or purchases, encoded as `review.commerce: false`.
 
 The public package uses `https://volkan.github.io/duet/` for the site and its
-support, privacy, and terms pages. These links become valid only after Pages
-deployment. Verify all four destinations after deployment.
+support, privacy, and terms pages. All four pages are live and verified.
 
 The current [OpenAI submission reference](https://developers.openai.com/plugins/deploy/submission#manifest-fields)
 does not require all four listing URLs for skills-only ZIP metadata validation.
@@ -63,10 +61,10 @@ watermark, or OpenAI or ChatGPT logo.
 
 ## Publication status
 
-Review the privacy, terms, and support pages before public release. Deployment
-uses GitHub Pages through `.github/workflows/pages.yml`.
+Review the published privacy, terms, and support pages before plugin submission.
+Deployment uses GitHub Pages through `.github/workflows/pages.yml`.
 
 Install and run the [ChatGPT acceptance task](../../CHATGPT_PLUGIN.md#validation)
 against the packaged version. The portal's identity checks and policy
-attestations must be completed by the authorized publisher. No upload,
-submission, or publication has occurred.
+attestations must be completed by the authorized publisher. The plugin has not
+been uploaded or submitted for review.

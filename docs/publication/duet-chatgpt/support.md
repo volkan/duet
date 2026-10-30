@@ -3,6 +3,9 @@
 Report package problems through the
 [Duet issue tracker](https://github.com/volkan/duet/issues).
 
+GitHub requires an account and sign-in to submit an issue. Anyone with read
+access can open an issue in this public repository.
+
 Include the package version, host surface, stop reason, steps to reproduce,
 and the relevant error. Remove credentials, private task text, peer replies,
 and native session handles before posting.
