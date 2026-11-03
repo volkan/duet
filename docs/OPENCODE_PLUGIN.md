@@ -97,10 +97,11 @@ In the OpenCode TUI, invoke the command:
 /duet
 ```
 
-Non-interactively from a shell:
+Non-interactively from a shell (OpenCode v2 removed `run --command`; invoke
+duet directly):
 
 ```bash
-opencode run --command duet "'npm test 2>&1' --turns 4"
+duet --task-from-cmd 'npm test 2>&1' --turns 4
 ```
 
 Plain `/duet` runs the default review recipe:
@@ -139,6 +140,19 @@ The command runs on OpenCode's `build` agent (full tool access) so it can
 shell out to `duet`. Make sure your OpenCode permissions allow the `build`
 agent to run shell commands, or run with `--auto` for the non-interactive form.
 Auto mode still respects explicit permission denials.
+
+## OpenCode peer models
+
+Use a `provider/model` ID for an OpenCode peer. Duet rejects a `#variant`
+suffix in the model ID. Set `--reasoning` or the agent's `reasoning_effort`
+instead. Report a rejected ID without substituting another model.
+
+OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
+requires an explicit model to receive effort through `-m provider/model#<level>`.
+Without a model, v2 receives only the prompt prefix and Duet prints a note.
+High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
+Report this limit without choosing another model or changing the requested effort.
+For nested checkout paths and clone cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
 ## Upgrade
 
@@ -202,7 +216,7 @@ end of the run.
 | `/duet` runs but says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure OpenCode's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
-| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --auto "..."`. Explicit permission denials still apply. |
+| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or run the loop directly from a shell (OpenCode v2 removed `run --command`): `duet --task-from-cmd "..." --turns 4`. Explicit permission denials still apply. |
 | No run directory appears | Check the original duet process. The recipe writes initial state before `/review`; use `duet --list` or a custom `--run-info-file` launch to discover it deterministically. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
 

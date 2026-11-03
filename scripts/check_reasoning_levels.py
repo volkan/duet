@@ -14,8 +14,8 @@ level, and asserts:
   - codex is invoked with `-c model_reasoning_effort=<level>` for every
     explicitly requested level
   - copilot is invoked with `--effort <mapped>`
-  - opencode is invoked with `--variant <level>` (identity map: OpenCode
-    tolerates/ignores unknown variants, so duet passes the level through)
+  - opencode v1 carries the level as `--variant <level>`; v2 uses
+    `-m model#<level>` (identity map; v2 errors on an unknown variant)
   - gemini is invoked without any effort flag, because Gemini CLI has no
     documented reasoning-effort option
   - the system-prompt prefix contains the right reasoning-nudge marker for
@@ -67,11 +67,16 @@ def main() -> int:
     m = _load_duet()
 
     captured: list[list[str]] = []
+    opencode_major = 1
 
     def fake_run(cmd, **_kwargs):
         captured.append(list(cmd))
         if cmd[:3] == ["opencode", "debug", "config"]:
-            return 0, '{"subagent_depth": 0}', ""
+            if opencode_major == 1:
+                return 0, '{"subagent_depth": 0}', ""
+            return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
+        if "--version" in cmd:
+            return 0, f"opencode v{opencode_major}.2.5", ""
         if cmd[0] == "claude":
             return (0, json.dumps({"result": "ok", "session_id": "s"}), "")
         if cmd[0] == "gemini":
@@ -104,7 +109,7 @@ def main() -> int:
     a_cx = m.Agent(name="x", backend="codex", role="coder")
     a_gm = m.Agent(name="g", backend="gemini", role="coder")
     a_cp = m.Agent(name="p", backend="copilot", role="coder")
-    a_oc = m.Agent(name="o", backend="opencode", role="coder")
+    a_oc = m.Agent(name="o", backend="opencode", role="coder", model="example/model")
 
     rows: list[tuple[str, str, str, str, str, str, str, bool, list[str]]] = []
     bad = 0
@@ -157,18 +162,15 @@ def main() -> int:
             if "--effort" in copilot_cmd else "(none)"
         )
 
-        captured.clear()
-        m.call_opencode(
-            a_oc, "sys", "msg", pathlib.Path("."),
-            60, dry=False, first_turn=True, reasoning=lvl,
-        )
-        opencode_cmd = captured[-1]
-        # OpenCode takes the prompt as the trailing positional, not via `-p`.
-        opencode_prompt = opencode_cmd[-1]
-        opencode_variant = (
-            opencode_cmd[opencode_cmd.index("--variant") + 1]
-            if "--variant" in opencode_cmd else "(none)"
-        )
+        opencode_commands = {}
+        for opencode_major in (1, 2):
+            m._OPENCODE_CLI_MAJOR = None
+            captured.clear()
+            m.call_opencode(
+                a_oc, "sys", "msg", pathlib.Path("."),
+                60, dry=False, first_turn=True, reasoning=lvl,
+            )
+            opencode_commands[opencode_major] = captured[-1]
 
         want = EXPECTED[lvl]
         problems: list[str] = []
@@ -189,13 +191,23 @@ def main() -> int:
                 f"copilot --effort {copilot_effort} "
                 f"(want {want['copilot_effort']})"
             )
-        if want["prefix_marker"] not in opencode_prompt[:60]:
-            problems.append(f"opencode prefix missing {want['prefix_marker']!r}")
-        if opencode_variant != want["opencode_variant"]:
-            problems.append(
-                f"opencode --variant {opencode_variant} "
-                f"(want {want['opencode_variant']})"
-            )
+        opencode_variants = []
+        for major, cmd in opencode_commands.items():
+            model = cmd[cmd.index("-m") + 1] if "-m" in cmd else ""
+            if major == 1:
+                variant = cmd[cmd.index("--variant") + 1] if "--variant" in cmd else "(none)"
+                if model != "example/model" or "--standalone" in cmd or "--dir" not in cmd:
+                    problems.append("opencode v1 model or directory flags changed")
+            else:
+                variant = model.partition("#")[2] or "(none)"
+                if "--variant" in cmd or "--dir" in cmd or "--standalone" not in cmd:
+                    problems.append("opencode v2 variant or directory flags changed")
+            opencode_variants.append(variant)
+            if want["prefix_marker"] not in cmd[-1][:60]:
+                problems.append(f"opencode v{major} prefix missing {want['prefix_marker']!r}")
+            if variant != want["opencode_variant"]:
+                problems.append(f"opencode v{major} variant {variant} (want {want['opencode_variant']})")
+        opencode_variant = "/".join(opencode_variants)
 
         rows.append((lvl, repr(prefix[:30]), effort, codex_arg,
                      copilot_effort, opencode_variant, gemini_arg,
@@ -205,12 +217,12 @@ def main() -> int:
 
     # Pretty-print the table even on success — same shape as the original
     # one-liner so the smoke check is easy to eyeball.
-    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     copilot  opencode  gemini_arg")
-    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 7}  {'-' * 8}  {'-' * 20}")
+    print(f"{'level':>8}  {'claude_prefix':35}  {'effort':6}  codex_arg                     copilot  opencode v1/v2   gemini_arg")
+    print(f"{'-' * 8:>8}  {'-' * 35}  {'-' * 6}  {'-' * 30}  {'-' * 7}  {'-' * 15}  {'-' * 20}")
     for lvl, prefix_repr, effort, codex_arg, copilot_effort, opencode_variant, gemini_arg, ok, _ in rows:
         mark = "" if ok else "  ← mismatch"
         print(f"{lvl:>8}  {prefix_repr:35}  {effort:6}  "
-              f"{codex_arg:30}  {copilot_effort:7}  {opencode_variant:8}  {gemini_arg}{mark}")
+              f"{codex_arg:30}  {copilot_effort:7}  {opencode_variant:15}  {gemini_arg}{mark}")
 
     if bad:
         print(f"\nFAIL: {bad} row(s) mismatch.", file=sys.stderr)

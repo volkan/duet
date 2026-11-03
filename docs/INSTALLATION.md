@@ -16,7 +16,7 @@ Use Python 3.9+ and Git. Install and sign in to the CLIs for your chosen pair:
 |---|---|
 | Claude Code | [Claude Code quickstart](https://code.claude.com/docs/en/quickstart) |
 | Codex CLI | [Codex CLI getting started](https://developers.openai.com/codex/cli#getting-started) |
-| OpenCode, when used as a host or backend | [OpenCode setup](https://opencode.ai/docs/) |
+| OpenCode, when used as a host or backend | [OpenCode setup](https://opencode.ai/v2/docs/) |
 
 For the default Claude + Codex review, start `claude` and `codex` once and
 complete their sign-in flows. A desktop app alone does not put its CLI on
@@ -57,8 +57,12 @@ reference. One-shot runners do not install `duet` on the assistant's PATH.
 
 ## Shared skill
 
-One skill definition serves Claude Code, Codex, OpenCode, and ZCode. With
-Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
+One skill definition serves Claude Code, Codex, OpenCode, and ZCode. For
+OpenCode peer model and effort constraints, see
+[OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
+The skill preserves requested models and efforts and reports unsupported selections.
+For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
+With Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add volkan/duet --skill duet --global \

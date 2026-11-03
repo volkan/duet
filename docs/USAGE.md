@@ -238,7 +238,7 @@ duet --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --json 
 What this does:
 
 1. Runs the `gh` command with cwd = the target project. The issue body + comments JSON becomes the kickoff text handed to codex.
-2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy.
+2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy. (OpenCode v2 peers default to `~/.duet/worktrees/<cwd-slug>/<run_id>/` instead — see `--worktree-root` below.)
 3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
 4. claude (lead, planner role) sees the auto-appended worktree handoff block and diff each turn, then either flags issues or accepts Codex's convergence rationale with its own `LGTM rationale:` plus `<<<LGTM>>>`.
 5. Worktree is left intact at end. Merge / drop instructions printed on exit.
@@ -660,8 +660,8 @@ worktree gated by `verify_cmd`.
 | `--require-worktree` | fail closed with a durable `setup_error` instead of silently falling back to same-repo mode if reuse/creation fails |
 | `--allow-worktree-fallback` | allow the legacy same-repo fallback; overrides the review recipe's strict setting |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
-| `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior |
-| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** passes `run --variant <v>` with the level unchanged; OpenCode variants are provider-specific, but it silently ignores a variant a model doesn't define, so duet passes the level through for forward-compatibility. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
+| `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior. OpenCode v2 peers instead get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, because v2 resolves git-worktree sessions to the main checkout |
+| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>` — an unknown variant is a model-resolution error there, so an unsupported level fails that turn instead of running at another effort — and a v2 peer without an explicit model gets only the prompt prefix plus a one-line note. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
@@ -771,7 +771,8 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     state.json                               # task, agents, session_ids, history,
                                              # phase, finished_reason, duet_pid,
                                              # sentinel/sandbox/permissions/reasoning,
-                                             # worktree/worktree_for if present,
+                                             # worktree/worktree_for/worktree_kind,
+                                             # owned_worktree_path when eligible for a drop hint,
                                              # verify_cmd/last_verify if present,
                                              # recap_path if --recap,
                                              # continue_from for --continue runs
@@ -782,7 +783,8 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     turn-01-verify.pid                       # PID file while the verify command runs
     turn-02-claude-reviewer.stderr.log
     …
-    wt/                                      # the git worktree (if --worktree)
+    wt/                                      # the git worktree (if --worktree; OpenCode v2
+    #                                            peers keep theirs at ~/.duet/worktrees/<cwd-slug>/<run_id>/)
 ```
 
 The files above are the raw, agent-accessible run artifacts. They remain under
@@ -972,7 +974,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
-- **OpenCode**: each call uses `opencode run --format json`, and resumes with `opencode run -s <sessionID> ...`. Duet reads the top-level `sessionID` from OpenCode's JSONL event stream and persists it; the id is stable across turns (OpenCode does not rotate it), so resume is robustly id-keyed and two OpenCode agents can safely share one cwd. **`opencode run` exits 0 even when the model or a tool errors** — the failure is an `{"type":"error"}` event in the stream — so duet inspects the events and stops with `agent_error` on an error event or a missing `sessionID` rather than forwarding a broken reply.
+- **OpenCode**: each call uses `opencode run --format json` (v1 adds `--dir <cwd>`; v2 adds `--standalone` and takes the project from the process cwd), and resumes with `opencode run -s <sessionID> ...`. Duet reads the top-level `sessionID` from OpenCode's JSONL event stream and persists it; the id is stable across turns (OpenCode does not rotate it), so resume is robustly id-keyed and two OpenCode agents can safely share one cwd. **`opencode run` exits 0 even when the model or a tool errors** — the failure is an `{"type":"error"}` event in the stream — so duet inspects the events and stops with `agent_error` on an error event or a missing `sessionID` rather than forwarding a broken reply.
 
 ---
 
@@ -1036,11 +1038,22 @@ Gemini extra roots from `--add-dir` / `add_dirs:` are emitted as
 in non-interactive mode with `--allow-all-tools`; use Copilot `extra_args` for
 additional `--deny-tool`, URL, or path policy. OpenCode permissions are
 likewise native: duet runs `opencode run --auto` so
-tool-using turns don't hang, scopes the project with `--dir <cwd>`, and has no
-`add_dirs:` equivalent (OpenCode operates on the whole `--dir` project); use
-OpenCode `extra_args` for narrower tool/permission policy. Duet sets
-`subagent_depth: 0` and checks the resolved native config before each turn.
-If managed settings override it or the check fails, the peer does not start.
+tool-using turns don't hang, scopes the project with `--dir <cwd>` on CLI v1
+(v2 takes the project from the process cwd), and has no
+`add_dirs:` equivalent (OpenCode operates on the whole project); use
+OpenCode `extra_args` for narrower tool/permission policy. A `#variant`
+suffix in `model:` is rejected for OpenCode; set `reasoning_effort` or
+`--reasoning` instead (duet owns the model#variant suffix on v2). Duet sets
+`subagent_depth: 0` (top-level on v1; `experimental.subagent_depth` plus a
+`subagent` permissions deny on v2) and checks the native config before each
+turn — on v2 through `--standalone`, the only path where the inline override
+reaches config. The v2 check rejects any source that allows or asks for
+`subagent` or `task`, including action patterns with `*` and `?`.
+It checks top-level and agent-scoped rules, including legacy permission maps.
+Other pattern characters are literal, and action matching is case-sensitive.
+A v2 peer running in Duet's worktree also carries an `external_directory` deny
+for OpenCode's native external-directory requests. These controls do not provide an operating system sandbox.
+If managed settings override the policy or the check fails, the peer does not start.
 Remote `--attach` and the old permission-bypass flag are incompatible with the
 [subagent policy](SUBAGENTS.md).
 
@@ -1120,27 +1133,44 @@ verification runs in `--cwd`.
 
 ### Where the worktree lives
 
-By default the worktree lands at `<runs_dir>/<run_id>/wt/` — i.e. right next to that run's `transcript.md` and `state.json`. Two reasons:
+By default the worktree lands at `<runs_dir>/<run_id>/wt/`, beside the run's `transcript.md` and `state.json`.
+OpenCode v2 peers receive an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, on branch `duet/<run_id>`.
+OpenCode v2 can resolve linked worktrees to the main checkout, as verified on v2.2.5.
+The clone starts at the source checkout's committed `HEAD`, including when the source is a linked worktree.
+When `--cwd` names a subdirectory, Duet clones its repository root and starts the peer at the clone root.
+The other peer keeps the requested `--cwd`. Merge with `git fetch <clone> <branch> && git merge FETCH_HEAD`.
+Duet prints a clone drop hint only during the invocation that created it. Two reasons for the default:
 
 1. **Durability.** OS temp-dir cleaners (`periodic` on macOS, `systemd-tmpfiles` on Linux, reboot-time `/tmp` wipes on some distros) can erase a worktree mid-run on long duets. Living under `runs/` survives all of that.
 2. **Forensics.** Coming back a week later, the transcript, state, and the actual code state of that run sit in one folder.
 
-To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`, namespaced so parallel runs don't collide. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
+To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`. Use separate roots when different repositories can share a run ID. Existing destinations fail setup. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
 
 duet auto-creates `<runs_dir>/.gitignore` containing `*` on first use, so nothing it writes (transcripts, state, worktrees) shows up in your host repo's `git status`.
 
 ### Cleanup
 
+`state.json` records `worktree_kind` as `clone` or `linked`, or `null` when unknown.
+`owned_worktree_path` records the path eligible for a drop hint, or `null`.
+`--continue` never restores clone ownership, even with `--trust-state`.
+Linked ownership can survive continuation when Git confirms repository membership and the saved `duet/` branch.
+The same checks apply to legacy linked states without ownership fields.
+An explicit `--worktree-path` clears ownership, even for the same path.
+Supplied paths receive no drop hint. Cleanup hints quote shell arguments and do not probe the backend CLI.
+The default clone slug comes from the source checkout root.
+Normalization and truncation can give different roots the same slug. Existing destinations fail setup.
+
 The worktree is **not deleted** when duet exits — you'll see merge / drop instructions printed at the end:
 
 ```
 [duet] worktree left intact at runs/20260506-202021/wt (branch duet/20260506-202021).
-        merge:  git -C /your/repo merge duet/20260506-202021
         review: git -C runs/20260506-202021/wt diff HEAD
+        merge:  git -C /your/repo merge duet/20260506-202021
         drop:   git -C /your/repo worktree remove runs/20260506-202021/wt && git -C /your/repo branch -D duet/20260506-202021
 ```
 
-If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No crash.
+If `--cwd` is not a Git repository, ordinary runs warn and fall back to same-repo mode.
+`--require-worktree`, including both review recipes, stops with `setup_error` instead.
 
 ---
 

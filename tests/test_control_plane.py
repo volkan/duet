@@ -400,6 +400,49 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()):
                 duet._setup_run_worktree(cfg, "run", root)
 
+    def test_opencode_version_failure_obeys_worktree_failure_policy(self) -> None:
+        for reuse in (False, True):
+            for strict in (False, True):
+                for version in ((127, "", "not found"), (0, "", "")):
+                    with self.subTest(reuse=reuse, strict=strict, version=version), \
+                            tempfile.TemporaryDirectory() as raw:
+                        root = pathlib.Path(raw).resolve()
+                        info = root / "run.json"
+                        cfg = self._cfg(
+                            root, info, task="x", dry_run=True,
+                            worktree=not reuse, worktree_path=root if reuse else None,
+                            require_worktree=strict,
+                        )
+                        cfg.agents[1].backend = "opencode"
+                        git = subprocess.CompletedProcess([], 0, stdout="main\n")
+                        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None), \
+                                mock.patch.object(duet, "_run", return_value=version), \
+                                mock.patch.object(duet, "is_git_repo", return_value=True), \
+                                mock.patch.object(duet.subprocess, "run", return_value=git), \
+                                mock.patch.object(duet, "_register_run_in_home_index"), \
+                                contextlib.redirect_stdout(io.StringIO()), \
+                                contextlib.redirect_stderr(io.StringIO()):
+                            state = duet.run_duet(cfg)
+                        self.assertEqual(state["phase"], "finished")
+                        self.assertEqual(state["finished_reason"], "setup_error" if strict else "converged")
+                        run = json.loads(info.read_text())["run_dir"]
+                        status = duet.build_run_status(pathlib.Path(run))
+                        self.assertEqual(status["exit_code"], 0)
+                        self.assertIsNone(state["worktree"])
+
+    def test_legacy_non_git_reuse_keeps_isolation_kind_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            reused = root / "ordinary-directory"
+            reused.mkdir()
+            cfg = self._cfg(root, root / "run.json", task="x", dry_run=True, worktree_path=reused)
+            with mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                state = duet.run_duet(cfg)
+            self.assertEqual(state["worktree"], str(reused))
+            self.assertIsNone(state["worktree_kind"])
+            self.assertIsNone(state["owned_worktree_path"])
+
     def test_immediate_stop_during_worktree_setup_is_force_stop(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw).resolve()

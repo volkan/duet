@@ -106,16 +106,22 @@ class TestNoSubagents(unittest.TestCase):
                                               metrics_enabled=False)
 
                         def run(cmd, **kwargs):
+                            if "--version" in cmd:
+                                return 0, "opencode v2.2.5", ""
                             overrides = kwargs["env_overrides"]
                             if cmd[:3] == ["opencode", "debug", "config"]:
-                                return 0, '{"subagent_depth": 0}', ""
+                                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
                             if backend == "gemini":
                                 path = pathlib.Path(overrides["GEMINI_CLI_SYSTEM_SETTINGS_PATH"])
                                 self.assertFalse(json.loads(path.read_text())["experimental"]["enableAgents"])
                                 self.assertEqual("--resume" in cmd, resuming)
                             elif backend == "opencode":
-                                self.assertEqual(json.loads(overrides["OPENCODE_CONFIG_CONTENT"])["subagent_depth"], 0)
+                                config = json.loads(overrides["OPENCODE_CONFIG_CONTENT"])
+                                self.assertEqual(config["experimental"]["subagent_depth"], 0)
+                                self.assertIn({"action": "subagent", "resource": "*",
+                                               "effect": "deny"}, config["permissions"])
                                 self.assertIn("--auto", cmd)
+                                self.assertIn("--standalone", cmd)
                                 self.assertEqual("-s" in cmd, resuming)
                             else:
                                 denied = cmd[cmd.index("--excluded-tools") + 1].split(",")
@@ -123,7 +129,9 @@ class TestNoSubagents(unittest.TestCase):
                                 self.assertEqual(f"--resume={SID}" in cmd, resuming)
                             return 0, outputs[backend], ""
 
-                        with mock.patch.dict(os.environ, env), mock.patch.object(duet, "_run", side_effect=run):
+                        with mock.patch.dict(os.environ, env), \
+                                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None), \
+                                mock.patch.object(duet, "_run", side_effect=run):
                             self.assertEqual(duet.call_agent(agent, "task", cfg, not resuming), "ok")
                         self.assertEqual(agent.session_id, SID)
 
@@ -133,14 +141,41 @@ class TestNoSubagents(unittest.TestCase):
                   ("opencode", ["--attach=http://localhost:1234"]),
                   ("opencode", ["--dangerously-skip-permissions"]),
                   ("codex", ["--approve-for-me"])]
-        for backend, extra in cases:
-            with self.subTest(backend=backend, extra=extra), self.assertRaises(ValueError):
-                duet._delegation_safe_extra_args(duet.Agent("peer", backend, extra_args=extra))
+        v2_cases = [("opencode", ["--standalone"]),
+                    ("opencode", ["--server", "http://localhost:1"]),
+                    ("opencode", ["--session", "ses_x"]), ("opencode", ["-s", "ses_x"]),
+                    ("opencode", ["--continue"]), ("opencode", ["-c"]),
+                    ("opencode", ["--model=x/y"]), ("opencode", ["-m", "x/y"]),
+                    ("opencode", ["--format=default"]), ("opencode", ["--dir", "/tmp"]),
+                    ("opencode", ["--prompt", "p"]), ("opencode", ["-mx/y"]),
+                    ("opencode", ["-sfoo"]), ("opencode", ["-cfoo"])]
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            for backend, extra in cases + v2_cases:
+                with self.subTest(backend=backend, extra=extra), self.assertRaises(ValueError):
+                    duet._delegation_safe_extra_args(duet.Agent("peer", backend, extra_args=extra))
+        # v1 keeps its narrower ban set: --dir is a v1 flag duet itself emits,
+        # so an explicit extra-args override stays allowed there.
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 1):
+            kept = duet._delegation_safe_extra_args(
+                duet.Agent("peer", "opencode", extra_args=["--dir", "/tmp"]))
+            self.assertEqual(kept, ["--dir", "/tmp"])
 
     def test_opencode_depth_override_preserves_inline_settings_and_parent_environment(self):
         original = json.dumps({"subagent_depth": 4, "model": "example/model",
                                "permission": {"bash": "deny"}})
-        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": original}):
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": original}), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            with duet._agent_environment("opencode") as env:
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                self.assertEqual(config["experimental"]["subagent_depth"], 0)
+                self.assertNotIn("subagent_depth", config)  # legacy key dropped for v2
+                self.assertIn({"action": "subagent", "resource": "*",
+                               "effect": "deny"}, config["permissions"])
+                self.assertEqual(config["permission"], {"bash": "deny"})
+                self.assertEqual(config["model"], "example/model")
+            self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], original)
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": original}), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 1):
             with duet._agent_environment("opencode") as env:
                 config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
                 self.assertEqual(config["subagent_depth"], 0)
@@ -167,41 +202,62 @@ class TestNoSubagents(unittest.TestCase):
 
     def test_opencode_inline_jsonc_and_empty_settings_are_supported(self):
         for raw in ('{ // native JSONC\n "subagent_depth": 4, "permission": {"bash": "deny",},}', ''):
-            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": raw}):
+            with self.subTest(raw=raw), \
+                    mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": raw}), \
+                    mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
                 with duet._agent_environment("opencode") as env:
                     config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-                    self.assertEqual(config["subagent_depth"], 0)
+                    self.assertEqual(config["experimental"]["subagent_depth"], 0)
                     if raw:
                         self.assertEqual(config["permission"], {"bash": "deny"})
                 self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], raw)
 
     def test_opencode_refuses_conflicting_missing_or_malformed_resolved_policy(self):
-        cases = [json.dumps({"subagent_depth": value}) for value in (2, None, False, "0", 0.0)]
-        cases += ['{}', '[]', 'private-config-content']
-        for raw in cases:
-            for sid in (None, SID):
-                with self.subTest(raw=raw, sid=sid), mock.patch.object(
-                        duet, "_run", return_value=(0, raw, "private-config-error")) as run:
-                    agent = duet.Agent("peer", "opencode", session_id=sid)
-                    with self.assertRaises(duet.AgentRunError) as error:
-                        duet.call_opencode(agent, "system", "message", pathlib.Path.cwd(),
-                                           60, False, first_turn=sid is None)
-                    self.assertEqual(error.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
-                    self.assertNotIn("private-config", str(error.exception))
-                    self.assertEqual(run.call_count, 1)
-                    self.assertEqual(run.call_args.args[0], ["opencode", "debug", "config"])
+        v2_ok = '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]'
+        v2_bad = ['[]', '{}', 'private-config-content', '[{"info": {}}]', '[{"info": 5}]',
+                  '{"info": {"experimental": {"subagent_depth": 0}}}',
+                  '[{"info": {"experimental": {"subagent_depth": 2}}}]',
+                  '[{"info": {"experimental": {"subagent_depth": null}}}]',
+                  '[{"info": {"permissions": '
+                  '[{"action": "subagent", "resource": "*", "effect": "allow"}]}}]',
+                  '[{"info": {"permission": {"task": "allow"}}}]',
+                  '[{"info": {"agents": {"x": {"permissions": '
+                  '[{"action": "task", "resource": "*", "effect": "ask"}]}}}}]']
+        v1_bad = [json.dumps({"subagent_depth": value}) for value in (2, None, False, "0", 0.0)]
+        v1_bad += ['{}', '[]', 'private-config-content']
+        plans = [
+            (2, v2_ok, v2_bad, ["opencode", "debug", "config", "--standalone"]),
+            (1, '{"subagent_depth": 0}', v1_bad, ["opencode", "debug", "config"]),
+        ]
+        for major, ok_raw, bad, probe in plans:
+            for raw in bad:
+                for sid in (None, SID):
+                    with self.subTest(major=major, raw=raw[:40], sid=sid), \
+                            mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", major), \
+                            mock.patch.object(
+                                duet, "_run", return_value=(0, raw, "private-config-error")) as run:
+                        agent = duet.Agent("peer", "opencode", session_id=sid)
+                        with self.assertRaises(duet.AgentRunError) as error:
+                            duet.call_opencode(agent, "system", "message", pathlib.Path.cwd(),
+                                               60, False, first_turn=sid is None)
+                        self.assertEqual(error.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+                        self.assertNotIn("private-config", str(error.exception))
+                        self.assertEqual(run.call_count, 1)
+                        self.assertEqual(run.call_args.args[0], probe)
 
     def test_opencode_preflight_uses_child_environment_cwd_and_turn_budget(self):
         cmd = ["opencode", "run", "--dir", "/original", "--dir=relative", "--pure", "task"]
         env = {"OPENCODE_CONFIG_CONTENT": '{"subagent_depth":0}'}
-        with mock.patch.object(duet, "_run", side_effect=[(0, '{"subagent_depth":0}', ""),
+        with mock.patch.object(duet, "_run", side_effect=[(0, "opencode 1.2.3", ""),
+                                                        (0, '{"subagent_depth": 0}', ""),
                                                         (0, "reply", "")]) as run, \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None), \
                 mock.patch.object(duet, "_agent_environment", return_value=contextlib.nullcontext(env)), \
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]):
             result = duet._agent_run(cmd, backend="opencode", cwd=pathlib.Path("/project"),
                                      stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None)
         self.assertEqual(result, (0, "reply", ""))
-        probe, agent = run.call_args_list
+        probe, agent = run.call_args_list[1:]
         self.assertEqual(probe.args[0], ["opencode", "debug", "config", "--pure"])
         self.assertEqual(probe.kwargs["cwd"], pathlib.Path("/project/relative"))
         self.assertFalse(probe.kwargs["mirror_stderr"])
@@ -210,11 +266,104 @@ class TestNoSubagents(unittest.TestCase):
         self.assertEqual(probe.kwargs["timeout"], 30)
         self.assertEqual(agent.kwargs["timeout"], 58)
 
+    def test_opencode_v2_policy_matches_simple_action_wildcards_in_all_scopes(self):
+        cases = (
+            ("*", True), ("?", False), ("sub*", True), ("s?bagent", True), ("ta?k", True),
+            ("subagent", True), ("task", True), ("bash", False),
+            ("subagent*tail", False), ("Sub*", False), ("[st]*", False),
+            ("subagen[t]", False), ("*task*", True), (None, False),
+        )
+        injected = {"info": {"experimental": {"subagent_depth": 0}, "permissions": [
+            {"action": "subagent", "resource": "*", "effect": "deny"},
+        ]}}
+        for action, matches in cases:
+            for effect in ("allow", "ask", "deny"):
+                for scope in (None, "agents", "agent"):
+                    for legacy in (False, True):
+                        if legacy and action is None:
+                            continue
+                        with self.subTest(action=action, effect=effect, scope=scope, legacy=legacy):
+                            policy = ({"permission": {action: {"*": effect}}} if legacy else
+                                      {"permissions": [{"action": action, "resource": "*", "effect": effect}]})
+                            info = {scope: {"custom": policy}} if scope else policy
+                            raw = json.dumps([injected, {"info": info}])
+                            if matches and effect != "deny":
+                                with self.assertRaisesRegex(ValueError, "allows subagent launches"):
+                                    duet._check_opencode_v2_policy_documents(raw)
+                            else:
+                                duet._check_opencode_v2_policy_documents(raw)
+
+    def test_opencode_v2_preflight_probes_standalone_and_keeps_budget(self):
+        cmd = ["opencode", "run", "--standalone", "--auto", "task"]
+        env = {"OPENCODE_CONFIG_CONTENT": '{"experimental": {"subagent_depth": 0}}'}
+        docs = '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]'
+        with mock.patch.object(duet, "_run", side_effect=[(0, docs, ""), (0, "reply", "")]) as run, \
+                mock.patch.object(duet, "_agent_environment", return_value=contextlib.nullcontext(env)), \
+                mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            result = duet._agent_run(cmd, backend="opencode", cwd=pathlib.Path("/project"),
+                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None)
+        self.assertEqual(result, (0, "reply", ""))
+        probe, agent = run.call_args_list
+        self.assertEqual(probe.args[0], ["opencode", "debug", "config", "--standalone"])
+        self.assertEqual(probe.kwargs["cwd"], pathlib.Path("/project"))
+        self.assertFalse(probe.kwargs["mirror_stderr"])
+        self.assertEqual(probe.kwargs["timeout"], 30)
+        self.assertEqual(agent.kwargs["timeout"], 58)
+
+    def test_opencode_v2_confined_worktree_peer_denies_external_directories(self):
+        # A worktree-confined v2 peer carries an extra external_directory deny
+        # (v2 can flap a session's location to the canonical checkout; denies
+        # are always enforced, so the main checkout stays untouchable), and
+        # the preflight refuses to start without that deny in effect.
+        stub = ('[{"info": {"experimental": {"subagent_depth": 0}, "permissions": ['
+                '{"action": "subagent", "resource": "*", "effect": "deny"}, '
+                '{"action": "external_directory", "resource": "*", '
+                '"effect": "deny"}]}}]')
+        no_external = ('[{"info": {"experimental": {"subagent_depth": 0}, '
+                       '"permissions": [{"action": "subagent", "resource": "*", '
+                       '"effect": "deny"}]}}]')
+        agent = duet.Agent("peer", "opencode",
+                           cwd_override=pathlib.Path("/repo/runs/r1/wt"))
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": "{}"}), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            with duet._agent_environment("opencode", cwd=pathlib.Path("/repo/runs/r1/wt"),
+                               worktree_confined=True) as env:
+                self.assertEqual(env["PWD"], str(pathlib.Path("/repo/runs/r1/wt")))
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                self.assertIn({"action": "subagent", "resource": "*",
+                               "effect": "deny"}, config["permissions"])
+                self.assertIn({"action": "external_directory", "resource": "*",
+                               "effect": "deny"}, config["permissions"])
+        run_reply = json.dumps({"type": "text", "sessionID": "ses_conf",
+                                "part": {"id": "p", "type": "text", "text": "ok"}})
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            for raw, ok in ((stub, True), (no_external, False)):
+                with self.subTest(ok=ok), \
+                        mock.patch.object(duet, "_run", side_effect=[
+                            (0, raw, ""), (0, run_reply, "")]) as run:
+                    if ok:
+                        duet.call_opencode(agent, "system", "message",
+                                           pathlib.Path("/repo"), 60, False,
+                                           first_turn=False)
+                    else:
+                        with self.assertRaises(duet.AgentRunError) as error:
+                            duet.call_opencode(agent, "system", "message",
+                                               pathlib.Path("/repo"), 60, False,
+                                               first_turn=False)
+                        self.assertEqual(error.exception.finished_reason,
+                                         duet.FINISHED_AGENT_ERROR)
+                    probe_cmd = run.call_args_list[0].args[0]
+                    self.assertEqual(probe_cmd[:4],
+                                     ["opencode", "debug", "config", "--standalone"])
+
     def test_opencode_preflight_failure_never_starts_the_agent(self):
         for rc, reason in ((124, duet.FINISHED_TIMEOUT), (127, duet.FINISHED_AGENT_ERROR),
                            (1, duet.FINISHED_AGENT_ERROR)):
-            with self.subTest(rc=rc), mock.patch.object(duet, "_run", return_value=(
-                    rc, "private-config-content", "private-config-error")) as run:
+            with self.subTest(rc=rc), \
+                    mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2), \
+                    mock.patch.object(duet, "_run", return_value=(
+                        rc, "private-config-content", "private-config-error")) as run:
                 with self.assertRaises(duet.AgentRunError) as error:
                     duet._agent_run(["opencode", "run", "task"], backend="opencode",
                                      cwd=pathlib.Path.cwd(), stdin=None, timeout=60,
@@ -224,8 +373,10 @@ class TestNoSubagents(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
 
     def test_opencode_exhausted_budget_stops_after_preflight(self):
-        with mock.patch.object(duet, "_run", return_value=(0, '{"subagent_depth":0}', "")) as run, \
-                mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]):
+        with mock.patch.object(duet, "_run", return_value=(
+                0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', "")) as run, \
+                mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
             with self.assertRaises(duet.AgentRunError) as error:
                 duet._agent_run(["opencode", "run", "task"], backend="opencode",
                                  cwd=pathlib.Path.cwd(), stdin=None, timeout=1,
