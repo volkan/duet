@@ -70,7 +70,7 @@ dry_run: false                # CLI --dry-run always enables preview, even when 
 # Optional: where new git worktrees land when --worktree is on. Default is
 # <runs_dir>/<run_id>/wt/, which is durable across reboots and OS temp-dir
 # cleaners. OpenCode v2 peers default to an independent git clone at
-# ~/.duet/worktrees/<run_id>/ instead (v2 resolves git-worktree sessions to
+# ~/.duet/worktrees/<cwd-slug>/<run_id>/ instead (v2 resolves git-worktree sessions to
 # the main checkout). Override to any directory you control; runs land at <root>/<run_id>/.
 # Avoid /tmp on macOS/Linux for long-running duets — the OS may wipe it
 # mid-run.
