@@ -64,6 +64,16 @@ command -v duet
 codex login status
 ```
 
+Before constructing commands, inspect the installed version and relevant
+`--help` output for each CLI needed by the selected setup. Check the relevant
+subcommand too, such as `opencode run --help` when constructing that command.
+Repeat this check when the installed version or needed command changes, not
+on every turn. The examples below may differ from the installed CLI. Preserve
+the requested model, effort, permissions, and working directory. If the
+installed CLI cannot meet a requirement, stop and report the limitation.
+This discovery supplements Duet's tested backend adapters and policy checks.
+Do not bypass or rewrite their commands, or use `extra_args` to override them.
+
 ## Launch
 
 Create a private control directory and choose a new run-info path:
@@ -102,10 +112,9 @@ optional; when omitted, let the CLI's model defaults apply. Preserve exact
 model IDs supplied by the user and never substitute a different model or
 force a particular model.
 
-If this recipe is not listed by `duet --help`, the installed PyPI release is
-older than the recipe. Use the current checkout with `make install` (or run
-the checkout's Python entry point) before passing `--recipe codex-review`;
-published versions that predate the recipe do not support that flag.
+If this recipe is not listed by `duet --help`, stop and report that the
+installed CLI does not support it. A current checkout can provide the recipe
+through `make install` or its Python entry point.
 
 For a custom upstream command, launch:
 

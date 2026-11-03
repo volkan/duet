@@ -5,6 +5,8 @@ on PATH; it does not install Duet or backend CLIs.
 
 For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
 see [Shared skill installation](INSTALLATION.md#shared-skill).
+See the shared skill's [CLI checks](../plugins/duet/skills/duet/SKILL.md#prerequisites)
+before launch. Command examples may differ from installed CLI versions.
 See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
 aliases, and version IDs.
 

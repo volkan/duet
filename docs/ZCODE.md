@@ -9,6 +9,8 @@ Upgrade `duet-cli` through your package manager. For a source install, run
 ## Host shortcuts
 
 Install the shared skill as described in [Installation](INSTALLATION.md#shared-skill).
+See its [CLI checks](../plugins/duet/skills/duet/SKILL.md#prerequisites) before
+launch. Command examples may differ from installed CLI versions.
 In ZCode, invoke `/skill duet` followed by the task or Duet arguments.
 
 For a `/duet` shortcut, run these commands from the target project:

@@ -61,6 +61,8 @@ One skill definition serves Claude Code, Codex, OpenCode, and ZCode. For
 OpenCode peer model and effort constraints, see
 [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
 The skill preserves requested models and efforts and reports unsupported selections.
+Before launch, the skill checks installed CLI versions and relevant help output.
+See its [prerequisites](../plugins/duet/skills/duet/SKILL.md#prerequisites).
 For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 With Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
