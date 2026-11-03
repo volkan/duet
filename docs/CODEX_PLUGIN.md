@@ -9,6 +9,8 @@ host and does not run in Codex.
 
 For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
 see [Shared skill installation](INSTALLATION.md#shared-skill).
+See the shared skill's [CLI checks](../plugins/duet/skills/duet/SKILL.md#prerequisites)
+before launch. Command examples may differ from installed CLI versions.
 
 ## Install Checklist
 
@@ -154,9 +156,9 @@ Claude-plus-Codex `review` recipe. A request that says “I don't have Claude,�
 “two Codex models,” or “Codex only” selects `codex-review`.
 
 The `codex-review` recipe may not yet be present in the current PyPI release.
-Run `duet --help` first; if `codex-review` is absent, use this checkout with
-`make install` (or the checkout's Python entry point) rather than passing the
-unsupported published flag.
+Run `duet --help` first. If `codex-review` is absent, stop and report the
+limitation. A current checkout can provide the recipe through `make install`
+or its Python entry point.
 
 The recipe also enables local finding reports in `review.md`.
 `duet --report RUN` renders them from state; `--no-finding-reports` opts out.
