@@ -771,7 +771,8 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     state.json                               # task, agents, session_ids, history,
                                              # phase, finished_reason, duet_pid,
                                              # sentinel/sandbox/permissions/reasoning,
-                                             # worktree/worktree_for if present,
+                                             # worktree/worktree_for/worktree_kind,
+                                             # owned_worktree_path when eligible for a drop hint,
                                              # verify_cmd/last_verify if present,
                                              # recap_path if --recap,
                                              # continue_from for --continue runs
@@ -1046,10 +1047,13 @@ suffix in `model:` is rejected for OpenCode; set `reasoning_effort` or
 `subagent_depth: 0` (top-level on v1; `experimental.subagent_depth` plus a
 `subagent` permissions deny on v2) and checks the native config before each
 turn — on v2 through `--standalone`, the only path where the inline override
-reaches config. A v2 peer running in Duet's worktree also carries an
-`external_directory` deny, so its tools can never touch the main checkout
-wherever v2 resolves the session location. If managed settings override the
-policy or the check fails, the peer does not start.
+reaches config. The v2 check rejects any source that allows or asks for
+`subagent` or `task`, including action patterns with `*` and `?`.
+It checks top-level and agent-scoped rules, including legacy permission maps.
+Other pattern characters are literal, and action matching is case-sensitive.
+A v2 peer running in Duet's worktree also carries an `external_directory` deny
+for OpenCode's native external-directory requests. These controls do not provide an operating system sandbox.
+If managed settings override the policy or the check fails, the peer does not start.
 Remote `--attach` and the old permission-bypass flag are incompatible with the
 [subagent policy](SUBAGENTS.md).
 
@@ -1129,7 +1133,13 @@ verification runs in `--cwd`.
 
 ### Where the worktree lives
 
-By default the worktree lands at `<runs_dir>/<run_id>/wt/` — i.e. right next to that run's `transcript.md` and `state.json`. OpenCode v2 peers are the exception: they get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/` (branch `duet/<run_id>`), because v2 resolves git-worktree sessions to the main checkout (verified on v2.2.5). Merge it back with `git fetch <clone> <branch> && git merge FETCH_HEAD`. Duet prints a drop hint only for clones it created. Two reasons for the default:
+By default the worktree lands at `<runs_dir>/<run_id>/wt/`, beside the run's `transcript.md` and `state.json`.
+OpenCode v2 peers receive an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, on branch `duet/<run_id>`.
+OpenCode v2 can resolve linked worktrees to the main checkout, as verified on v2.2.5.
+The clone starts at the source checkout's committed `HEAD`, including when the source is a linked worktree.
+When `--cwd` names a subdirectory, Duet clones its repository root and starts the peer at the clone root.
+The other peer keeps the requested `--cwd`. Merge with `git fetch <clone> <branch> && git merge FETCH_HEAD`.
+Duet prints a clone drop hint only during the invocation that created it. Two reasons for the default:
 
 1. **Durability.** OS temp-dir cleaners (`periodic` on macOS, `systemd-tmpfiles` on Linux, reboot-time `/tmp` wipes on some distros) can erase a worktree mid-run on long duets. Living under `runs/` survives all of that.
 2. **Forensics.** Coming back a week later, the transcript, state, and the actual code state of that run sit in one folder.
@@ -1140,22 +1150,27 @@ duet auto-creates `<runs_dir>/.gitignore` containing `*` on first use, so nothin
 
 ### Cleanup
 
-Duet records ownership of each clone it creates. `--continue` preserves that
-ownership when it reuses the saved path. An explicit `--worktree-path` clears
-ownership, even for the same path. Supplied paths receive no drop hint.
-The default clone path includes a repository slug to separate concurrent runs
-with the same ID in different repositories.
+`state.json` records `worktree_kind` as `clone` or `linked`, or `null` when unknown.
+`owned_worktree_path` records the path eligible for a drop hint, or `null`.
+`--continue` never restores clone ownership, even with `--trust-state`.
+Linked ownership can survive continuation when Git confirms repository membership and the saved `duet/` branch.
+The same checks apply to legacy linked states without ownership fields.
+An explicit `--worktree-path` clears ownership, even for the same path.
+Supplied paths receive no drop hint. Cleanup hints quote shell arguments and do not probe the backend CLI.
+The default clone slug comes from the source checkout root.
+Normalization and truncation can give different roots the same slug. Existing destinations fail setup.
 
 The worktree is **not deleted** when duet exits — you'll see merge / drop instructions printed at the end:
 
 ```
 [duet] worktree left intact at runs/20260506-202021/wt (branch duet/20260506-202021).
-        merge:  git -C /your/repo merge duet/20260506-202021
         review: git -C runs/20260506-202021/wt diff HEAD
+        merge:  git -C /your/repo merge duet/20260506-202021
         drop:   git -C /your/repo worktree remove runs/20260506-202021/wt && git -C /your/repo branch -D duet/20260506-202021
 ```
 
-If `--cwd` isn't a git repo, duet warns and falls back to same-repo mode. No crash.
+If `--cwd` is not a Git repository, ordinary runs warn and fall back to same-repo mode.
+`--require-worktree`, including both review recipes, stops with `setup_error` instead.
 
 ---
 

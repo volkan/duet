@@ -150,6 +150,9 @@ the quiet probe shares the turn budget and never logs raw config output.
 Do not remove these controls on retries or continuations.
 The default Claude review kickoff must deny delegation tools too. Custom
 kickoff/verification shell commands remain explicit caller responsibility.
+V2 action checks use case-sensitive whole-value `*` and `?` patterns; all other characters are literal.
+They check top-level rules, `agents`/`agent` scopes, and legacy permission maps.
+Any matching `allow` or `ask` source fails the check, regardless of later deny rules.
 
 `subagent_policy: "disabled"` in state/metrics describes the launch policy,
 not an observed child-agent count. Historical missing fields stay unknown.
@@ -249,14 +252,20 @@ OpenCode v2 peers use `setup_clone` for an independent Git repository at
 `~/.duet/worktrees/<cwd-slug>/<run_id>/`. Linked worktrees share repository
 identity, which v2 can resolve to the canonical checkout even with external
 placement. Independent clones avoid that shared identity. The repository slug
-separates default destinations for runs with the same ID in different repositories.
+comes from the source checkout root, including when `--cwd` names a subdirectory.
+Normalization and truncation can give different roots the same slug.
 An explicit `--worktree-root` uses `<PATH>/<run_id>/`; an existing destination fails setup.
+`setup_clone` clones the source checkout root at that checkout's `HEAD`, including linked source worktrees.
+The selected peer starts at the clone root. The original `cfg.cwd` stays unchanged.
 
 Clone merge hints use `git fetch <clone> <branch> && git merge FETCH_HEAD`.
-`owned_clone_path` records a clone created by Duet. Continuation preserves
-ownership only when it reuses that exact saved path. An explicit path override
-clears ownership. Cleanup uses the recorded isolation type without CLI probes.
-Only an owned clone receives an `rm -rf` hint. Other supplied paths receive no drop hint.
+`worktree_kind` records `clone` or `linked`, or `null` when unknown.
+`owned_worktree_path` records the path eligible for a drop hint.
+Only clones created during the current invocation receive an `rm -rf` hint.
+Continuation never restores clone ownership, including with `--trust-state`.
+Linked ownership can survive continuation when Git confirms repository membership and the saved `duet/` branch.
+Legacy linked states use the same checks. An explicit `--worktree-path` clears ownership.
+Cleanup quotes shell arguments and uses the recorded kind without CLI probes.
 OpenCode v2 refuses linked `--worktree-path` paths through `_is_linked_worktree` (fail closed).
 Its confined peer policy also denies `external_directory` access.
 The child environment pins `PWD` to the effective cwd because v2 uses the logical cwd.
@@ -266,7 +275,7 @@ path. `--worktree` and `--worktree-path` remain mutually exclusive.
 
 ### Continue mode
 
-`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; the `codex-review` recipe also uses it to start with the lead reviewer (`0`). Other fresh runs use the partner-first value (`1`). In `codex-review`, partner-first applies when `--resume-codex` has an explicit seed or a Claude lead is resumed. Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
+`--continue RUN_DIR_OR_ID` is a fresh-run convenience wrapper around saved `state.json`: `_resolve_run_dir` finds the old run, `build_continue_config` restores both `Agent` objects with their saved `session_id`s, restores saved run knobs (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`, `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) unless the CLI overrides them, chooses the next speaker from the last completed `history` entry, reuses the saved worktree path (or legacy `<run>/wt/`), and builds a continuation kickoff. It does **not** append to the old transcript. Because `state.json` is in the run tree, `build_continue_config` refuses to replay state-sourced `verify_cmd`, agent `extra_args`, extra access roots, or permission/sandbox values outside the safe defaults unless the user passes `--trust-state`; fresh CLI values count as explicit overrides, and `--no-codex-fast` disables restored fast mode. `DuetConfig.start_speaker_idx` is internal plumbing for this; the `codex-review` recipe also uses it to start with the lead reviewer (`0`). Other fresh runs use the partner-first value (`1`). In `codex-review`, partner-first applies when `--resume-codex` has an explicit seed or a Claude lead is resumed. Rolling `state.json` writes must keep `transcript_path`, `worktree`, `worktree_branch`, `worktree_for`, `worktree_kind`, `owned_worktree_path`, the restored run knobs, `continue_from`, and `duet_pid` because `--continue` and `--status` both depend on state surviving mid-turn crashes.
 
 ### Resume flag normalization
 

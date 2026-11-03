@@ -19,7 +19,7 @@ Official documentation checked on 2026-09-06:
 | Codex | `agents.enabled=false`, `features.multi_agent=false`, and `--disable multi_agent` on fresh and resumed calls. Top-level and default app approval review use `user`; `features.guardian_approval=false` and `--disable guardian_approval` turn off the Guardian feature. `--approve-for-me` is rejected. See the validation limits below for named app overrides. | [Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) |
 | Claude Code | Deny `Agent`, its legacy `Task` alias, `TeamCreate`, `SendMessage`, and `Skill`. Disable agent-team and fork-mode environment toggles for peer calls. `Skill` is denied because forked skills can create subagents. | [Subagents](https://code.claude.com/docs/en/sub-agents), [CLI deny rules](https://code.claude.com/docs/en/cli-reference) |
 | Copilot | Exclude `task` and `write_agent` from the model's available tools. | [Tool availability](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference#tool-availability-values) |
-| OpenCode | Set `subagent_depth: 0` in the child process's inline config (top-level on CLI v1; `experimental.subagent_depth` plus a `permissions` `subagent` deny on v2) and check `opencode debug config` before every turn — v2 probes with `--standalone` and refuses any source that overrides depth zero or re-allows subagents. A v2 peer running inside Duet's worktree additionally hard-denies `external_directory`, so a session whose location flaps to the canonical checkout still cannot touch the main checkout. Use `--auto`, which preserves explicit permission denials. | [v2 Experimental settings](https://opencode.ai/v2/docs/config/#experimental), [v2 Permissions](https://opencode.ai/v2/docs/permissions/), [v1 config](https://opencode.ai/docs/config/#subagent-depth) |
+| OpenCode | Set `subagent_depth: 0` in the child process's inline config (top-level on CLI v1; `experimental.subagent_depth` plus a `permissions` `subagent` deny on v2). Check `opencode debug config` before every turn. V2 probes with `--standalone` and refuses any source that overrides depth zero or re-allows subagents. A v2 worktree peer also denies native `external_directory` requests. Use `--auto`, which preserves explicit permission denials. | [v2 Experimental settings](https://opencode.ai/v2/docs/config/#experimental), [v2 Permissions](https://opencode.ai/v2/docs/permissions/), [v1 config](https://opencode.ai/docs/config/#subagent-depth) |
 | ZCode | Fixed plan-mode review calls deny `Task`, `Agent`, `Skill`, workflow, shell, and write tools; dynamic workflows are disabled. `extra_args` and coder roles are refused; native MCP must be disabled explicitly. | [Native backend and limits](ZCODE.md) |
 | Gemini | Set `experimental.enableAgents: false` through a private temporary system-settings overlay. Preserve the original system-defaults file location for each child process. | [Configuration and precedence](https://geminicli.com/docs/reference/configuration/), [Settings loader](https://github.com/google-gemini/gemini-cli/blob/main/packages/cli/src/config/settings.ts) |
 
@@ -48,6 +48,12 @@ child environment and effective working directory, runs no model request,
 and has a 30-second cap within the turn's time budget. Duet does not print or
 persist the configuration output. A failed check ends the turn; it never
 falls back to running the peer without the check.
+
+The v2 check refuses any source with an `allow` or `ask` action matching `subagent` or `task`.
+It checks top-level and agent-scoped rules, including legacy permission maps.
+Action patterns use `*` for any sequence and `?` for one character.
+All other characters are literal. Matches cover the whole value and are case-sensitive.
+Explicit `deny` rules remain permitted. This check does not calculate a merged permission policy.
 
 These controls require CLI versions that support the documented settings.
 An unsupported flag or configuration error ends the turn; Duet does not retry

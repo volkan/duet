@@ -59,8 +59,10 @@ reference. One-shot runners do not install `duet` on the assistant's PATH.
 
 One skill definition serves Claude Code, Codex, OpenCode, and ZCode. For
 OpenCode peer model and effort constraints, see
-[OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models). With
-Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
+[OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
+The skill preserves requested models and efforts and reports unsupported selections.
+For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
+With Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
 ```bash
 npx skills add volkan/duet --skill duet --global \

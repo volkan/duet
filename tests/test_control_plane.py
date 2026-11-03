@@ -430,6 +430,19 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
                         self.assertEqual(status["exit_code"], 0)
                         self.assertIsNone(state["worktree"])
 
+    def test_legacy_non_git_reuse_keeps_isolation_kind_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            reused = root / "ordinary-directory"
+            reused.mkdir()
+            cfg = self._cfg(root, root / "run.json", task="x", dry_run=True, worktree_path=reused)
+            with mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                state = duet.run_duet(cfg)
+            self.assertEqual(state["worktree"], str(reused))
+            self.assertIsNone(state["worktree_kind"])
+            self.assertIsNone(state["owned_worktree_path"])
+
     def test_immediate_stop_during_worktree_setup_is_force_stop(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw).resolve()

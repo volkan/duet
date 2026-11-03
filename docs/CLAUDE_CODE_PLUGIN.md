@@ -20,6 +20,10 @@ For the shared `duet` skill used by Claude Code, Codex, OpenCode, and ZCode,
 see [Shared skill installation](INSTALLATION.md#shared-skill).
 See the [model selection guide](USAGE.md#same-backend-peering) for pairs,
 aliases, and version IDs.
+For OpenCode peers, use `provider/model` without a `#variant` suffix.
+OpenCode v2 needs an explicit model for a backend effort argument.
+Preserve the requested model and effort when reporting validation errors.
+See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models) for the fallback and limits.
 
 From this repository, `make install` is equivalent if `~/.local/bin` is on
 PATH:

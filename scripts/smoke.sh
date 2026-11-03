@@ -389,6 +389,120 @@ for reuse in (False, True):
         assert snapshot["health"] == "terminal" and snapshot["exit_code"] == 0, (case, snapshot)
         assert snapshot["phase"] == "finished" and snapshot["finished_reason"] == reason, (case, snapshot)
 PY
+expect "opencode nested clone and shell hints" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / "clone shell '$; fixture"
+root.mkdir()
+repo = root / "source '$; repo"
+subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+(repo / "tracked.txt").write_text("host content\n")
+subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+subprocess.run([
+    "git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+    "-c", "core.hooksPath=/dev/null", "commit", "--no-gpg-sign", "-m", "fixture",
+], check=True, capture_output=True)
+nested = repo / "nested cwd"
+nested.mkdir()
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+m._OPENCODE_CLI_MAJOR = 2
+cfg = m.DuetConfig(
+    cwd=nested, task="x", dry_run=True, max_turns=1, metrics_enabled=False,
+    agents=[m.Agent("lead", "codex"), m.Agent("partner", "opencode")],
+    worktree=True, require_worktree=True, worktree_root=root / "peer '$; clones",
+    runs_dir=root / "runs",
+)
+with contextlib.redirect_stdout(io.StringIO()):
+    state = m.run_duet(cfg)
+clone = pathlib.Path(state["worktree"])
+assert state["finished_reason"] == "max_turns", state
+assert cfg.cwd == nested and cfg.agents[1].cwd_override == clone
+assert (clone / "tracked.txt").read_text() == "host content\n"
+assert state["worktree_kind"] == "clone" and state["owned_worktree_path"] == str(clone)
+(clone / "tracked.txt").write_text("peer content\n")
+assert (repo / "tracked.txt").read_text() == "host content\n"
+status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                        check=True, capture_output=True, text=True)
+assert status.stdout == "", status.stdout
+bin_dir = root / "bin"
+bin_dir.mkdir()
+log = root / "argv.jsonl"
+shim = (f"#!{sys.executable}\nimport json, os, pathlib, sys\n"
+        "with open(os.environ['DUET_SMOKE_ARGV'], 'a') as out:\n"
+        "    out.write(json.dumps([pathlib.Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n")
+for name in ("git", "rm"):
+    target = bin_dir / name
+    target.write_text(shim)
+    target.chmod(0o755)
+env = dict(os.environ, PATH=str(bin_dir), DUET_SMOKE_ARGV=str(log))
+branch = "duet/quote'$;branch"
+for kind in ("clone", "linked"):
+    cfg._worktree_kind = kind
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        m._print_worktree_notice(cfg, clone, branch)
+    commands = [line.split(":", 1)[1].strip() for line in output.getvalue().splitlines()[1:]]
+    log.write_text("")
+    for command in commands:
+        subprocess.run(["/bin/sh", "-c", command], env=env, check=True, capture_output=True)
+    actual = [json.loads(line) for line in log.read_text().splitlines()]
+    expected = [["git", "-C", str(clone), "diff", "HEAD"]]
+    if kind == "clone":
+        expected += [["git", "-C", str(nested), "fetch", str(clone), branch],
+                     ["git", "-C", str(nested), "merge", "FETCH_HEAD"], ["rm", "-rf", "--", str(clone)]]
+    else:
+        expected += [["git", "-C", str(nested), "merge", branch],
+                     ["git", "-C", str(nested), "worktree", "remove", str(clone)],
+                     ["git", "-C", str(nested), "branch", "-D", branch]]
+    assert actual == expected, (kind, actual, expected)
+assert clone.is_dir()
+PY
+expect "opencode guide shell command executes" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import importlib.util
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet_path = pathlib.Path(sys.argv[1])
+guide = duet_path.parent / "docs" / "OPENCODE_PLUGIN.md"
+example = next(line for line in guide.read_text().splitlines() if line.startswith("duet --task-from-cmd "))
+root = pathlib.Path(sys.argv[2]) / "guide-shell"
+root.mkdir()
+bin_dir = root / "bin"
+bin_dir.mkdir()
+args_path = root / "args.json"
+shim = bin_dir / "duet"
+shim.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                "with open(os.environ['DUET_SMOKE_ARGS'], 'w') as out:\n"
+                "    json.dump(sys.argv[1:], out)\n")
+shim.chmod(0o755)
+npm = bin_dir / "npm"
+npm.write_text('#!/bin/sh\ntest "$1" = test || exit 7\nprintf "test stdout\\n"\nprintf "test stderr\\n" >&2\n')
+npm.chmod(0o755)
+env = dict(os.environ, PATH=str(bin_dir), DUET_SMOKE_ARGS=str(args_path))
+subprocess.run(["/bin/sh", "-c", example], cwd=root, env=env, check=True, capture_output=True)
+args = json.loads(args_path.read_text())
+assert args == ["--task-from-cmd", "npm test 2>&1", "--turns", "4"], args
+spec = importlib.util.spec_from_file_location("duet_under_test", duet_path)
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+assert m.run_task_from_cmd(args[1], root, 10, root) == "test stdout\ntest stderr\n"
+PY
 ZCODE_FAKE_BIN="$TMPD/zcode-wrapper/a/b/c/d/bin"
 mkdir -p "$ZCODE_FAKE_BIN" "$TMPD/zcode-target"
 printf '#!/bin/sh\nexit 99\n' > "$ZCODE_FAKE_BIN/zcode"

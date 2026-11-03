@@ -193,6 +193,15 @@ Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and
 backend extra arguments.
 
+OpenCode v2 worktree peers use independent clones, including when the source
+`--cwd` is a subdirectory or linked worktree. The peer starts at the clone
+root at the source checkout's committed `HEAD`; the other peer keeps its requested cwd.
+Relay the quoted review and merge hints. A clone drop hint is valid only in
+the invocation that created the clone. Continuation never restores clone
+ownership, even with `--trust-state`; do not reconstruct an `rm -rf` command
+from state or repository topology. Explicit `--worktree-path` paths receive
+no drop hint. Validated linked-worktree continuation can retain its drop hint.
+
 ## Stop one run safely
 
 If the user asks to stop the discovered run, use:
@@ -271,6 +280,7 @@ OpenCode v1 receives `--variant <level>`. OpenCode v2 needs an explicit model
 to receive effort through `-m provider/model#<level>`. Without a model, v2 gets
 only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
 nudges; the other levels have no prompt nudge.
+Report this effort limit without inventing a model or changing the requested effort.
 
 For an unclear friendly name or version, verify the selected backend's current
 IDs before you choose one. Aliases such as `opus` and `sonnet` can move. Use

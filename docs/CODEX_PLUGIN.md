@@ -179,6 +179,8 @@ Duet rejects that suffix. Set `--reasoning` or the agent's `reasoning_effort`
 instead. OpenCode v2 needs an explicit model to receive a backend effort
 argument. Without one, it receives only the prompt prefix and Duet prints a
 note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
+Preserve the requested effort when reporting this limit.
+For OpenCode clone placement and cleanup, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
 Aliases such as `opus` and `sonnet` can move. Use `claude-opus-5-5` to request
 that explicit version. For an unclear friendly name or version, check the

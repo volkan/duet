@@ -801,7 +801,8 @@ def setup_clone(repo_path: pathlib.Path, branch_name: str,
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         raise RuntimeError(f"worktree destination already exists: {dest}")
-    _spawn_git(["git", "clone", "--no-hardlinks", str(repo_path), str(dest)],
+    source_root = _git_repository_paths(repo_path)["root"]
+    _spawn_git(["git", "clone", "--no-hardlinks", str(source_root), str(dest)],
                "git clone", timeout=120)
     _spawn_git(["git", "-C", str(dest), "switch", "-c", branch_name],
                "git switch -c")
@@ -869,16 +870,10 @@ def _validated_worktree_kind(cwd: pathlib.Path, path: pathlib.Path,
         return None
     if _git_value(path, "symbolic-ref", "--quiet", "--short", "HEAD") != branch:
         return None
-    if target["common"] == source["common"]:
-        if (target["git_dir"] != target["common"]
-                and _registered_linked_worktree(cwd, path, branch)):
-            return "linked"
-        return None
-    if target["git_dir"] != path / ".git" or target["common"] != target["git_dir"]:
-        return None
-    origin = pathlib.Path(_git_value(path, "config", "--local", "--get", "remote.origin.url"))
-    if origin.is_absolute() and origin.resolve() == source["root"]:
-        return "clone"
+    if (target["common"] == source["common"]
+            and target["git_dir"] != target["common"]
+            and _registered_linked_worktree(cwd, path, branch)):
+        return "linked"
     return None
 
 
@@ -1537,12 +1532,20 @@ def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
     return (cwd / directory).resolve()
 
 
+def _opencode_action_requests_subagent(action: object) -> bool:
+    if not isinstance(action, str):
+        return False
+    pattern = re.escape(action).replace(r"\*", ".*").replace(r"\?", ".")
+    return any(re.fullmatch(pattern, target) is not None
+               for target in ("subagent", "task"))
+
+
 def _opencode_v2_rule_requests_subagent(rule: object) -> bool:
     """True when a v2 permission rule would allow or ask for a subagent launch."""
     if not isinstance(rule, dict):
         return False
-    return (rule.get("action") in ("subagent", "task")
-            and rule.get("effect") in ("allow", "ask"))
+    return (rule.get("effect") in ("allow", "ask")
+            and _opencode_action_requests_subagent(rule.get("action")))
 
 
 def _opencode_legacy_map_requests_subagent(value: object) -> bool:
@@ -1561,8 +1564,9 @@ def _opencode_v2_policy_requests_subagent(info: dict) -> bool:
         return True
     legacy = info.get("permission")
     return isinstance(legacy, dict) and any(
-        _opencode_legacy_map_requests_subagent(legacy.get(action))
-        for action in ("task", "subagent"))
+        _opencode_action_requests_subagent(action)
+        and _opencode_legacy_map_requests_subagent(value)
+        for action, value in legacy.items())
 
 
 def _opencode_v2_config_requests_subagent(info: dict) -> bool:
@@ -3763,7 +3767,8 @@ def _worktree_dest(cfg: DuetConfig, wt_backend: str,
     if cfg.worktree_root:
         return cfg.worktree_root / run_id
     if wt_backend == "opencode" and opencode_cli_major() >= 2:
-        return pathlib.Path.home() / ".duet" / "worktrees" / _cwd_slug(cfg.cwd.resolve()) / run_id
+        root = _git_repository_paths(cfg.cwd)["root"]
+        return pathlib.Path.home() / ".duet" / "worktrees" / _cwd_slug(root) / run_id
     return run_dir / "wt"
 
 
@@ -3817,7 +3822,7 @@ def _setup_run_worktree(
                 "--worktree-path."
             )
             return None, None
-        cfg._worktree_kind = "clone" if is_clone else "linked"
+        cfg._worktree_kind = ("clone" if is_clone else "linked") if wt_branch else None
         cfg.agents[wt_idx].cwd_override = existing
         print(f"[duet] reusing worktree: {existing} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -7441,13 +7446,13 @@ def _restore_worktree_ownership(cfg: DuetConfig, state: dict,
         raw, expected_kind = state["owned_clone_path"], "clone"
     else:
         raw, expected_kind = state.get("worktree"), "linked"
-    if not isinstance(raw, str) or not raw or expected_kind not in ("clone", "linked"):
+    # Clone ownership is invocation-local; saved metadata cannot prove creation.
+    if not isinstance(raw, str) or not raw or expected_kind != "linked":
         return
     try:
         path = cfg.worktree_path.resolve()
         if pathlib.Path(raw).expanduser().resolve() != path:
             return
-        # State can name a path, but only repository metadata can justify a drop hint.
         kind = _validated_worktree_kind(cfg.cwd, path, state.get("worktree_branch"))
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
         return

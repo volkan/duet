@@ -151,6 +151,8 @@ OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
 requires an explicit model to receive effort through `-m provider/model#<level>`.
 Without a model, v2 receives only the prompt prefix and Duet prints a note.
 High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
+Report this limit without choosing another model or changing the requested effort.
+For nested checkout paths and clone cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
 ## Upgrade
 
