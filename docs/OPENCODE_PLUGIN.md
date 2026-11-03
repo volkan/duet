@@ -97,10 +97,11 @@ In the OpenCode TUI, invoke the command:
 /duet
 ```
 
-Non-interactively from a shell:
+Non-interactively from a shell (OpenCode v2 removed `run --command`; invoke
+duet directly):
 
 ```bash
-opencode run --command duet "'npm test 2>&1' --turns 4"
+duet --task-from-cmd "'npm test 2>&1'" --turns 4
 ```
 
 Plain `/duet` runs the default review recipe:
@@ -202,7 +203,7 @@ end of the run.
 | `/duet` runs but says `duet` is not on PATH | Run `make install` from this repo or `pipx install duet-cli`, then make sure OpenCode's shell can resolve `command -v duet`. |
 | The default recipe says `claude` is not on PATH | Install or authenticate Claude Code before using the default `/review` recipe. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
-| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or invoke non-interactively with `opencode run --command duet --auto "..."`. Explicit permission denials still apply. |
+| The command stalls without running `duet` | OpenCode is likely waiting on a permission prompt for the `build` agent's shell tool. Approve it, or run the loop directly from a shell (OpenCode v2 removed `run --command`): `duet --task-from-cmd "..." --turns 4`. Explicit permission denials still apply. |
 | No run directory appears | Check the original duet process. The recipe writes initial state before `/review`; use `duet --list` or a custom `--run-info-file` launch to discover it deterministically. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
 

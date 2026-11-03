@@ -179,12 +179,16 @@ agents:
 # `run --format json` stream carries a `sessionID`; duet stops with agent_error
 # if it is missing or if the stream contains an error event (note that
 # `opencode run` exits 0 even on model/tool errors). Permissions are native:
-# duet runs with `--auto`, `--dir <cwd>`, and an inline subagent_depth: 0;
-# a native config check stops the turn if managed settings override depth zero.
-# Inline OPENCODE_CONFIG_CONTENT supports comments and trailing commas.
-# explicit permission denials still apply. --sandbox, permission_mode, and
-# add_dirs do not apply. Reasoning maps to `run --variant`.
-# Models use OpenCode's provider/model form.
+# duet runs with `--auto`, `--dir <cwd>` on CLI v1 (--standalone, with the
+# project taken from the process cwd, on v2), and an inline subagent_depth: 0
+# override (top-level on v1; experimental.subagent_depth plus a subagent
+# permissions deny on v2). A native config check stops the turn if managed
+# settings override depth zero. Inline OPENCODE_CONFIG_CONTENT supports
+# comments and trailing commas. Explicit permission denials still apply.
+# --sandbox, permission_mode, and add_dirs do not apply. Reasoning maps to
+# `run --variant` on v1 and `--model provider/model#level` on v2; a v2 peer
+# needs an explicit model for reasoning, otherwise only the prompt prefix
+# carries the effort request. Models use OpenCode's provider/model form.
 # agents:
 #   - name: opencode-lead
 #     backend: opencode

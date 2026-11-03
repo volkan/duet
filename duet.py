@@ -34,8 +34,10 @@ Each agent keeps its own session across turns:
     `copilot --resume=<sessionId>` from the JSONL result event.
   - ZCode: official headless JSON summaries and explicit --resume sess_ IDs;
     private credential-free profiles select the account model and reasoning.
-  - OpenCode: `opencode run --format json`; subsequent turns use
-    `opencode run -s <sessionID>` from the JSONL event stream.
+  - OpenCode: `opencode run --format json` (v1 adds `--dir`, v2 adds
+    `--standalone`); subsequent turns use `opencode run -s <sessionID>` from
+    the JSONL event stream. Reasoning rides `--variant` on v1 and the
+    `model#variant` form on v2; the CLI major version is probed once per run.
 
 Transcript is always logged to runs/<ts>/transcript.md for humans, but each
 prompt sent to an agent is just the latest counterpart message — keeping
@@ -339,16 +341,19 @@ COPILOT_REASONING_MAP = {
 }
 COPILOT_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
 
-# OpenCode exposes reasoning effort through `run --variant <value>`, documented
-# as "provider-specific reasoning effort (e.g. high, max, minimal)". The valid
-# set is model/provider-dependent, but OpenCode silently ignores a variant a
-# model doesn't define rather than erroring, so we pass duet's level through
-# unchanged (identity map): a model that knows the variant honors it, one that
-# doesn't is unaffected. This keeps the mapping forward-compatible without duet
-# tracking each provider's variant vocabulary.
+# OpenCode expresses reasoning effort as a model variant. On v1 the variant is
+# a separate `run --variant <value>` flag; on v2 it joins the model reference
+# as `--model provider/model#<value>`, and an unknown variant is a
+# model-resolution error (v1 silently ignored one). Duet passes duet's level
+# through unchanged in both shapes (identity map) instead of tracking each
+# provider's variant vocabulary: a model that knows the variant honors it, and
+# on v2 an unsupported level fails that turn loudly rather than silently
+# running at a different effort.
 OPENCODE_REASONING_MAP = {level: level for level in REASONING_LEVELS}
-# `--variant` is the authoritative effort control; the high/xhigh/max prompt
-# nudges are belt-and-braces, same as Claude/Gemini/Copilot.
+# The variant is the authoritative effort control; the high/xhigh/max prompt
+# nudges are belt-and-braces, same as Claude/Gemini/Copilot. On v2 a peer
+# without an explicit model has no variant channel, so only the prompt prefix
+# carries the effort request (with a one-line stderr note).
 OPENCODE_REASONING_PROMPT_PREFIX = CLAUDE_REASONING_PROMPT_PREFIX
 
 # Map duet's existing Claude-flavored permission mode knob to Gemini CLI's
@@ -433,6 +438,11 @@ class Agent:
         # remain unchanged, and other backends keep their native defaults.
         if self.backend == "claude" and not self.model:
             self.model = DEFAULT_CLAUDE_MODEL
+        # OpenCode v2 joins duet's reasoning variant as model#variant; a
+        # user-supplied #fragment would double up and fail model resolution.
+        if self.backend == "opencode" and self.model and "#" in self.model:
+            raise ValueError("OpenCode model must be provider/model without '#variant'; "
+                             "set agent reasoning_effort or --reasoning instead")
 
     def system_prompt(self, sentinel: str, recap: bool = False) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
@@ -1202,6 +1212,72 @@ def _json_config_object(raw: str, label: str, *, trailing_commas: bool = False) 
     return value
 
 
+_OPENCODE_CLI_MAJOR: Optional[int] = None
+
+
+def opencode_cli_major(timeout: float = 10.0) -> int:
+    """Detect and cache the OpenCode CLI major version; 1 is legacy, >= 2 is v2.
+
+    The two generations expose different surfaces: v1 scopes runs with
+    `--dir`, carries effort in `--variant`, prints `debug config` as one
+    resolved object, and honors `OPENCODE_CONFIG_CONTENT` in the run process;
+    v2 scopes runs from the process cwd, joins variants as `model#variant`,
+    prints `debug config` as a source-document list, and only applies inline
+    config to a `--standalone` private server. Detection fails closed: a
+    failing or unparsable probe raises instead of guessing a generation.
+    """
+    global _OPENCODE_CLI_MAJOR
+    if _OPENCODE_CLI_MAJOR is not None:
+        return _OPENCODE_CLI_MAJOR
+    rc, out, _ = _run(["opencode", "--version"], cwd=pathlib.Path.cwd(), stdin="",
+                      timeout=timeout, mirror_stderr=False)
+    if rc != 0:
+        raise ValueError(f"opencode --version failed (exit {rc}); duet needs the OpenCode CLI on PATH")
+    match = re.search(r"\bv?(\d+)\.", out.strip())
+    major = int(match.group(1)) if match else 0
+    if major < 1:
+        raise ValueError("could not parse the OpenCode CLI version; duet supports opencode v1 and v2")
+    _OPENCODE_CLI_MAJOR = major
+    return major
+
+
+_OPENCODE_VARIANT_NOTE_AGENTS: set[str] = set()
+
+
+def _opencode_note_missing_model(agent: Agent, reasoning: str) -> None:
+    """One-line note; OpenCode v2 carries effort only through model#variant."""
+    if agent.name in _OPENCODE_VARIANT_NOTE_AGENTS:
+        return
+    _OPENCODE_VARIANT_NOTE_AGENTS.add(agent.name)
+    print(f"[duet] note: opencode v2 applies reasoning '{reasoning}' only through "
+          f"model#variant; agent '{agent.name}' has no model, so only the prompt "
+          "prefix carries the effort request", file=sys.stderr)
+
+
+def _opencode_policy_content(config: dict) -> dict:
+    """Apply Duet's mandatory subagent policy to the child's inline config."""
+    if opencode_cli_major() >= 2:
+        # v2 ignores a top-level subagent_depth, so the depth moves under
+        # `experimental` and an ordered `permissions` rule hard-denies the
+        # subagent action even where depth alone would not.
+        experimental = config.setdefault("experimental", {})
+        if not isinstance(experimental, dict):
+            raise ValueError("OpenCode inline config experimental must be an object "
+                             "to apply Duet's subagent policy")
+        experimental["subagent_depth"] = 0
+        config.pop("subagent_depth", None)  # v2 warns on unsupported legacy keys
+        permissions = config.setdefault("permissions", [])
+        if not isinstance(permissions, list):
+            raise ValueError("OpenCode inline config permissions must be a list "
+                             "to apply Duet's subagent policy")
+        deny = {"action": "subagent", "resource": "*", "effect": "deny"}
+        if deny not in permissions:
+            permissions.append(deny)
+        return config
+    config["subagent_depth"] = 0
+    return config
+
+
 def _gemini_system_settings_path(cwd: Optional[pathlib.Path] = None) -> pathlib.Path:
     explicit = os.environ.get("GEMINI_CLI_SYSTEM_SETTINGS_PATH")
     if explicit:
@@ -1222,9 +1298,9 @@ def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None):
         yield {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
                "CLAUDE_CODE_FORK_SUBAGENT": "0"}
     elif backend == "opencode":
-        config = _json_config_object(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}",
-                                     "OPENCODE_CONFIG_CONTENT", trailing_commas=True)
-        config["subagent_depth"] = 0
+        config = _opencode_policy_content(_json_config_object(
+            os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}",
+            "OPENCODE_CONFIG_CONTENT", trailing_commas=True))
         yield {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
     elif backend == "gemini":
         source = _gemini_system_settings_path(cwd)
@@ -1257,9 +1333,18 @@ def _delegation_safe_extra_args(agent: Agent) -> list[str]:
         raise ValueError("agent extra_args cannot contain -- before Duet's required policy flags")
     if agent.backend == "codex" and "--approve-for-me" in extra:
         raise ValueError("Codex --approve-for-me starts a reviewer subagent and is incompatible with Duet")
-    if agent.backend == "opencode" and any(
-            arg.split("=", 1)[0] in {"--attach", "--dangerously-skip-permissions"} for arg in extra):
-        raise ValueError("OpenCode --attach and --dangerously-skip-permissions cannot enforce Duet's subagent policy")
+    if agent.backend == "opencode":
+        banned = {"--attach", "--dangerously-skip-permissions"}
+        if opencode_cli_major() >= 2:
+            # v2 duplicates of Duet-managed flags would win by position and
+            # re-route sessions, servers, models, or config away from policy.
+            banned |= {"--standalone", "--server", "--session", "-s", "--continue",
+                       "-c", "--model", "-m", "--format", "--dir", "--prompt"}
+        if any(arg.split("=", 1)[0] in banned
+               or (arg[:2] in {"-s", "-c", "-m"} and arg != arg[:2])
+               for arg in extra):
+            raise ValueError("OpenCode extra_args cannot set flags Duet manages itself "
+                             "(--attach, permission bypasses, session/model/server overrides)")
     flags = ({"--disallowedTools", "--disallowed-tools"} if agent.backend == "claude"
              else {"--excluded-tools"} if agent.backend == "copilot" else set())
     denied = list(CLAUDE_DENIED_DELEGATION_TOOLS if agent.backend == "claude"
@@ -1284,7 +1369,7 @@ def _delegation_safe_extra_args(agent: Agent) -> list[str]:
 
 
 def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
-    """Match run's --dir, including an explicit extra-argument override."""
+    """Match run's v1 --dir, including an explicit extra-argument override."""
     directory = str(cwd)
     for index, arg in enumerate(cmd[2:-1], 2):
         if arg == "--dir" and index + 1 < len(cmd) - 1:
@@ -1294,20 +1379,112 @@ def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
     return (cwd / directory).resolve()
 
 
+def _opencode_v2_rule_requests_subagent(rule: object) -> bool:
+    """True when a v2 permission rule would allow or ask for a subagent launch."""
+    if not isinstance(rule, dict):
+        return False
+    return (rule.get("action") in ("subagent", "task")
+            and rule.get("effect") in ("allow", "ask"))
+
+
+def _opencode_legacy_map_requests_subagent(value: object) -> bool:
+    """True when a v1 `permission`-map value allows or asks for subagents."""
+    if isinstance(value, str):
+        return value in ("allow", "ask")
+    return isinstance(value, dict) and any(
+        _opencode_legacy_map_requests_subagent(child) for child in value.values())
+
+
+def _opencode_v2_policy_requests_subagent(info: dict) -> bool:
+    """True when one config document's own permission rules re-allow subagents."""
+    rules = info.get("permissions")
+    if isinstance(rules, list) and any(
+            _opencode_v2_rule_requests_subagent(rule) for rule in rules):
+        return True
+    legacy = info.get("permission")
+    return isinstance(legacy, dict) and any(
+        _opencode_legacy_map_requests_subagent(legacy.get(action))
+        for action in ("task", "subagent"))
+
+
+def _opencode_v2_config_requests_subagent(info: dict) -> bool:
+    """True when any layer (top-level or agent-scoped) re-allows subagents."""
+    if _opencode_v2_policy_requests_subagent(info):
+        return True
+    for map_key in ("agents", "agent"):
+        agents = info.get(map_key)
+        if isinstance(agents, dict) and any(
+                isinstance(entry, dict) and _opencode_v2_policy_requests_subagent(entry)
+                for entry in agents.values()):
+            return True
+    return False
+
+
+def _check_opencode_v2_policy_documents(out: str) -> None:
+    """Verify Duet's injected v2 policy survives config precedence; fail closed.
+
+    `opencode debug config --standalone` prints a JSON array of source
+    documents (`{"type": ..., "path": ..., "info": {...}}`), lowest precedence
+    first. Duet's inline config must appear with `experimental.subagent_depth`
+    0, and no source may override that depth or re-allow subagent launches in
+    any layer. Document paths are safe to surface; setting values are not
+    logged.
+    """
+    try:
+        docs = json.loads(out)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("OpenCode resolved config is not JSON; agent not started") from exc
+    if not isinstance(docs, list) or not docs:
+        raise ValueError("OpenCode resolved config documents missing; agent not started")
+    injected = False
+    for doc in docs:
+        if not isinstance(doc, dict):
+            raise ValueError("OpenCode resolved config document malformed; agent not started")
+        info = doc.get("info")
+        if not isinstance(info, dict):
+            continue
+        source = str(doc.get("path") or "inline settings")
+        experimental = info.get("experimental")
+        if isinstance(experimental, dict) and "subagent_depth" in experimental:
+            depth = experimental.get("subagent_depth")
+            if type(depth) is int and depth == 0:
+                injected = True
+            else:
+                raise ValueError(f"OpenCode config from {source} overrides subagent_depth; "
+                                 "Duet's policy requires 0; agent not started")
+        if _opencode_v2_config_requests_subagent(info):
+            raise ValueError(f"OpenCode config from {source} allows subagent launches; "
+                             "Duet's policy requires them denied; agent not started")
+    if not injected:
+        raise ValueError("OpenCode v2 resolved config does not show Duet's subagent_depth 0; "
+                         "managed settings or this CLI version prevent Duet's policy; agent not started")
+
+
 def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
                                     timeout: float, env_overrides: dict[str, str],
                                     pid_file_path: Optional[pathlib.Path]) -> None:
     """Check native config precedence without logging potentially secret settings."""
-    probe = ["opencode", "debug", "config"]
-    if "--pure" in cmd[2:-1]:
-        probe.append("--pure")
-    rc, out, _ = _run(probe, cwd=_opencode_probe_cwd(cmd, cwd), stdin="",
+    major = opencode_cli_major()
+    if major >= 2:
+        # The standalone probe sees the same private-server config view as the
+        # run it gates, including the child's inline OPENCODE_CONFIG_CONTENT.
+        probe = ["opencode", "debug", "config", "--standalone"]
+        probe_cwd = cwd
+    else:
+        probe = ["opencode", "debug", "config"]
+        if "--pure" in cmd[2:-1]:
+            probe.append("--pure")
+        probe_cwd = _opencode_probe_cwd(cmd, cwd)
+    rc, out, _ = _run(probe, cwd=probe_cwd, stdin="",
                       timeout=min(timeout, 30), env_overrides=env_overrides,
                       pid_file_path=pid_file_path, mirror_stderr=False)
     if rc == 124:
         raise subprocess.TimeoutExpired(probe, min(timeout, 30))
     if rc != 0:
         raise ValueError(f"OpenCode subagent policy check failed (exit {rc}); agent not started")
+    if major >= 2:
+        _check_opencode_v2_policy_documents(out)
+        return
     config = _json_config_object(out, "OpenCode resolved config")
     depth = config.get("subagent_depth")
     if type(depth) is not int or depth != 0:
@@ -2311,12 +2488,50 @@ def _parse_opencode_jsonl(stdout: str) -> tuple[str, Optional[str], Optional[str
                 # instead of degrading to "unknown error".
                 msg = err
             else:
+                # v1 nests the cause under data.message and names the class in
+                # `name`; v2 puts the human cause directly in `message`.
                 data = err.get("data") if isinstance(err, dict) else None
                 msg = data.get("message") if isinstance(data, dict) else None
                 if not msg and isinstance(err, dict):
-                    msg = err.get("name")
+                    msg = err.get("message") or err.get("name") or err.get("type")
             error_message = str(msg or "unknown error")
     return "\n".join(parts.values()).rstrip(), session_id, error_message
+
+
+def _opencode_run_cmd(agent: Agent, eff_cwd: pathlib.Path,
+                      reasoning: Optional[str]) -> list[str]:
+    """Build the non-interactive run command; the prompt positional goes last.
+
+    OpenCode permissions are native; like Copilot we run non-interactively and
+    auto-approve so tool-using turns don't hang waiting for an approval that
+    can never arrive. `--sandbox` / `permission_mode` do not apply. v2 scopes
+    the project from the process cwd and needs `--standalone` so the child's
+    inline OPENCODE_CONFIG_CONTENT policy reaches a private server; v1 takes
+    an explicit `--dir`. All options precede the positional message.
+    """
+    major = opencode_cli_major()
+    cmd = ["opencode", "run", "--format", "json", "--auto"]
+    if major >= 2:
+        cmd.append("--standalone")
+    else:
+        cmd += ["--dir", str(eff_cwd)]
+    if agent.session_id:
+        cmd += ["-s", agent.session_id]
+    variant = (backend_adapter("opencode").reasoning_map.get(reasoning, reasoning)
+               if reasoning else None)
+    if agent.model and major >= 2 and variant:
+        cmd += ["-m", f"{agent.model}#{variant}"]
+    else:
+        if agent.model:
+            cmd += ["-m", agent.model]
+        if variant:
+            if major >= 2:
+                # v2 has no separate variant flag; without a model reference
+                # the level cannot be expressed on the command line.
+                _opencode_note_missing_model(agent, reasoning or "")
+            else:
+                cmd += ["--variant", variant]
+    return cmd
 
 
 def call_opencode(agent: Agent, system_prompt: str, message: str,
@@ -2345,24 +2560,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
         ), new_sid
 
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
-    # OpenCode permissions are native; like Copilot we run non-interactively and
-    # auto-approve so tool-using turns don't hang waiting for an approval that
-    # can never arrive. `--sandbox` / `permission_mode` do not apply. All options
-    # precede the positional message (the `run [message..]` positional is last).
-    cmd = [
-        "opencode", "run",
-        "--format", "json",
-        "--dir", str(eff_cwd),
-        "--auto",
-    ]
-    if agent.session_id:
-        cmd += ["-s", agent.session_id]
-    if reasoning:
-        variant = backend_adapter("opencode").reasoning_map.get(reasoning, reasoning)
-        if variant:
-            cmd += ["--variant", variant]
-    if agent.model:
-        cmd += ["-m", agent.model]
+    cmd = _opencode_run_cmd(agent, eff_cwd, reasoning)
     cmd += _delegation_safe_extra_args(agent)
     cmd.append(full_prompt)
     rc, out, err = _agent_run(

@@ -501,9 +501,12 @@ class TestAgentFinishReasons(unittest.TestCase):
     def test_opencode_error_event_maps_to_agent_error(self) -> None:
         # `opencode run` exits 0 on a model error, so call_opencode must catch
         # the error event in the JSONL stream and not forward a broken reply.
+        # The parser is version-agnostic; this v1 payload shape still parses.
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '{"subagent_depth": 0}', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
             return (
                 0,
                 '{"type":"error","sessionID":"ses_x","error":{"data":{"message":"boom"}}}',
@@ -524,7 +527,9 @@ class TestAgentFinishReasons(unittest.TestCase):
     def test_opencode_missing_session_id_maps_to_agent_error(self) -> None:
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '{"subagent_depth": 0}', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
             return (
                 0,
                 '{"type":"text","part":{"type":"text","text":"ok","id":"p1"}}',
@@ -545,7 +550,9 @@ class TestAgentFinishReasons(unittest.TestCase):
     def test_opencode_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '{"subagent_depth": 0}', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
             return 124, "", "[duet] TIMEOUT after 1s"
 
         agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
@@ -565,7 +572,9 @@ class TestAgentFinishReasons(unittest.TestCase):
         # call_opencode (mirrors the Gemini precedence test).
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '{"subagent_depth": 0}', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
             return (
                 0,
                 '{"type":"error","error":{"data":{"message":"boom"}}}',
@@ -594,7 +603,9 @@ class TestAgentFinishReasons(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             captured.append(list(cmd))
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '{"subagent_depth": 0}', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
             return (
                 0,
                 '{"type":"text","sessionID":"ses_new","part":{"type":"text","text":"ok","id":"p1"}}',
@@ -615,15 +626,26 @@ class TestAgentFinishReasons(unittest.TestCase):
             self.assertEqual(first[:2], ["opencode", "run"])
             self.assertIn("--format", first)
             self.assertEqual(first[first.index("--format") + 1], "json")
-            self.assertIn("--dir", first)
+            self.assertIn("--standalone", first)
+            self.assertNotIn("--dir", first)
             self.assertIn("--auto", first)
             self.assertNotIn("--dangerously-skip-permissions", first)
             self.assertIn("-m", first)
             self.assertEqual(first[first.index("-m") + 1], "anthropic/claude-sonnet-4-6")
+            self.assertNotIn("--variant", first)
             self.assertNotIn("-s", first)  # nothing to resume on turn 1
             # The prompt is the trailing positional arg (options come first).
             self.assertIn("=== MESSAGE FROM PARTNER ===", first[-1])
             self.assertTrue(first[-1].rstrip().endswith("msg"))
+
+            # v2 joins the reasoning variant onto the model reference.
+            duet.call_opencode(agent, "sys", "msg", _ROOT, 60,
+                               dry=False, first_turn=True, reasoning="max")
+            reasoned = captured[-1]
+            self.assertIn("-m", reasoned)
+            self.assertEqual(reasoned[reasoned.index("-m") + 1],
+                             "anthropic/claude-sonnet-4-6#max")
+            self.assertNotIn("--variant", reasoned)
 
             # Second turn: resume by the parsed session id.
             agent.session_id = "ses_prev"
@@ -632,6 +654,114 @@ class TestAgentFinishReasons(unittest.TestCase):
             second = captured[-1]
             self.assertIn("-s", second)
             self.assertEqual(second[second.index("-s") + 1], "ses_prev")
+
+    def test_opencode_v2_error_payload_maps_to_agent_error(self) -> None:
+        # v2 puts the human cause directly in error.message (no data wrapper).
+        def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
+            return (
+                0,
+                '{"type":"error","sessionID":"ses_x","error":{"type":"provider.no-route",'
+                '"message":"Model unavailable: x/y"}}',
+                "",
+            )
+
+        agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_opencode(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("Model unavailable: x/y", str(ctx.exception))
+
+    def test_opencode_v1_command_construction(self) -> None:
+        # Legacy v1 keeps the separate --dir/--variant flags and the resolved
+        # debug-config object probe; that CLI has no --standalone.
+        captured: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            captured.append(list(cmd))
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '{"subagent_depth": 0}', ""
+            if "--version" in cmd:
+                return 0, "opencode 1.2.3", ""
+            return (
+                0,
+                '{"type":"text","sessionID":"ses_new","part":{"type":"text","text":"ok","id":"p1"}}',
+                "",
+            )
+
+        agent = duet.Agent(
+            name="opencode-partner",
+            backend="opencode",
+            role="coder",
+            model="anthropic/claude-sonnet-4-6",
+        )
+        with mock.patch.object(duet, "_run", fake_run), \
+                mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None):
+            duet.call_opencode(agent, "sys", "msg", _ROOT, 60,
+                               dry=False, first_turn=True, reasoning="max")
+            first = captured[-1]
+            self.assertIn("--dir", first)
+            self.assertNotIn("--standalone", first)
+            self.assertIn("--variant", first)
+            self.assertEqual(first[first.index("--variant") + 1], "max")
+            self.assertEqual(first[first.index("-m") + 1], "anthropic/claude-sonnet-4-6")
+
+    def test_opencode_cli_major_detection_fails_closed_and_caches(self) -> None:
+        # A failing, empty, or undotted version probe refuses to guess a
+        # generation, and a parsed major is cached for the process lifetime.
+        for rc, out in ((1, "error output"), (0, ""), (0, "opencode beta 3")):
+            with self.subTest(rc=rc, out=out), \
+                    mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None), \
+                    mock.patch.object(duet, "_run", return_value=(rc, out, "")):
+                with self.assertRaises(ValueError):
+                    duet.opencode_cli_major()
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", None), \
+                mock.patch.object(duet, "_run", return_value=(0, "opencode v2.2.5", "")) as run:
+            self.assertEqual(duet.opencode_cli_major(), 2)
+            self.assertEqual(duet.opencode_cli_major(), 2)  # cached: no second probe
+            self.assertEqual(run.call_count, 1)
+
+    def test_opencode_model_rejects_variant_suffix(self) -> None:
+        # duet owns the v2 model#variant suffix, so a user-supplied fragment
+        # fails validation instead of producing provider/model#high#max.
+        with self.assertRaises(ValueError):
+            duet.Agent(name="oc", backend="opencode", role="coder",
+                       model="zai-coding-plan/glm-5.3-flash#low")
+        agent = duet.Agent(name="oc", backend="opencode", role="coder",
+                           model="zai-coding-plan/glm-5.3-flash")
+        self.assertEqual(agent.model, "zai-coding-plan/glm-5.3-flash")
+
+    def test_opencode_v2_type_only_error_payload_maps_to_agent_error(self) -> None:
+        # Some v2 error events carry only the class name; surface it verbatim.
+        def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["opencode", "debug", "config"]:
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            if "--version" in cmd:
+                return 0, "opencode v2.2.5", ""
+            return (
+                0,
+                '{"type":"error","sessionID":"ses_x","error":{"type":"provider.no-route"}}',
+                "",
+            )
+
+        agent = duet.Agent(name="opencode-partner", backend="opencode", role="coder")
+        with mock.patch.object(duet, "_run", fake_run):
+            with self.assertRaises(duet.AgentRunError) as ctx:
+                duet.call_opencode(
+                    agent, "sys", "msg", _ROOT, 60,
+                    dry=False, first_turn=True,
+                )
+
+        self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("provider.no-route", str(ctx.exception))
 
 
 # ---------- _parse_codex_session_id ----------
@@ -1238,8 +1368,8 @@ class TestTimeoutScaling(unittest.TestCase):
                 self.assertEqual(duet.GEMINI_REASONING_MAP[level], "")
 
     def test_opencode_reasoning_map_is_identity(self) -> None:
-        # OpenCode tolerates/ignores unknown `--variant` values, so duet passes
-        # each level through unchanged for forward-compatibility.
+        # OpenCode joins variants as model#variant (v2) or --variant (v1); duet
+        # passes each level through unchanged instead of remapping it.
         for level in duet.REASONING_LEVELS:
             with self.subTest(level=level):
                 self.assertEqual(duet.OPENCODE_REASONING_MAP[level], level)

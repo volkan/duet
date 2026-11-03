@@ -16,7 +16,7 @@ Use Python 3.9+ and Git. Install and sign in to the CLIs for your chosen pair:
 |---|---|
 | Claude Code | [Claude Code quickstart](https://code.claude.com/docs/en/quickstart) |
 | Codex CLI | [Codex CLI getting started](https://developers.openai.com/codex/cli#getting-started) |
-| OpenCode, when used as a host or backend | [OpenCode setup](https://opencode.ai/docs/) |
+| OpenCode, when used as a host or backend | [OpenCode setup](https://opencode.ai/v2/docs/) |
 
 For the default Claude + Codex review, start `claude` and `codex` once and
 complete their sign-in flows. A desktop app alone does not put its CLI on

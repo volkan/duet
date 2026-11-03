@@ -1132,7 +1132,9 @@ calls = []
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
     if cmd[:3] == ["opencode", "debug", "config"]:
-        return 0, '{"subagent_depth": 0}', ""
+        return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+    if "--version" in cmd:
+        return 0, "opencode v2.2.5", ""
     return 0, json.dumps(
         {"type": "text", "sessionID": "oc-sid",
          "part": {"type": "text", "text": "ok", "id": "p1"}}
@@ -1159,11 +1161,12 @@ m.call_opencode(
 first = calls[-1]
 assert first[:2] == ["opencode", "run"], first
 assert "--format" in first and "json" in first, first
-assert "--dir" in first, first
+assert "--standalone" in first, first
+assert "--dir" not in first, first
 assert "--auto" in first, first
 assert "--dangerously-skip-permissions" not in first, first
-assert "--variant" in first and first[first.index("--variant") + 1] == "max", first
-assert "-m" in first and "anthropic/claude-sonnet-4-6" in first, first
+assert "--variant" not in first, first
+assert "-m" in first and first[first.index("-m") + 1] == "anthropic/claude-sonnet-4-6#max", first
 assert "--agent" in first and "build" in first, first
 assert "--sandbox" not in first, first
 assert "--permission-mode" not in first, first
@@ -1980,9 +1983,9 @@ binary.parent.mkdir(parents=True)
 binary.write_text('''#!/usr/bin/env python3
 import json, sys, uuid
 if "--version" in sys.argv:
-    print("1.2.3")
+    print("opencode v2.2.5")
 elif sys.argv[1:3] == ["debug", "config"]:
-    print(json.dumps({"subagent_depth": 0}))
+    print(json.dumps([{"info": {"experimental": {"subagent_depth": 0}}}]))
 else:
     items = [{"id":"L1","claim":"private-claim-marker","disposition":"unresolved",
               "evidence":[],"objection":"Missing requirement"}]

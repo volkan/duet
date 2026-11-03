@@ -14,8 +14,8 @@ level, and asserts:
   - codex is invoked with `-c model_reasoning_effort=<level>` for every
     explicitly requested level
   - copilot is invoked with `--effort <mapped>`
-  - opencode is invoked with `--variant <level>` (identity map: OpenCode
-    tolerates/ignores unknown variants, so duet passes the level through)
+  - opencode (pinned to a v2 stub) carries the level as `-m model#<level>`
+    (identity map: duet passes the level through; v2 errors on an unknown one)
   - gemini is invoked without any effort flag, because Gemini CLI has no
     documented reasoning-effort option
   - the system-prompt prefix contains the right reasoning-nudge marker for
@@ -71,7 +71,9 @@ def main() -> int:
     def fake_run(cmd, **_kwargs):
         captured.append(list(cmd))
         if cmd[:3] == ["opencode", "debug", "config"]:
-            return 0, '{"subagent_depth": 0}', ""
+            return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+        if "--version" in cmd:
+            return 0, "opencode v2.2.5", ""
         if cmd[0] == "claude":
             return (0, json.dumps({"result": "ok", "session_id": "s"}), "")
         if cmd[0] == "gemini":
@@ -104,7 +106,7 @@ def main() -> int:
     a_cx = m.Agent(name="x", backend="codex", role="coder")
     a_gm = m.Agent(name="g", backend="gemini", role="coder")
     a_cp = m.Agent(name="p", backend="copilot", role="coder")
-    a_oc = m.Agent(name="o", backend="opencode", role="coder")
+    a_oc = m.Agent(name="o", backend="opencode", role="coder", model="example/model")
 
     rows: list[tuple[str, str, str, str, str, str, str, bool, list[str]]] = []
     bad = 0
@@ -165,10 +167,10 @@ def main() -> int:
         opencode_cmd = captured[-1]
         # OpenCode takes the prompt as the trailing positional, not via `-p`.
         opencode_prompt = opencode_cmd[-1]
-        opencode_variant = (
-            opencode_cmd[opencode_cmd.index("--variant") + 1]
-            if "--variant" in opencode_cmd else "(none)"
+        opencode_model = (
+            opencode_cmd[opencode_cmd.index("-m") + 1] if "-m" in opencode_cmd else ""
         )
+        opencode_variant = opencode_model.partition("#")[2] or "(none)"
 
         want = EXPECTED[lvl]
         problems: list[str] = []
