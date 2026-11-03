@@ -108,7 +108,7 @@ class TestNoSubagents(unittest.TestCase):
                         def run(cmd, **kwargs):
                             overrides = kwargs["env_overrides"]
                             if cmd[:3] == ["opencode", "debug", "config"]:
-                                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
                             if "--version" in cmd:
                                 return 0, "opencode v2.2.5", ""
                             if backend == "gemini":
@@ -211,7 +211,7 @@ class TestNoSubagents(unittest.TestCase):
                 self.assertEqual(os.environ["OPENCODE_CONFIG_CONTENT"], raw)
 
     def test_opencode_refuses_conflicting_missing_or_malformed_resolved_policy(self):
-        v2_ok = '[{"info": {"experimental": {"subagent_depth": 0}}}]'
+        v2_ok = '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]'
         v2_bad = ['[]', '{}', 'private-config-content', '[{"info": {}}]', '[{"info": 5}]',
                   '{"info": {"experimental": {"subagent_depth": 0}}}',
                   '[{"info": {"experimental": {"subagent_depth": 2}}}]',
@@ -267,7 +267,7 @@ class TestNoSubagents(unittest.TestCase):
     def test_opencode_v2_preflight_probes_standalone_and_keeps_budget(self):
         cmd = ["opencode", "run", "--standalone", "--auto", "task"]
         env = {"OPENCODE_CONFIG_CONTENT": '{"experimental": {"subagent_depth": 0}}'}
-        docs = '[{"info": {"experimental": {"subagent_depth": 0}}}]'
+        docs = '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]'
         with mock.patch.object(duet, "_run", side_effect=[(0, docs, ""), (0, "reply", "")]) as run, \
                 mock.patch.object(duet, "_agent_environment", return_value=contextlib.nullcontext(env)), \
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
@@ -281,6 +281,51 @@ class TestNoSubagents(unittest.TestCase):
         self.assertFalse(probe.kwargs["mirror_stderr"])
         self.assertEqual(probe.kwargs["timeout"], 30)
         self.assertEqual(agent.kwargs["timeout"], 58)
+
+    def test_opencode_v2_confined_worktree_peer_denies_external_directories(self):
+        # A worktree-confined v2 peer carries an extra external_directory deny
+        # (v2 can flap a session's location to the canonical checkout; denies
+        # are always enforced, so the main checkout stays untouchable), and
+        # the preflight refuses to start without that deny in effect.
+        stub = ('[{"info": {"experimental": {"subagent_depth": 0}, "permissions": ['
+                '{"action": "subagent", "resource": "*", "effect": "deny"}, '
+                '{"action": "external_directory", "resource": "*", '
+                '"effect": "deny"}]}}]')
+        no_external = ('[{"info": {"experimental": {"subagent_depth": 0}, '
+                       '"permissions": [{"action": "subagent", "resource": "*", '
+                       '"effect": "deny"}]}}]')
+        agent = duet.Agent("peer", "opencode",
+                           cwd_override=pathlib.Path("/repo/runs/r1/wt"))
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": "{}"}):
+            with duet._agent_environment("opencode", cwd=pathlib.Path("/repo/runs/r1/wt"),
+                               worktree_confined=True) as env:
+                self.assertEqual(env["PWD"], str(pathlib.Path("/repo/runs/r1/wt")))
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                self.assertIn({"action": "subagent", "resource": "*",
+                               "effect": "deny"}, config["permissions"])
+                self.assertIn({"action": "external_directory", "resource": "*",
+                               "effect": "deny"}, config["permissions"])
+        run_reply = json.dumps({"type": "text", "sessionID": "ses_conf",
+                                "part": {"id": "p", "type": "text", "text": "ok"}})
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            for raw, ok in ((stub, True), (no_external, False)):
+                with self.subTest(ok=ok), \
+                        mock.patch.object(duet, "_run", side_effect=[
+                            (0, raw, ""), (0, run_reply, "")]) as run:
+                    if ok:
+                        duet.call_opencode(agent, "system", "message",
+                                           pathlib.Path("/repo"), 60, False,
+                                           first_turn=False)
+                    else:
+                        with self.assertRaises(duet.AgentRunError) as error:
+                            duet.call_opencode(agent, "system", "message",
+                                               pathlib.Path("/repo"), 60, False,
+                                               first_turn=False)
+                        self.assertEqual(error.exception.finished_reason,
+                                         duet.FINISHED_AGENT_ERROR)
+                    probe_cmd = run.call_args_list[0].args[0]
+                    self.assertEqual(probe_cmd[:4],
+                                     ["opencode", "debug", "config", "--standalone"])
 
     def test_opencode_preflight_failure_never_starts_the_agent(self):
         for rc, reason in ((124, duet.FINISHED_TIMEOUT), (127, duet.FINISHED_AGENT_ERROR),
@@ -299,7 +344,7 @@ class TestNoSubagents(unittest.TestCase):
 
     def test_opencode_exhausted_budget_stops_after_preflight(self):
         with mock.patch.object(duet, "_run", return_value=(
-                0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', "")) as run, \
+                0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', "")) as run, \
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
                 mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
             with self.assertRaises(duet.AgentRunError) as error:

@@ -69,7 +69,9 @@ dry_run: false                # CLI --dry-run always enables preview, even when 
 
 # Optional: where new git worktrees land when --worktree is on. Default is
 # <runs_dir>/<run_id>/wt/, which is durable across reboots and OS temp-dir
-# cleaners. Override to any directory you control; runs land at <root>/<run_id>/.
+# cleaners. OpenCode v2 peers default to an independent git clone at
+# ~/.duet/worktrees/<run_id>/ instead (v2 resolves git-worktree sessions to
+# the main checkout). Override to any directory you control; runs land at <root>/<run_id>/.
 # Avoid /tmp on macOS/Linux for long-running duets — the OS may wipe it
 # mid-run.
 # worktree_root: ~/duet-worktrees
@@ -182,7 +184,8 @@ agents:
 # duet runs with `--auto`, `--dir <cwd>` on CLI v1 (--standalone, with the
 # project taken from the process cwd, on v2), and an inline subagent_depth: 0
 # override (top-level on v1; experimental.subagent_depth plus a subagent
-# permissions deny on v2). A native config check stops the turn if managed
+# permissions deny on v2, plus an external_directory deny for peers inside
+# Duet's worktree). A native config check stops the turn if managed
 # settings override depth zero. Inline OPENCODE_CONFIG_CONTENT supports
 # comments and trailing commas. Explicit permission denials still apply.
 # --sandbox, permission_mode, and add_dirs do not apply. Reasoning maps to

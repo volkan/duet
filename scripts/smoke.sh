@@ -1132,7 +1132,7 @@ calls = []
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
     if cmd[:3] == ["opencode", "debug", "config"]:
-        return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+        return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
     if "--version" in cmd:
         return 0, "opencode v2.2.5", ""
     return 0, json.dumps(
@@ -1985,7 +1985,7 @@ import json, sys, uuid
 if "--version" in sys.argv:
     print("opencode v2.2.5")
 elif sys.argv[1:3] == ["debug", "config"]:
-    print(json.dumps([{"info": {"experimental": {"subagent_depth": 0}}}]))
+    print(json.dumps([{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]))
 else:
     items = [{"id":"L1","claim":"private-claim-marker","disposition":"unresolved",
               "evidence":[],"objection":"Missing requirement"}]

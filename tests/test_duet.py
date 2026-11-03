@@ -504,7 +504,7 @@ class TestAgentFinishReasons(unittest.TestCase):
         # The parser is version-agnostic; this v1 payload shape still parses.
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -527,7 +527,7 @@ class TestAgentFinishReasons(unittest.TestCase):
     def test_opencode_missing_session_id_maps_to_agent_error(self) -> None:
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -550,7 +550,7 @@ class TestAgentFinishReasons(unittest.TestCase):
     def test_opencode_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return 124, "", "[duet] TIMEOUT after 1s"
@@ -572,7 +572,7 @@ class TestAgentFinishReasons(unittest.TestCase):
         # call_opencode (mirrors the Gemini precedence test).
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -603,7 +603,7 @@ class TestAgentFinishReasons(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             captured.append(list(cmd))
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -659,7 +659,7 @@ class TestAgentFinishReasons(unittest.TestCase):
         # v2 puts the human cause directly in error.message (no data wrapper).
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -731,19 +731,25 @@ class TestAgentFinishReasons(unittest.TestCase):
 
     def test_opencode_model_rejects_variant_suffix(self) -> None:
         # duet owns the v2 model#variant suffix, so a user-supplied fragment
-        # fails validation instead of producing provider/model#high#max.
-        with self.assertRaises(ValueError):
-            duet.Agent(name="oc", backend="opencode", role="coder",
-                       model="zai-coding-plan/glm-5.3-flash#low")
+        # fails config validation on the repo's clean error path (not a raw
+        # construction traceback) for CLI, YAML, and --continue alike.
         agent = duet.Agent(name="oc", backend="opencode", role="coder",
-                           model="zai-coding-plan/glm-5.3-flash")
-        self.assertEqual(agent.model, "zai-coding-plan/glm-5.3-flash")
+                           model="zai-coding-plan/glm-5.3-flash#low")
+        cfg = duet.DuetConfig(cwd=pathlib.Path("."),
+                              agents=[agent, duet.Agent("other", "codex")])
+        with self.assertRaises(SystemExit) as ctx:
+            duet.validate_config(cfg)
+        self.assertIn("'#variant'", str(ctx.exception))
+        good = duet.Agent(name="oc", backend="opencode", role="coder",
+                          model="zai-coding-plan/glm-5.3-flash")
+        duet.validate_config(duet.DuetConfig(
+            cwd=pathlib.Path("."), agents=[good, duet.Agent("other", "codex")]))
 
     def test_opencode_v2_type_only_error_payload_maps_to_agent_error(self) -> None:
         # Some v2 error events carry only the class name; surface it verbatim.
         def fake_run(cmd, **kwargs):
             if cmd[:3] == ["opencode", "debug", "config"]:
-                return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+                return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
             if "--version" in cmd:
                 return 0, "opencode v2.2.5", ""
             return (
@@ -762,6 +768,31 @@ class TestAgentFinishReasons(unittest.TestCase):
 
         self.assertEqual(ctx.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
         self.assertIn("provider.no-route", str(ctx.exception))
+
+    def test_opencode_v2_worktree_default_moves_outside_the_repo(self) -> None:
+        # v2 resolves a nested worktree's project to the canonical checkout
+        # (observed on v2.2.5), so duet's v2 default lands in ~/.duet/worktrees
+        # while explicit --worktree-root and v1/codex placements stay unchanged.
+        cfg = duet.DuetConfig(
+            cwd=pathlib.Path("/repo"),
+            agents=[duet.Agent("lead", "opencode", role="reviewer"),
+                    duet.Agent("partner", "opencode", role="coder")],
+        )
+        run_dir = pathlib.Path("/repo/runs/r1")
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            self.assertEqual(
+                duet._worktree_dest(cfg, "opencode", "r1", run_dir),
+                pathlib.Path.home() / ".duet" / "worktrees" / "r1",
+            )
+            cfg.worktree_root = pathlib.Path("/tmp/roots")
+            self.assertEqual(duet._worktree_dest(cfg, "opencode", "r1", run_dir),
+                             pathlib.Path("/tmp/roots/r1"))
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 1):
+            cfg.worktree_root = None
+            self.assertEqual(duet._worktree_dest(cfg, "opencode", "r1", run_dir),
+                             run_dir / "wt")
+        self.assertEqual(duet._worktree_dest(cfg, "codex", "r1", run_dir), run_dir / "wt")
+
 
 
 # ---------- _parse_codex_session_id ----------
@@ -1285,6 +1316,78 @@ class TestWorktreeDiagnostics(unittest.TestCase):
                 duet.setup_worktree(
                     pathlib.Path(raw), "duet/test", pathlib.Path(raw) / "wt"
                 )
+
+
+
+
+class TestSetupClone(unittest.TestCase):
+    def _git(self, *args, cwd):
+        subprocess.run(["git", *args], cwd=str(cwd), check=True,
+                       capture_output=True, text=True)
+
+    def _repo(self, root):
+        src = root / "src"
+        src.mkdir()
+        self._git("init", cwd=src)
+        self._git("config", "user.email", "t@t", cwd=src)
+        self._git("config", "user.name", "t", cwd=src)
+        (src / "app.py").write_text("greet = 'hello'\n")
+        self._git("add", ".", cwd=src)
+        self._git("commit", "-m", "init", cwd=src)
+        return src
+
+    def test_setup_clone_is_an_independent_repo_with_the_duet_branch(self) -> None:
+        # v2 peers get a clone, not a linked worktree: independent repo identity
+        # means v2 cannot resolve their location to the canonical checkout.
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            src = self._repo(root)
+            dest = duet.setup_clone(src, "duet/r1", root / "clone")
+            self.assertEqual((dest / "app.py").read_text(), "greet = 'hello'\n")
+            branch = subprocess.run(["git", "-C", str(dest), "rev-parse",
+                                     "--abbrev-ref", "HEAD"],
+                                    capture_output=True, text=True, check=True)
+            self.assertEqual(branch.stdout.strip(), "duet/r1")
+            listed = subprocess.run(["git", "-C", str(src), "worktree", "list"],
+                                    capture_output=True, text=True, check=True)
+            self.assertNotIn(str(dest), listed.stdout)
+            self.assertFalse(duet._is_linked_worktree(dest))
+
+    def test_setup_clone_refuses_an_existing_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            dest = pathlib.Path(raw) / "clone"
+            dest.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                duet.setup_clone(pathlib.Path(raw), "duet/r1", dest)
+
+    def test_is_linked_worktree_distinguishes_clone_from_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            src = self._repo(root)
+            wt = root / "wt"
+            self._git("worktree", "add", "-b", "wb", str(wt), cwd=src)
+            clone = duet.setup_clone(src, "duet/r1", root / "clone")
+            self.assertTrue(duet._is_linked_worktree(wt))
+            self.assertFalse(duet._is_linked_worktree(clone))
+
+    def test_v2_opencode_reuse_refuses_a_linked_worktree(self) -> None:
+        # v2 resolves linked worktree sessions to the canonical checkout, so
+        # --worktree-path must hand v2 an independent clone, never a worktree.
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            src = self._repo(root)
+            wt = root / "wt"
+            self._git("worktree", "add", "-b", "wb", str(wt), cwd=src)
+            cfg = duet.DuetConfig(
+                cwd=src,
+                agents=[duet.Agent("lead", "opencode", role="reviewer"),
+                        duet.Agent("partner", "opencode", role="coder")],
+                worktree_path=wt,
+                require_worktree=True,
+            )
+            with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+                with self.assertRaises(duet.RunSetupError):
+                    duet._setup_run_worktree(cfg, "r1", root / "runs" / "r1")
 
 
 class TestTimeoutScaling(unittest.TestCase):

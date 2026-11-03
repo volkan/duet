@@ -438,11 +438,9 @@ class Agent:
         # remain unchanged, and other backends keep their native defaults.
         if self.backend == "claude" and not self.model:
             self.model = DEFAULT_CLAUDE_MODEL
-        # OpenCode v2 joins duet's reasoning variant as model#variant; a
-        # user-supplied #fragment would double up and fail model resolution.
-        if self.backend == "opencode" and self.model and "#" in self.model:
-            raise ValueError("OpenCode model must be provider/model without '#variant'; "
-                             "set agent reasoning_effort or --reasoning instead")
+        # OpenCode's #variant rejection lives in validate_config beside the
+        # zcode selection check so CLI/YAML/--continue all get the repo's
+        # clean config-error path instead of a construction traceback.
 
     def system_prompt(self, sentinel: str, recap: bool = False) -> str:
         tmpl = self.role_prompt or ROLE_PROMPTS.get(self.role)
@@ -615,6 +613,14 @@ def validate_config(cfg: DuetConfig,
                 _zcode_requested_selection(agent, effective_reasoning(agent, cfg.reasoning))
             except ValueError as exc:
                 _config_error(str(exc), parser)
+        # OpenCode v2 joins duet's reasoning variant as model#variant; a
+        # user-supplied #fragment would double up and fail model resolution.
+        if (agent.backend == "opencode" and agent.model and "#" in agent.model):
+            _config_error(
+                f"OpenCode model for agent {agent.name!r} must be provider/model "
+                "without '#variant'; set reasoning_effort or --reasoning instead",
+                parser,
+            )
         if agent.name in seen_names:
             _config_error(
                 f"duplicate agent name {agent.name!r}; agent names must be unique",
@@ -741,6 +747,85 @@ def is_git_repo(path: pathlib.Path) -> bool:
         return r.returncode == 0 and r.stdout.strip() == "true"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _spawn_git(cmd: list[str], label: str, timeout: int = 30) -> None:
+    """Run one git command under duet's tracked process group; fail loud."""
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("git not found on PATH")
+    _register_proc(proc)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _signal_proc_tree(proc, signal.SIGTERM)
+            try:
+                out, err = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                _signal_proc_tree(proc, signal.SIGKILL)
+                out, err = proc.communicate()
+            raise RuntimeError(
+                f"{label} timed out (rc={proc.returncode}): "
+                f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+            )
+    finally:
+        _unregister_proc(proc)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"{label} failed (rc={proc.returncode}): "
+            f"stderr: {_stream_tail(err)} | stdout: {_stream_tail(out)}"
+        )
+
+
+def setup_clone(repo_path: pathlib.Path, branch_name: str,
+                dest: pathlib.Path) -> pathlib.Path:
+    """Clone `repo_path` to `dest` and cut `branch_name` at HEAD.
+
+    OpenCode v2 resolves git-worktree sessions to the canonical checkout, so
+    v2 peers get an independent clone instead: same throwaway isolation, but
+    no shared repo identity for v2 to misresolve.
+    """
+    dest = dest.expanduser().resolve()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        raise RuntimeError(f"worktree destination already exists: {dest}")
+    _spawn_git(["git", "clone", "--no-hardlinks", str(repo_path), str(dest)],
+               "git clone", timeout=120)
+    _spawn_git(["git", "-C", str(dest), "switch", "-c", branch_name],
+               "git switch -c")
+    return dest
+
+
+def _is_linked_worktree(path: pathlib.Path) -> bool:
+    """True when `path` is a linked git worktree of another checkout (fail closed)."""
+    try:
+        git_dir = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
+        )
+        common = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return True
+    if git_dir.returncode != 0 or common.returncode != 0:
+        return True
+    git_dir_path = (path / git_dir.stdout.strip()).resolve()
+    common_path = (path / common.stdout.strip()).resolve()
+    return git_dir_path != common_path
 
 
 def setup_worktree(repo_path: pathlib.Path, branch_name: str,
@@ -1254,8 +1339,14 @@ def _opencode_note_missing_model(agent: Agent, reasoning: str) -> None:
           "prefix carries the effort request", file=sys.stderr)
 
 
-def _opencode_policy_content(config: dict) -> dict:
-    """Apply Duet's mandatory subagent policy to the child's inline config."""
+def _opencode_policy_content(config: dict, *, worktree_confined: bool = False) -> dict:
+    """Apply Duet's mandatory subagent policy to the child's inline config.
+
+    A worktree-confined v2 peer also hard-denies `external_directory`: v2 can
+    resolve a session's location to the canonical checkout, and denies are
+    always enforced, so this keeps the peer physically inside its worktree
+    even when the location flaps (observed on v2.2.5).
+    """
     if opencode_cli_major() >= 2:
         # v2 ignores a top-level subagent_depth, so the depth moves under
         # `experimental` and an ordered `permissions` rule hard-denies the
@@ -1265,7 +1356,7 @@ def _opencode_policy_content(config: dict) -> dict:
             raise ValueError("OpenCode inline config experimental must be an object "
                              "to apply Duet's subagent policy")
         experimental["subagent_depth"] = 0
-        config.pop("subagent_depth", None)  # v2 warns on unsupported legacy keys
+        config.pop("subagent_depth", None)  # top-level depth is an unsupported v2 legacy key
         permissions = config.setdefault("permissions", [])
         if not isinstance(permissions, list):
             raise ValueError("OpenCode inline config permissions must be a list "
@@ -1273,6 +1364,11 @@ def _opencode_policy_content(config: dict) -> dict:
         deny = {"action": "subagent", "resource": "*", "effect": "deny"}
         if deny not in permissions:
             permissions.append(deny)
+        if worktree_confined:
+            external = {"action": "external_directory", "resource": "*",
+                        "effect": "deny"}
+            if external not in permissions:
+                permissions.append(external)
         return config
     config["subagent_depth"] = 0
     return config
@@ -1292,7 +1388,8 @@ def _gemini_system_settings_path(cwd: Optional[pathlib.Path] = None) -> pathlib.
 
 
 @contextlib.contextmanager
-def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None):
+def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None,
+                       worktree_confined: bool = False):
     """Apply native delegation controls for this child only; keep auth/config intact."""
     if backend == "claude":
         yield {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
@@ -1300,8 +1397,15 @@ def _agent_environment(backend: str, *, cwd: Optional[pathlib.Path] = None):
     elif backend == "opencode":
         config = _opencode_policy_content(_json_config_object(
             os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}",
-            "OPENCODE_CONFIG_CONTENT", trailing_commas=True))
-        yield {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+            "OPENCODE_CONFIG_CONTENT", trailing_commas=True),
+            worktree_confined=worktree_confined)
+        overrides = {"OPENCODE_CONFIG_CONTENT": json.dumps(config)}
+        if cwd is not None:
+            # v2 resolves the session location from the logical cwd: a stale
+            # inherited PWD (the caller's directory) silently retargets tools
+            # away from the effective cwd, so pin both to the same path.
+            overrides["PWD"] = str(cwd)
+        yield overrides
     elif backend == "gemini":
         source = _gemini_system_settings_path(cwd)
         defaults = os.environ.get("GEMINI_CLI_SYSTEM_DEFAULTS_PATH") or str(
@@ -1420,7 +1524,8 @@ def _opencode_v2_config_requests_subagent(info: dict) -> bool:
     return False
 
 
-def _check_opencode_v2_policy_documents(out: str) -> None:
+def _check_opencode_v2_policy_documents(out: str, *,
+                                        worktree_confined: bool = False) -> None:
     """Verify Duet's injected v2 policy survives config precedence; fail closed.
 
     `opencode debug config --standalone` prints a JSON array of source
@@ -1436,7 +1541,9 @@ def _check_opencode_v2_policy_documents(out: str) -> None:
         raise ValueError("OpenCode resolved config is not JSON; agent not started") from exc
     if not isinstance(docs, list) or not docs:
         raise ValueError("OpenCode resolved config documents missing; agent not started")
-    injected = False
+    depth_injected = False
+    deny_injected = False
+    deny_rule = {"action": "subagent", "resource": "*", "effect": "deny"}
     for doc in docs:
         if not isinstance(doc, dict):
             raise ValueError("OpenCode resolved config document malformed; agent not started")
@@ -1448,21 +1555,37 @@ def _check_opencode_v2_policy_documents(out: str) -> None:
         if isinstance(experimental, dict) and "subagent_depth" in experimental:
             depth = experimental.get("subagent_depth")
             if type(depth) is int and depth == 0:
-                injected = True
+                depth_injected = True
             else:
                 raise ValueError(f"OpenCode config from {source} overrides subagent_depth; "
                                  "Duet's policy requires 0; agent not started")
+        rules = info.get("permissions")
+        if isinstance(rules, list) and deny_rule in rules:
+            deny_injected = True
         if _opencode_v2_config_requests_subagent(info):
             raise ValueError(f"OpenCode config from {source} allows subagent launches; "
                              "Duet's policy requires them denied; agent not started")
-    if not injected:
-        raise ValueError("OpenCode v2 resolved config does not show Duet's subagent_depth 0; "
+    external_injected = False
+    if worktree_confined:
+        external_rule = {"action": "external_directory", "resource": "*",
+                         "effect": "deny"}
+        for doc in docs:
+            info = doc.get("info") if isinstance(doc, dict) else None
+            rules = info.get("permissions") if isinstance(info, dict) else None
+            if isinstance(rules, list) and external_rule in rules:
+                external_injected = True
+    if not (depth_injected and deny_injected and (external_injected
+                                                  or not worktree_confined)):
+        raise ValueError("OpenCode v2 resolved config does not show Duet's subagent policy "
+                         "(subagent_depth 0, the subagent deny rule, and for worktree "
+                         "peers the external_directory deny); "
                          "managed settings or this CLI version prevent Duet's policy; agent not started")
 
 
 def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
                                     timeout: float, env_overrides: dict[str, str],
-                                    pid_file_path: Optional[pathlib.Path]) -> None:
+                                    pid_file_path: Optional[pathlib.Path],
+                                    worktree_confined: bool = False) -> None:
     """Check native config precedence without logging potentially secret settings."""
     major = opencode_cli_major()
     if major >= 2:
@@ -1483,7 +1606,7 @@ def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
     if rc != 0:
         raise ValueError(f"OpenCode subagent policy check failed (exit {rc}); agent not started")
     if major >= 2:
-        _check_opencode_v2_policy_documents(out)
+        _check_opencode_v2_policy_documents(out, worktree_confined=worktree_confined)
         return
     config = _json_config_object(out, "OpenCode resolved config")
     depth = config.get("subagent_depth")
@@ -1495,14 +1618,17 @@ def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
 def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                stdin: Optional[str], timeout: int,
                stderr_log_path: Optional[pathlib.Path],
-               pid_file_path: Optional[pathlib.Path]) -> tuple[int, str, str]:
+               pid_file_path: Optional[pathlib.Path],
+               worktree_confined: bool = False) -> tuple[int, str, str]:
     try:
-        with _agent_environment(backend, cwd=cwd) as env_overrides:
+        with _agent_environment(backend, cwd=cwd,
+                                worktree_confined=worktree_confined) as env_overrides:
             if backend == "opencode":
                 started = time.monotonic()
                 _check_opencode_subagent_policy(
                     cmd, cwd=cwd, timeout=timeout, env_overrides=env_overrides,
-                    pid_file_path=pid_file_path)
+                    pid_file_path=pid_file_path,
+                    worktree_confined=worktree_confined)
                 timeout -= time.monotonic() - started
                 if timeout <= 0:
                     raise subprocess.TimeoutExpired(cmd, 0)
@@ -2571,6 +2697,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
+        worktree_confined=bool(agent.cwd_override),
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
@@ -3572,6 +3699,22 @@ def _worktree_agent_index(cfg: DuetConfig) -> int:
     return {"lead": 0, "partner": 1}.get(cfg.worktree_for, 1)
 
 
+def _worktree_dest(cfg: DuetConfig, wt_backend: str,
+                   run_id: str, run_dir: pathlib.Path) -> pathlib.Path:
+    """Default worktree placement for this run's serving agent.
+
+    OpenCode v2 resolves a nested worktree's project to the canonical checkout
+    once the parent repo is registered (observed on v2.2.5), silently
+    retargeting the peer's tools to the main checkout. V2 OpenCode peers
+    therefore default outside the repo tree; `--worktree-root` still wins.
+    """
+    if cfg.worktree_root:
+        return cfg.worktree_root / run_id
+    if wt_backend == "opencode" and opencode_cli_major() >= 2:
+        return pathlib.Path.home() / ".duet" / "worktrees" / run_id
+    return run_dir / "wt"
+
+
 def _setup_run_worktree(
     cfg: DuetConfig, run_id: str, run_dir: pathlib.Path,
 ) -> tuple[Optional[pathlib.Path], Optional[str]]:
@@ -3602,9 +3745,18 @@ def _setup_run_worktree(
             wt_branch = r.stdout.strip() if r.returncode == 0 else None
         except Exception:
             wt_branch = None
-        if cfg.require_worktree and wt_branch is None:
+        if (cfg.require_worktree and wt_branch is None):
             _worktree_setup_failed(
                 cfg, f"--worktree-path {existing} is not a git worktree."
+            )
+            return None, None
+        if (cfg.agents[wt_idx].backend == "opencode"
+                and opencode_cli_major() >= 2 and _is_linked_worktree(existing)):
+            _worktree_setup_failed(
+                cfg, f"OpenCode v2 peers need an independent clone: "
+                f"{existing} is a linked git worktree and v2 resolves those "
+                "to the canonical checkout; pass a duet v2 clone or omit "
+                "--worktree-path."
             )
             return None, None
         cfg.agents[wt_idx].cwd_override = existing
@@ -3622,9 +3774,14 @@ def _setup_run_worktree(
         # Default lives next to the transcript/state in run_dir/wt; --worktree-root
         # overrides to e.g. ~/duet-worktrees, namespaced by run_id so parallel
         # runs never collide.
-        wt_dest = cfg.worktree_root / run_id if cfg.worktree_root else run_dir / "wt"
+        wt_dest = _worktree_dest(cfg, cfg.agents[wt_idx].backend, run_id, run_dir)
+        clone_mode = (cfg.agents[wt_idx].backend == "opencode"
+                      and opencode_cli_major() >= 2)
         try:
-            wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
+            if clone_mode:
+                wt_path = setup_clone(cfg.cwd, wt_branch, wt_dest)
+            else:
+                wt_path = setup_worktree(cfg.cwd, wt_branch, wt_dest)
         except Exception as e:
             _worktree_setup_failed(cfg, f"worktree setup failed: {e}.")
             return None, wt_branch
@@ -4708,11 +4865,20 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
 def _print_worktree_notice(cfg: DuetConfig, wt_path: Optional[pathlib.Path],
                            wt_branch: Optional[str]) -> None:
     if wt_path:
-        print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
-              f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
-              f"        review: git -C {wt_path} diff HEAD\n"
-              f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
-              f"git -C {cfg.cwd} branch -D {wt_branch}")
+        if (cfg.agents and cfg.agents[_worktree_agent_index(cfg)].backend == "opencode"
+                and opencode_cli_major() >= 2
+                and not _is_linked_worktree(wt_path)):
+            print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
+                  f"        merge:  git -C {cfg.cwd} fetch {wt_path} {wt_branch} && "
+                  f"git -C {cfg.cwd} merge FETCH_HEAD\n"
+                  f"        review: git -C {wt_path} diff HEAD\n"
+                  f"        drop:   rm -rf {wt_path}")
+        else:
+            print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
+                  f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
+                  f"        review: git -C {wt_path} diff HEAD\n"
+                  f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
+                  f"git -C {cfg.cwd} branch -D {wt_branch}")
 
 
 def run_duet(cfg: DuetConfig) -> dict:

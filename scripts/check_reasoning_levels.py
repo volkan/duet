@@ -71,7 +71,7 @@ def main() -> int:
     def fake_run(cmd, **_kwargs):
         captured.append(list(cmd))
         if cmd[:3] == ["opencode", "debug", "config"]:
-            return 0, '[{"info": {"experimental": {"subagent_depth": 0}}}]', ""
+            return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
         if "--version" in cmd:
             return 0, "opencode v2.2.5", ""
         if cmd[0] == "claude":
