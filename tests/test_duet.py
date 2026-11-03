@@ -1336,6 +1336,127 @@ class TestSetupClone(unittest.TestCase):
         self._git("commit", "-m", "init", cwd=src)
         return src
 
+    def _forged_ownership_state(self, root, cwd, path, branch, kind, legacy=False):
+        prior = root / "prior"
+        prior.mkdir(exist_ok=True)
+        cfg = duet.DuetConfig(
+            cwd=cwd, task="x", agents=[duet.Agent("lead", "claude"), duet.Agent("partner", "codex")],
+        )
+        state = duet._build_run_state(
+            cfg, turns_used=0, history=[], finished_reason="max_turns",
+            transcript_path=prior / "transcript.md", recap_path=prior / "recap.md",
+            wt_path=path, wt_branch=branch,
+        )
+        state["owned_clone_path"] = str(path)
+        if legacy:
+            state.pop("owned_worktree_path", None)
+            state.pop("worktree_kind", None)
+        else:
+            state.update(owned_worktree_path=str(path), worktree_kind=kind)
+        duet._write_run_state(prior / "state.json", state)
+        return prior
+
+    def _continued_notice(self, prior, *extra):
+        parser = duet._build_arg_parser()
+        args = parser.parse_args([
+            "--continue", str(prior), "--dry-run", "--turns", "1", "--no-metrics",
+            "--runs-dir", str(prior.parent / "continued"), *extra,
+        ])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()), \
+                mock.patch.object(duet, "_register_run_in_home_index"):
+            cfg = duet.build_continue_config(str(prior), args, parser, {})
+            self.assertFalse(args.trust_state)
+            state = duet.run_duet(cfg)
+        self.assertEqual(state["finished_reason"], "max_turns")
+        return output.getvalue(), state
+
+    def test_forged_clone_ownership_never_grants_drop_for_other_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            nested_root = src / "nested"
+            nested_root.mkdir()
+            nested = self._repo(nested_root)
+            other_root = root / "other"
+            other_root.mkdir()
+            other = self._repo(other_root)
+            wrong_origin = duet.setup_clone(other, "duet/r1", root / "wrong-origin")
+            self._git("switch", "-c", "duet/r1", cwd=other)
+            subdir = src / "subdir"
+            subdir.mkdir()
+            alias = root / "main-alias"
+            alias.symlink_to(src, target_is_directory=True)
+            fixtures = (
+                ("cwd", src, src, "duet/r1"),
+                ("ancestor", nested, src, "duet/r1"),
+                ("unrelated", src, other, "duet/r1"),
+                ("wrong-origin", src, wrong_origin, "duet/r1"),
+                ("subdirectory", src, subdir, "duet/r1"),
+                ("symlink-to-cwd", src, alias, "duet/r1"),
+            )
+            for name, cwd, path, branch in fixtures:
+                for legacy in (False, True):
+                    with self.subTest(name=name, legacy=legacy):
+                        prior = self._forged_ownership_state(root, cwd, path, branch, "clone", legacy)
+                        output, _ = self._continued_notice(prior)
+                        self.assertNotIn("drop:", output)
+                        self.assertNotIn("rm -rf", output)
+
+    def test_forged_linked_ownership_requires_membership_and_duet_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            feature = duet.setup_worktree(src, "feature/user-work", root / "feature")
+            genuine = duet.setup_worktree(src, "duet/r1", root / "genuine")
+            other_root = root / "other"
+            other_root.mkdir()
+            other = self._repo(other_root)
+            unrelated = duet.setup_worktree(other, "duet/r1", root / "unrelated")
+            fixtures = (
+                (feature, "feature/user-work"),
+                (feature, "duet/r1"),
+                (genuine, "duet/forged"),
+                (unrelated, "duet/r1"),
+            )
+            for path, branch in fixtures:
+                with self.subTest(path=path, branch=branch):
+                    prior = self._forged_ownership_state(root, src, path, branch, "linked")
+                    output, _ = self._continued_notice(prior)
+                    self.assertNotIn("drop:", output)
+
+    def test_linked_ownership_survives_repeated_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            prior = root / "prior"
+            prior.mkdir()
+            cfg = duet.DuetConfig(
+                cwd=src, task="x", agents=[duet.Agent("lead", "claude"), duet.Agent("partner", "codex")],
+                worktree=True, worktree_root=root / "trees",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                path, branch = duet._setup_run_worktree(cfg, "r1", prior)
+                duet._print_worktree_notice(cfg, path, branch)
+            self.assertIn("worktree remove", output.getvalue())
+            state = duet._build_run_state(
+                cfg, turns_used=0, history=[], finished_reason="max_turns",
+                transcript_path=prior / "transcript.md", recap_path=prior / "recap.md",
+                wt_path=path, wt_branch=branch,
+            )
+            duet._write_run_state(prior / "state.json", state)
+            for _ in range(2):
+                output, state = self._continued_notice(prior)
+                self.assertIn("worktree remove", output)
+                self.assertIn("branch -D duet/r1", output)
+                self.assertNotIn("rm -rf", output)
+                prior = root / "next-prior"
+                prior.mkdir(exist_ok=True)
+                duet._write_run_state(prior / "state.json", state)
+            output, _ = self._continued_notice(prior, "--worktree-path", str(path))
+            self.assertNotIn("drop:", output)
+
     def test_setup_clone_is_an_independent_repo_with_the_duet_branch(self) -> None:
         # v2 peers get a clone, not a linked worktree: independent repo identity
         # means v2 cannot resolve their location to the canonical checkout.
@@ -1427,7 +1548,8 @@ class TestSetupClone(unittest.TestCase):
                     transcript_path=prior / "transcript.md", recap_path=prior / "recap.md",
                     wt_path=clone, wt_branch=branch,
                 )
-                self.assertEqual(state["owned_clone_path"], str(clone))
+                self.assertEqual(state["owned_worktree_path"], str(clone))
+                self.assertEqual(state["worktree_kind"], "clone")
                 duet._write_run_state(prior / "state.json", state)
                 for override in (None, clone, src):
                     with self.subTest(override=override):
@@ -1444,7 +1566,7 @@ class TestSetupClone(unittest.TestCase):
                             duet._print_worktree_notice(continued, path, branch)
                         self.assertIn("fetch", output.getvalue())
                         self.assertEqual("drop:" in output.getvalue(), override is None)
-                        self.assertEqual(continued._owned_clone_path, clone if override is None else None)
+                        self.assertEqual(continued._owned_worktree_path, clone if override is None else None)
 
     def test_same_run_id_in_two_repositories_creates_distinct_clones(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -508,8 +508,8 @@ class DuetConfig:
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
     worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
                                                   # default = <run_dir>/wt (durable, gitignored)
-    _worktree_is_clone: bool = dataclasses.field(default=False, repr=False)
-    _owned_clone_path: Optional[pathlib.Path] = dataclasses.field(default=None, repr=False)
+    _worktree_kind: Optional[str] = dataclasses.field(default=None, repr=False)
+    _owned_worktree_path: Optional[pathlib.Path] = dataclasses.field(default=None, repr=False)
     add_dirs: list[pathlib.Path] = dataclasses.field(default_factory=list)
                                                   # extra `--add-dir` paths for claude — needed
                                                   # when the task reads/writes outside cwd
@@ -828,6 +828,58 @@ def _is_linked_worktree(path: pathlib.Path) -> bool:
     git_dir_path = (path / git_dir.stdout.strip()).resolve()
     common_path = (path / common.stdout.strip()).resolve()
     return git_dir_path != common_path
+
+
+def _git_value(path: pathlib.Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(path), *args], check=True, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=5,
+    )
+    return result.stdout.rstrip("\n")
+
+
+def _git_repository_paths(path: pathlib.Path) -> dict[str, pathlib.Path]:
+    values = _git_value(path, "rev-parse", "--show-toplevel", "--absolute-git-dir",
+                        "--git-common-dir").splitlines()
+    if len(values) != 3:
+        raise ValueError("incomplete Git repository paths")
+    return {name: (path / value).resolve()
+            for name, value in zip(("root", "git_dir", "common"), values)}
+
+
+def _registered_linked_worktree(cwd: pathlib.Path, path: pathlib.Path, branch: str) -> bool:
+    records = _git_value(cwd, "worktree", "list", "--porcelain", "-z")
+    for record in records.split("\0\0"):
+        fields = record.split("\0")
+        if fields[0].startswith("worktree "):
+            registered = pathlib.Path(fields[0][len("worktree "):]).resolve()
+            if registered == path:
+                return f"branch refs/heads/{branch}" in fields
+    return False
+
+
+def _validated_worktree_kind(cwd: pathlib.Path, path: pathlib.Path,
+                             branch: object) -> Optional[str]:
+    if not isinstance(branch, str) or not branch.startswith("duet/"):
+        return None
+    source = _git_repository_paths(cwd)
+    target = _git_repository_paths(path)
+    if (target["root"] != path or path == source["root"]
+            or path in source["root"].parents):
+        return None
+    if _git_value(path, "symbolic-ref", "--quiet", "--short", "HEAD") != branch:
+        return None
+    if target["common"] == source["common"]:
+        if (target["git_dir"] != target["common"]
+                and _registered_linked_worktree(cwd, path, branch)):
+            return "linked"
+        return None
+    if target["git_dir"] != path / ".git" or target["common"] != target["git_dir"]:
+        return None
+    origin = pathlib.Path(_git_value(path, "config", "--local", "--get", "remote.origin.url"))
+    if origin.is_absolute() and origin.resolve() == source["root"]:
+        return "clone"
+    return None
 
 
 def setup_worktree(repo_path: pathlib.Path, branch_name: str,
@@ -3707,7 +3759,6 @@ def _worktree_dest(cfg: DuetConfig, wt_backend: str,
 
     OpenCode v2 peers need independent repository identity because linked
     worktrees can resolve to the canonical checkout, even outside its tree.
-    External placement also keeps clone artifacts outside the source tree.
     """
     if cfg.worktree_root:
         return cfg.worktree_root / run_id
@@ -3766,7 +3817,7 @@ def _setup_run_worktree(
                 "--worktree-path."
             )
             return None, None
-        cfg._worktree_is_clone = is_clone
+        cfg._worktree_kind = "clone" if is_clone else "linked"
         cfg.agents[wt_idx].cwd_override = existing
         print(f"[duet] reusing worktree: {existing} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -3792,8 +3843,8 @@ def _setup_run_worktree(
         except Exception as e:
             _worktree_setup_failed(cfg, f"worktree setup failed: {e}.")
             return None, wt_branch
-        cfg._worktree_is_clone = clone_mode
-        cfg._owned_clone_path = wt_path if clone_mode else None
+        cfg._worktree_kind = "clone" if clone_mode else "linked"
+        cfg._owned_worktree_path = wt_path
         cfg.agents[wt_idx].cwd_override = wt_path
         print(f"[duet] worktree: {wt_path} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -4182,7 +4233,8 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "last_verify": last_verify,
         "worktree": str(wt_path.resolve()) if wt_path else None,
         "worktree_branch": wt_branch,
-        "owned_clone_path": str(cfg._owned_clone_path) if wt_path == cfg._owned_clone_path and wt_path else None,
+        "worktree_kind": cfg._worktree_kind if wt_path else None,
+        "owned_worktree_path": str(cfg._owned_worktree_path) if wt_path == cfg._owned_worktree_path and wt_path else None,
         "worktree_for": cfg.worktree_for,
         "require_worktree": cfg.require_worktree,
         "add_dirs": [str(d) for d in cfg.add_dirs],
@@ -4878,20 +4930,20 @@ def _print_worktree_notice(cfg: DuetConfig, wt_path: Optional[pathlib.Path],
         cwd = shlex.quote(str(cfg.cwd))
         path = shlex.quote(str(wt_path))
         branch = shlex.quote(wt_branch) if wt_branch else None
-        if cfg._worktree_is_clone:
+        if cfg._worktree_kind == "clone":
             print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
                   f"        review: git -C {path} diff HEAD")
             if branch:
                 print(f"        merge:  git -C {cwd} fetch {path} {branch} && "
                       f"git -C {cwd} merge FETCH_HEAD")
-            if cfg._owned_clone_path == wt_path:
+            if cfg._owned_worktree_path == wt_path:
                 print(f"        drop:   rm -rf -- {path}")
         else:
             print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
                   f"        review: git -C {path} diff HEAD")
             if branch:
                 print(f"        merge:  git -C {cwd} merge {branch}")
-                if cfg.worktree and not cfg.worktree_path:
+                if cfg._owned_worktree_path == wt_path:
                     print(f"        drop:   git -C {cwd} worktree remove {path} && "
                           f"git -C {cwd} branch -D {branch}")
 
@@ -7379,13 +7431,29 @@ def _continue_default_timeout(args: argparse.Namespace, state: dict,
     )
 
 
-def _continued_owned_clone(state: dict, args: argparse.Namespace,
-                           worktree_path: Optional[pathlib.Path]) -> Optional[pathlib.Path]:
-    raw = state.get("owned_clone_path")
-    if args.worktree_path is not None or not isinstance(raw, str) or not worktree_path:
-        return None
-    owned = pathlib.Path(raw).expanduser().resolve()
-    return owned if owned == worktree_path else None
+def _restore_worktree_ownership(cfg: DuetConfig, state: dict,
+                                args: argparse.Namespace) -> None:
+    if args.worktree_path is not None or cfg.worktree_path is None:
+        return
+    if "owned_worktree_path" in state:
+        raw, expected_kind = state["owned_worktree_path"], state.get("worktree_kind")
+    elif state.get("owned_clone_path") is not None:
+        raw, expected_kind = state["owned_clone_path"], "clone"
+    else:
+        raw, expected_kind = state.get("worktree"), "linked"
+    if not isinstance(raw, str) or not raw or expected_kind not in ("clone", "linked"):
+        return
+    try:
+        path = cfg.worktree_path.resolve()
+        if pathlib.Path(raw).expanduser().resolve() != path:
+            return
+        # State can name a path, but only repository metadata can justify a drop hint.
+        kind = _validated_worktree_kind(cfg.cwd, path, state.get("worktree_branch"))
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return
+    if kind == expected_kind:
+        cfg._owned_worktree_path = path
+        cfg._worktree_kind = kind
 
 
 def build_continue_config(run_arg: str,
@@ -7487,7 +7555,6 @@ def build_continue_config(run_arg: str,
         ),
         worktree_for=worktree_for,
         worktree_path=worktree_path,
-        _owned_clone_path=_continued_owned_clone(state, args, worktree_path),
         add_dirs=[
             pathlib.Path(d).expanduser().resolve()
             for d in add_dirs
@@ -7502,6 +7569,7 @@ def build_continue_config(run_arg: str,
         continue_from=str(run_dir),
         run_info_file=_resolve_opt_path(args.run_info_file),
     )
+    _restore_worktree_ownership(cfg, state, args)
     _apply_metrics_options(cfg, args, state)
     _apply_finding_options(cfg, args, parser, state)
     return cfg
