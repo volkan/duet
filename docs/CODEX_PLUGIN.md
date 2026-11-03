@@ -170,9 +170,15 @@ Duet code or skill mapping when that backend accepts them. Preserve exact IDs,
 the requested backend, topology, task, and roles. Do not guess, substitute, or
 silently upgrade a model.
 
-Forward an exact requested ID even if local discovery or a catalog omits it.
+Forward an exact requested ID that meets Duet's input constraints, even if local discovery or a catalog omits it.
 The selected backend decides availability. Report its error without substituting
 another model.
+
+For OpenCode peers, use `provider/model` without a `#variant` suffix.
+Duet rejects that suffix. Set `--reasoning` or the agent's `reasoning_effort`
+instead. OpenCode v2 needs an explicit model to receive a backend effort
+argument. Without one, it receives only the prompt prefix and Duet prints a
+note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
 
 Aliases such as `opus` and `sonnet` can move. Use `claude-opus-5-5` to request
 that explicit version. For an unclear friendly name or version, check the

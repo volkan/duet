@@ -57,7 +57,9 @@ reference. One-shot runners do not install `duet` on the assistant's PATH.
 
 ## Shared skill
 
-One skill definition serves Claude Code, Codex, OpenCode, and ZCode. With
+One skill definition serves Claude Code, Codex, OpenCode, and ZCode. For
+OpenCode peer model and effort constraints, see
+[OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models). With
 Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
 ```bash

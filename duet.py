@@ -508,6 +508,8 @@ class DuetConfig:
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
     worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
                                                   # default = <run_dir>/wt (durable, gitignored)
+    _worktree_is_clone: bool = dataclasses.field(default=False, repr=False)
+    _owned_clone_path: Optional[pathlib.Path] = dataclasses.field(default=None, repr=False)
     add_dirs: list[pathlib.Path] = dataclasses.field(default_factory=list)
                                                   # extra `--add-dir` paths for claude — needed
                                                   # when the task reads/writes outside cwd
@@ -3703,15 +3705,14 @@ def _worktree_dest(cfg: DuetConfig, wt_backend: str,
                    run_id: str, run_dir: pathlib.Path) -> pathlib.Path:
     """Default worktree placement for this run's serving agent.
 
-    OpenCode v2 resolves a nested worktree's project to the canonical checkout
-    once the parent repo is registered (observed on v2.2.5), silently
-    retargeting the peer's tools to the main checkout. V2 OpenCode peers
-    therefore default outside the repo tree; `--worktree-root` still wins.
+    OpenCode v2 peers need independent repository identity because linked
+    worktrees can resolve to the canonical checkout, even outside its tree.
+    External placement also keeps clone artifacts outside the source tree.
     """
     if cfg.worktree_root:
         return cfg.worktree_root / run_id
     if wt_backend == "opencode" and opencode_cli_major() >= 2:
-        return pathlib.Path.home() / ".duet" / "worktrees" / run_id
+        return pathlib.Path.home() / ".duet" / "worktrees" / _cwd_slug(cfg.cwd.resolve()) / run_id
     return run_dir / "wt"
 
 
@@ -3750,8 +3751,14 @@ def _setup_run_worktree(
                 cfg, f"--worktree-path {existing} is not a git worktree."
             )
             return None, None
-        if (cfg.agents[wt_idx].backend == "opencode"
-                and opencode_cli_major() >= 2 and _is_linked_worktree(existing)):
+        try:
+            needs_clone = (cfg.agents[wt_idx].backend == "opencode"
+                           and opencode_cli_major() >= 2)
+            is_clone = not _is_linked_worktree(existing)
+        except Exception as exc:
+            _worktree_setup_failed(cfg, f"worktree setup failed: {exc}.")
+            return None, None
+        if needs_clone and not is_clone:
             _worktree_setup_failed(
                 cfg, f"OpenCode v2 peers need an independent clone: "
                 f"{existing} is a linked git worktree and v2 resolves those "
@@ -3759,6 +3766,7 @@ def _setup_run_worktree(
                 "--worktree-path."
             )
             return None, None
+        cfg._worktree_is_clone = is_clone
         cfg.agents[wt_idx].cwd_override = existing
         print(f"[duet] reusing worktree: {existing} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -3771,13 +3779,12 @@ def _setup_run_worktree(
             )
             return None, None
         wt_branch = f"duet/{run_id}"
-        # Default lives next to the transcript/state in run_dir/wt; --worktree-root
-        # overrides to e.g. ~/duet-worktrees, namespaced by run_id so parallel
-        # runs never collide.
-        wt_dest = _worktree_dest(cfg, cfg.agents[wt_idx].backend, run_id, run_dir)
-        clone_mode = (cfg.agents[wt_idx].backend == "opencode"
-                      and opencode_cli_major() >= 2)
+        # External clone defaults use a repository namespace. Explicit roots
+        # use only run_id; a destination collision fails through setup policy.
         try:
+            wt_dest = _worktree_dest(cfg, cfg.agents[wt_idx].backend, run_id, run_dir)
+            clone_mode = (cfg.agents[wt_idx].backend == "opencode"
+                          and opencode_cli_major() >= 2)
             if clone_mode:
                 wt_path = setup_clone(cfg.cwd, wt_branch, wt_dest)
             else:
@@ -3785,6 +3792,8 @@ def _setup_run_worktree(
         except Exception as e:
             _worktree_setup_failed(cfg, f"worktree setup failed: {e}.")
             return None, wt_branch
+        cfg._worktree_is_clone = clone_mode
+        cfg._owned_clone_path = wt_path if clone_mode else None
         cfg.agents[wt_idx].cwd_override = wt_path
         print(f"[duet] worktree: {wt_path} (branch {wt_branch}, "
               f"agent {cfg.agents[wt_idx].name})")
@@ -4173,6 +4182,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "last_verify": last_verify,
         "worktree": str(wt_path.resolve()) if wt_path else None,
         "worktree_branch": wt_branch,
+        "owned_clone_path": str(cfg._owned_clone_path) if wt_path == cfg._owned_clone_path and wt_path else None,
         "worktree_for": cfg.worktree_for,
         "require_worktree": cfg.require_worktree,
         "add_dirs": [str(d) for d in cfg.add_dirs],
@@ -4865,20 +4875,25 @@ def _prepare_run(cfg: DuetConfig) -> tuple[_RunContext, Optional[dict]]:
 def _print_worktree_notice(cfg: DuetConfig, wt_path: Optional[pathlib.Path],
                            wt_branch: Optional[str]) -> None:
     if wt_path:
-        if (cfg.agents and cfg.agents[_worktree_agent_index(cfg)].backend == "opencode"
-                and opencode_cli_major() >= 2
-                and not _is_linked_worktree(wt_path)):
+        cwd = shlex.quote(str(cfg.cwd))
+        path = shlex.quote(str(wt_path))
+        branch = shlex.quote(wt_branch) if wt_branch else None
+        if cfg._worktree_is_clone:
             print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
-                  f"        merge:  git -C {cfg.cwd} fetch {wt_path} {wt_branch} && "
-                  f"git -C {cfg.cwd} merge FETCH_HEAD\n"
-                  f"        review: git -C {wt_path} diff HEAD\n"
-                  f"        drop:   rm -rf {wt_path}")
+                  f"        review: git -C {path} diff HEAD")
+            if branch:
+                print(f"        merge:  git -C {cwd} fetch {path} {branch} && "
+                      f"git -C {cwd} merge FETCH_HEAD")
+            if cfg._owned_clone_path == wt_path:
+                print(f"        drop:   rm -rf -- {path}")
         else:
             print(f"[duet] worktree left intact at {wt_path} (branch {wt_branch}).\n"
-                  f"        merge:  git -C {cfg.cwd} merge {wt_branch}\n"
-                  f"        review: git -C {wt_path} diff HEAD\n"
-                  f"        drop:   git -C {cfg.cwd} worktree remove {wt_path} && "
-                  f"git -C {cfg.cwd} branch -D {wt_branch}")
+                  f"        review: git -C {path} diff HEAD")
+            if branch:
+                print(f"        merge:  git -C {cwd} merge {branch}")
+                if cfg.worktree and not cfg.worktree_path:
+                    print(f"        drop:   git -C {cwd} worktree remove {path} && "
+                          f"git -C {cwd} branch -D {branch}")
 
 
 def run_duet(cfg: DuetConfig) -> dict:
@@ -7364,6 +7379,15 @@ def _continue_default_timeout(args: argparse.Namespace, state: dict,
     )
 
 
+def _continued_owned_clone(state: dict, args: argparse.Namespace,
+                           worktree_path: Optional[pathlib.Path]) -> Optional[pathlib.Path]:
+    raw = state.get("owned_clone_path")
+    if args.worktree_path is not None or not isinstance(raw, str) or not worktree_path:
+        return None
+    owned = pathlib.Path(raw).expanduser().resolve()
+    return owned if owned == worktree_path else None
+
+
 def build_continue_config(run_arg: str,
                           args: argparse.Namespace,
                           parser: argparse.ArgumentParser,
@@ -7463,6 +7487,7 @@ def build_continue_config(run_arg: str,
         ),
         worktree_for=worktree_for,
         worktree_path=worktree_path,
+        _owned_clone_path=_continued_owned_clone(state, args, worktree_path),
         add_dirs=[
             pathlib.Path(d).expanduser().resolve()
             for d in add_dirs

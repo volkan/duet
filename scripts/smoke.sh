@@ -317,6 +317,78 @@ state = json.loads(pathlib.Path(info["state_path"]).read_text())
 assert state["finished_reason"] == "setup_error", state
 assert state["phase"] == "finished", state
 PY
+expect "opencode setup failure CLI matrix"   0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[2]) / "opencode-setup-failure"
+root.mkdir()
+repo = root / "repo"
+subprocess.run(["git", "init", "-b", "main", str(repo)],
+               check=True, capture_output=True, text=True)
+subprocess.run([
+    "git", "-C", str(repo), "-c", "user.name=Test",
+    "-c", "user.email=test@example.invalid", "-c", "core.hooksPath=/dev/null",
+    "commit", "--allow-empty", "--no-gpg-sign", "-m", "fixture",
+], check=True, capture_output=True, text=True)
+bin_dir = root / "bin"
+bin_dir.mkdir()
+shim = bin_dir / "opencode"
+shim.write_text(
+    '#!/bin/sh\n'
+    'test "$1" = --version || exit 99\n'
+    'printf "probe\\n" >> "$DUET_TEST_OPENCODE_PROBE"\n'
+    'exit 71\n'
+)
+shim.chmod(0o755)
+env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+for reuse in (False, True):
+    for strict in (False, True):
+        case = f"{'reuse' if reuse else 'create'}-{'strict' if strict else 'ordinary'}"
+        info = root / f"{case}.json"
+        probe = root / f"{case}.probe"
+        env["DUET_TEST_OPENCODE_PROBE"] = str(probe)
+        command = [
+            sys.executable, str(duet), "--task", "x", "--dry-run", "--turns", "1",
+            "--lead", "codex:reviewer", "--partner", "opencode:coder",
+            "--cwd", str(repo), "--runs-dir", str(root / case),
+            "--run-info-file", str(info), "--no-metrics",
+        ]
+        command += ["--worktree-path", str(repo)] if reuse else ["--worktree"]
+        if strict:
+            command += ["--require-worktree"]
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
+        assert result.returncode == int(strict), (case, result.returncode, result.stdout, result.stderr)
+        assert "Traceback" not in result.stderr, (case, result.stderr)
+        assert probe.read_text() == "probe\n", case
+        failure = "opencode --version failed (exit 71)"
+        fallback = "Falling back to same-repo mode."
+        if strict:
+            assert fallback not in result.stderr, (case, result.stderr)
+        else:
+            assert "[duet] WARNING:" in result.stderr, (case, result.stderr)
+            assert failure in result.stderr and fallback in result.stderr, (case, result.stderr)
+        launch = json.loads(info.read_text())
+        state = json.loads(pathlib.Path(launch["state_path"]).read_text())
+        reason = "setup_error" if strict else "max_turns"
+        assert state["phase"] == "finished" and state["finished_reason"] == reason, (case, state)
+        assert state["worktree"] is None, (case, state)
+        assert state["turns_used"] == (0 if strict else 1), (case, state)
+        if strict:
+            assert failure in state["error"], (case, state)
+        status = subprocess.run(
+            [sys.executable, str(duet), "--status", launch["run_dir"], "--json"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        assert status.returncode == 0, (case, status.returncode, status.stdout, status.stderr)
+        snapshot = json.loads(status.stdout)
+        assert snapshot["health"] == "terminal" and snapshot["exit_code"] == 0, (case, snapshot)
+        assert snapshot["phase"] == "finished" and snapshot["finished_reason"] == reason, (case, snapshot)
+PY
 ZCODE_FAKE_BIN="$TMPD/zcode-wrapper/a/b/c/d/bin"
 mkdir -p "$ZCODE_FAKE_BIN" "$TMPD/zcode-target"
 printf '#!/bin/sh\nexit 99\n' > "$ZCODE_FAKE_BIN/zcode"
@@ -1128,13 +1200,16 @@ sys.modules[spec.name] = m
 spec.loader.exec_module(m)
 
 calls = []
+major = 1
 
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
     if cmd[:3] == ["opencode", "debug", "config"]:
+        if major == 1:
+            return 0, '{"subagent_depth": 0}', ""
         return 0, '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]', ""
     if "--version" in cmd:
-        return 0, "opencode v2.2.5", ""
+        return 0, f"opencode v{major}.2.5", ""
     return 0, json.dumps(
         {"type": "text", "sessionID": "oc-sid",
          "part": {"type": "text", "text": "ok", "id": "p1"}}
@@ -1148,43 +1223,40 @@ agent = m.Agent(
     model="anthropic/claude-sonnet-4-6",
     extra_args=["--agent", "build"],
 )
-m.call_opencode(
-    agent,
-    "sys",
-    "msg",
-    cwd,
-    60,
-    dry=False,
-    first_turn=True,
-    reasoning="max",
-)
-first = calls[-1]
-assert first[:2] == ["opencode", "run"], first
-assert "--format" in first and "json" in first, first
-assert "--standalone" in first, first
-assert "--dir" not in first, first
-assert "--auto" in first, first
-assert "--dangerously-skip-permissions" not in first, first
-assert "--variant" not in first, first
-assert "-m" in first and first[first.index("-m") + 1] == "anthropic/claude-sonnet-4-6#max", first
-assert "--agent" in first and "build" in first, first
-assert "--sandbox" not in first, first
-assert "--permission-mode" not in first, first
-assert "-s" not in first, first
-assert "ultrathink" in first[-1], first  # max -> prompt nudge, prompt is last positional
+for major in (1, 2):
+    m._OPENCODE_CLI_MAJOR = None
+    agent.session_id = None
+    m.call_opencode(
+        agent, "sys", "msg", cwd, 60,
+        dry=False, first_turn=True, reasoning="max",
+    )
+    first = calls[-1]
+    assert first[:2] == ["opencode", "run"], first
+    assert "--format" in first and "json" in first, first
+    if major == 1:
+        assert "--standalone" not in first, first
+        assert "--dir" in first and first[first.index("--dir") + 1] == str(cwd), first
+        assert "--variant" in first and first[first.index("--variant") + 1] == "max", first
+        model = "anthropic/claude-sonnet-4-6"
+    else:
+        assert "--standalone" in first, first
+        assert "--dir" not in first and "--variant" not in first, first
+        model = "anthropic/claude-sonnet-4-6#max"
+    assert "-m" in first and first[first.index("-m") + 1] == model, first
+    assert "--auto" in first, first
+    assert "--dangerously-skip-permissions" not in first, first
+    assert "--agent" in first and "build" in first, first
+    assert "--sandbox" not in first, first
+    assert "--permission-mode" not in first, first
+    assert "-s" not in first, first
+    assert "ultrathink" in first[-1], first
 
-agent.session_id = "oc-sid"
-m.call_opencode(
-    agent,
-    "sys",
-    "msg",
-    cwd,
-    60,
-    dry=False,
-    first_turn=False,
-)
-resume = calls[-1]
-assert "-s" in resume and resume[resume.index("-s") + 1] == "oc-sid", resume
+    agent.session_id = "oc-sid"
+    m.call_opencode(
+        agent, "sys", "msg", cwd, 60, dry=False, first_turn=False,
+    )
+    resume = calls[-1]
+    assert "-s" in resume and resume[resume.index("-s") + 1] == "oc-sid", resume
 PY
 
 # Codex resume by parsed session UUID. call_codex must:

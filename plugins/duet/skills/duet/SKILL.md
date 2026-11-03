@@ -262,9 +262,15 @@ declared partner. Duet passes model IDs and aliases to the selected backend.
 New accepted IDs need no Duet code or skill mapping. Preserve the user's exact
 requested ID, backend, topology, task, and roles. Do not guess, substitute, or
 silently upgrade a model. For example, preserve `claude-fable-5` when supplied.
-Forward an exact requested ID even if local discovery or a catalog omits it.
+Forward an exact requested ID that meets Duet's input constraints even if local discovery or a catalog omits it.
 The selected backend decides availability. Report its error without substituting
-another model. OpenCode model IDs use the `provider/model` form.
+another model. OpenCode model IDs use the `provider/model` form. Duet rejects
+a `#variant` suffix in that ID; report the validation error without changing
+the user's selection. Use `reasoning_effort` or `--reasoning` for effort.
+OpenCode v1 receives `--variant <level>`. OpenCode v2 needs an explicit model
+to receive effort through `-m provider/model#<level>`. Without a model, v2 gets
+only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
+nudges; the other levels have no prompt nudge.
 
 For an unclear friendly name or version, verify the selected backend's current
 IDs before you choose one. Aliases such as `opus` and `sonnet` can move. Use

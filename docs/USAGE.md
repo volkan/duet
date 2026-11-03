@@ -238,7 +238,7 @@ duet --task-from-cmd 'gh issue view 304 --repo Fluentra/fluentra-flutter --json 
 What this does:
 
 1. Runs the `gh` command with cwd = the target project. The issue body + comments JSON becomes the kickoff text handed to codex.
-2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy. (OpenCode v2 peers default to `~/.duet/worktrees/<run_id>/` instead — see `--worktree-root` below.)
+2. Creates a fresh git worktree at `<cwd>/.duet/runs/<run_id>/wt/` on branch `duet/<run_id>` so the fix is isolated from the working copy. (OpenCode v2 peers default to `~/.duet/worktrees/<cwd-slug>/<run_id>/` instead — see `--worktree-root` below.)
 3. codex reads the issue, explores the codebase, applies a minimal fix in the worktree, runs whatever quick checks make sense.
 4. claude (lead, planner role) sees the auto-appended worktree handoff block and diff each turn, then either flags issues or accepts Codex's convergence rationale with its own `LGTM rationale:` plus `<<<LGTM>>>`.
 5. Worktree is left intact at end. Merge / drop instructions printed on exit.
@@ -660,7 +660,7 @@ worktree gated by `verify_cmd`.
 | `--require-worktree` | fail closed with a durable `setup_error` instead of silently falling back to same-repo mode if reuse/creation fails |
 | `--allow-worktree-fallback` | allow the legacy same-repo fallback; overrides the review recipe's strict setting |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
-| `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior. OpenCode v2 peers instead get an independent `git clone` at `~/.duet/worktrees/<run_id>/`, because v2 resolves git-worktree sessions to the main checkout |
+| `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior. OpenCode v2 peers instead get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, because v2 resolves git-worktree sessions to the main checkout |
 | `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>` — an unknown variant is a model-resolution error there, so an unsupported level fails that turn instead of running at another effort — and a v2 peer without an explicit model gets only the prompt prefix plus a one-line note. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
@@ -783,7 +783,7 @@ runs/                                       # or <cwd>/.duet/runs/ for foreign -
     turn-02-claude-reviewer.stderr.log
     …
     wt/                                      # the git worktree (if --worktree; OpenCode v2
-    #                                            peers keep theirs at ~/.duet/worktrees/<run_id>/)
+    #                                            peers keep theirs at ~/.duet/worktrees/<cwd-slug>/<run_id>/)
 ```
 
 The files above are the raw, agent-accessible run artifacts. They remain under
@@ -1129,16 +1129,22 @@ verification runs in `--cwd`.
 
 ### Where the worktree lives
 
-By default the worktree lands at `<runs_dir>/<run_id>/wt/` — i.e. right next to that run's `transcript.md` and `state.json`. OpenCode v2 peers are the exception: they get an independent `git clone` at `~/.duet/worktrees/<run_id>/` (branch `duet/<run_id>`), because v2 resolves git-worktree sessions to the main checkout (verified on v2.2.5). Merge it back with `git fetch <clone> <branch> && git merge FETCH_HEAD`; drop it with `rm -rf`. Two reasons for the default:
+By default the worktree lands at `<runs_dir>/<run_id>/wt/` — i.e. right next to that run's `transcript.md` and `state.json`. OpenCode v2 peers are the exception: they get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/` (branch `duet/<run_id>`), because v2 resolves git-worktree sessions to the main checkout (verified on v2.2.5). Merge it back with `git fetch <clone> <branch> && git merge FETCH_HEAD`. Duet prints a drop hint only for clones it created. Two reasons for the default:
 
 1. **Durability.** OS temp-dir cleaners (`periodic` on macOS, `systemd-tmpfiles` on Linux, reboot-time `/tmp` wipes on some distros) can erase a worktree mid-run on long duets. Living under `runs/` survives all of that.
 2. **Forensics.** Coming back a week later, the transcript, state, and the actual code state of that run sit in one folder.
 
-To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`, namespaced so parallel runs don't collide. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
+To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`. Use separate roots when different repositories can share a run ID. Existing destinations fail setup. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
 
 duet auto-creates `<runs_dir>/.gitignore` containing `*` on first use, so nothing it writes (transcripts, state, worktrees) shows up in your host repo's `git status`.
 
 ### Cleanup
+
+Duet records ownership of each clone it creates. `--continue` preserves that
+ownership when it reuses the saved path. An explicit `--worktree-path` clears
+ownership, even for the same path. Supplied paths receive no drop hint.
+The default clone path includes a repository slug to separate concurrent runs
+with the same ID in different repositories.
 
 The worktree is **not deleted** when duet exits — you'll see merge / drop instructions printed at the end:
 

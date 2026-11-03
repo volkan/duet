@@ -233,7 +233,36 @@ Role prompts (`ROLE_PROMPTS` and any user-supplied `role_prompt`) frequently con
 
 ### Worktree mode
 
-`--worktree` creates `<runs_dir>/<run_id>/wt/` on a fresh `duet/<run_id>` branch and points the selected worktree agent's `cwd_override` at it (partner by default, lead with `--worktree-for lead`). `--require-worktree` converts every missing/non-git/setup failure into durable `setup_error` instead of same-repo fallback; `--recipe review` enables it. After every worktree-agent turn, duet appends a handoff block plus `git_diff_summary` (`git status --short` + `--stat` + truncated `diff HEAD`, capped at 8 KB, plus fenced previews of untracked text files) to that turn's reply. The worktree is intentionally **not deleted** at exit. Default placement under `runs/<id>/wt/` is durable across reboots; `--worktree-root /tmp` opts back into temp behavior. OpenCode v2 peers go further: `setup_clone` gives them an independent `git clone` at `~/.duet/worktrees/<run_id>` instead of a linked worktree, because v2 resolves git-worktree sessions to the canonical checkout and silently retargets the peer's tools to the main checkout (verified on v2.2.5: 4/4 duet runs misplaced inside-tree placement vs 7/7 correct with placement outside; `OPENCODE_DB` isolation and `.opencode/` anchors were tested and rejected). Post-run merge instructions switch to `git fetch <clone> <branch> && git merge FETCH_HEAD`, drop becomes `rm -rf`, and v2 `--worktree-path` reuse refuses linked worktrees (`_is_linked_worktree`, fail closed) — the confined v2 peer's inline policy also adds an `external_directory` deny as a second layer, and the child env pins `PWD` to the effective cwd because v2 resolves the session location from the logical cwd (an inherited caller `PWD` silently retargeted tools to the caller's directory in every observed mislocation). `--worktree-path` is the resume case; `--continue <run>` uses the prior state's worktree. `--worktree` and `--worktree-path` remain mutually exclusive.
+`--worktree` creates `<runs_dir>/<run_id>/wt/` on a fresh `duet/<run_id>`
+branch. The selected agent uses that path through `cwd_override` (partner by
+default, lead with `--worktree-for lead`). `--require-worktree` makes missing
+paths, non-Git paths, version detection failures, and setup failures durable
+`setup_error` outcomes. Ordinary runs retain the warning and same-repo fallback.
+Ordinary dry-runs still perform setup and version detection; recap previews skip setup.
+
+After each worktree-agent turn, Duet appends a handoff block and
+`git_diff_summary`. The summary includes status, diffstat, a diff capped at
+8 KB, and previews of untracked text files. Duet leaves the worktree intact.
+The default path survives reboots. Use `--worktree-root /tmp` for temporary storage.
+
+OpenCode v2 peers use `setup_clone` for an independent Git repository at
+`~/.duet/worktrees/<cwd-slug>/<run_id>/`. Linked worktrees share repository
+identity, which v2 can resolve to the canonical checkout even with external
+placement. Independent clones avoid that shared identity. The repository slug
+separates default destinations for runs with the same ID in different repositories.
+An explicit `--worktree-root` uses `<PATH>/<run_id>/`; an existing destination fails setup.
+
+Clone merge hints use `git fetch <clone> <branch> && git merge FETCH_HEAD`.
+`owned_clone_path` records a clone created by Duet. Continuation preserves
+ownership only when it reuses that exact saved path. An explicit path override
+clears ownership. Cleanup uses the recorded isolation type without CLI probes.
+Only an owned clone receives an `rm -rf` hint. Other supplied paths receive no drop hint.
+OpenCode v2 refuses linked `--worktree-path` paths through `_is_linked_worktree` (fail closed).
+Its confined peer policy also denies `external_directory` access.
+The child environment pins `PWD` to the effective cwd because v2 uses the logical cwd.
+
+`--worktree-path` reuses an existing path. `--continue <run>` reuses the saved
+path. `--worktree` and `--worktree-path` remain mutually exclusive.
 
 ### Continue mode
 

@@ -101,7 +101,7 @@ Non-interactively from a shell (OpenCode v2 removed `run --command`; invoke
 duet directly):
 
 ```bash
-duet --task-from-cmd "'npm test 2>&1'" --turns 4
+duet --task-from-cmd 'npm test 2>&1' --turns 4
 ```
 
 Plain `/duet` runs the default review recipe:
@@ -140,6 +140,17 @@ The command runs on OpenCode's `build` agent (full tool access) so it can
 shell out to `duet`. Make sure your OpenCode permissions allow the `build`
 agent to run shell commands, or run with `--auto` for the non-interactive form.
 Auto mode still respects explicit permission denials.
+
+## OpenCode peer models
+
+Use a `provider/model` ID for an OpenCode peer. Duet rejects a `#variant`
+suffix in the model ID. Set `--reasoning` or the agent's `reasoning_effort`
+instead. Report a rejected ID without substituting another model.
+
+OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
+requires an explicit model to receive effort through `-m provider/model#<level>`.
+Without a model, v2 receives only the prompt prefix and Duet prints a note.
+High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
 
 ## Upgrade
 

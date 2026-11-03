@@ -770,9 +770,6 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertIn("provider.no-route", str(ctx.exception))
 
     def test_opencode_v2_worktree_default_moves_outside_the_repo(self) -> None:
-        # v2 resolves a nested worktree's project to the canonical checkout
-        # (observed on v2.2.5), so duet's v2 default lands in ~/.duet/worktrees
-        # while explicit --worktree-root and v1/codex placements stay unchanged.
         cfg = duet.DuetConfig(
             cwd=pathlib.Path("/repo"),
             agents=[duet.Agent("lead", "opencode", role="reviewer"),
@@ -782,8 +779,11 @@ class TestAgentFinishReasons(unittest.TestCase):
         with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
             self.assertEqual(
                 duet._worktree_dest(cfg, "opencode", "r1", run_dir),
-                pathlib.Path.home() / ".duet" / "worktrees" / "r1",
+                pathlib.Path.home() / ".duet" / "worktrees" / duet._cwd_slug(cfg.cwd) / "r1",
             )
+            first = duet._worktree_dest(cfg, "opencode", "r1", run_dir)
+            cfg.cwd = pathlib.Path("/other-repo")
+            self.assertNotEqual(first, duet._worktree_dest(cfg, "opencode", "r1", run_dir))
             cfg.worktree_root = pathlib.Path("/tmp/roots")
             self.assertEqual(duet._worktree_dest(cfg, "opencode", "r1", run_dir),
                              pathlib.Path("/tmp/roots/r1"))
@@ -1388,6 +1388,86 @@ class TestSetupClone(unittest.TestCase):
             with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
                 with self.assertRaises(duet.RunSetupError):
                     duet._setup_run_worktree(cfg, "r1", root / "runs" / "r1")
+
+    def test_notice_for_unowned_checkout_has_no_drop_hint_or_version_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            src = self._repo(root)
+            cfg = duet.DuetConfig(
+                cwd=src, agents=[duet.Agent("lead", "codex"),
+                                 duet.Agent("partner", "opencode")],
+                worktree_path=src,
+            )
+            with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+                path, branch = duet._setup_run_worktree(cfg, "r1", root / "runs")
+            output = io.StringIO()
+            with mock.patch.object(duet, "opencode_cli_major", side_effect=AssertionError("cleanup probed version")), \
+                    mock.patch.object(duet, "_is_linked_worktree", side_effect=AssertionError("cleanup probed git")), \
+                    contextlib.redirect_stdout(output):
+                duet._print_worktree_notice(cfg, path, branch)
+            self.assertIn("review:", output.getvalue())
+            self.assertNotIn("drop:", output.getvalue())
+
+    def test_clone_ownership_survives_continue_but_not_path_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            prior = root / "prior"
+            prior.mkdir()
+            cfg = duet.DuetConfig(
+                cwd=src, agents=[duet.Agent("lead", "codex"),
+                                 duet.Agent("partner", "opencode")],
+                task="x", worktree=True, worktree_root=root / "owned clones",
+            )
+            with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                clone, branch = duet._setup_run_worktree(cfg, "r1", prior)
+                state = duet._build_run_state(
+                    cfg, turns_used=0, history=[], finished_reason="max_turns",
+                    transcript_path=prior / "transcript.md", recap_path=prior / "recap.md",
+                    wt_path=clone, wt_branch=branch,
+                )
+                self.assertEqual(state["owned_clone_path"], str(clone))
+                duet._write_run_state(prior / "state.json", state)
+                for override in (None, clone, src):
+                    with self.subTest(override=override):
+                        parser = duet._build_arg_parser()
+                        argv = ["--continue", str(prior)]
+                        if override is not None:
+                            argv += ["--worktree-path", str(override)]
+                        args = parser.parse_args(argv)
+                        continued = duet.build_continue_config(str(prior), args, parser, {})
+                        path, branch = duet._setup_run_worktree(continued, "r2", root / "r2")
+                        output = io.StringIO()
+                        with contextlib.redirect_stdout(output), \
+                                mock.patch.object(duet, "opencode_cli_major", side_effect=AssertionError("cleanup probed")):
+                            duet._print_worktree_notice(continued, path, branch)
+                        self.assertIn("fetch", output.getvalue())
+                        self.assertEqual("drop:" in output.getvalue(), override is None)
+                        self.assertEqual(continued._owned_clone_path, clone if override is None else None)
+
+    def test_same_run_id_in_two_repositories_creates_distinct_clones(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            clones = []
+            for name in ("first", "second"):
+                repo_root = root / name
+                repo_root.mkdir()
+                src = self._repo(repo_root)
+                cfg = duet.DuetConfig(
+                    cwd=src, agents=[duet.Agent("lead", "codex"),
+                                     duet.Agent("partner", "opencode")],
+                    worktree=True, require_worktree=True,
+                )
+                with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2), \
+                        mock.patch.object(pathlib.Path, "home", return_value=root / "home"), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    clone, branch = duet._setup_run_worktree(cfg, "same-id", repo_root / "runs")
+                self.assertEqual(branch, "duet/same-id")
+                self.assertEqual(cfg.agents[1].cwd_override, clone)
+                self.assertTrue((clone / ".git").is_dir())
+                clones.append(clone)
+            self.assertNotEqual(*clones)
 
 
 class TestTimeoutScaling(unittest.TestCase):
