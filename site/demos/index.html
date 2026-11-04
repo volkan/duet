@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Watch the Duet review workflow demo.">
+  <title>Review demo | Duet</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.6 system-ui, sans-serif; }
+    body { margin: 0; background: #f4f7ff; color: #172033; }
+    main { max-width: 960px; margin: 5vh auto; padding: 2rem; }
+    article { padding: clamp(1.5rem, 5vw, 3rem); border: 1px solid #d9e2f5; border-radius: 24px; background: white; box-shadow: 0 20px 60px #17367512; }
+    h1 { margin: 0 0 1rem; line-height: 1.2; }
+    video { display: block; width: 100%; height: auto; background: #000; }
+    p { color: #45516a; }
+    a { color: #174fc4; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #101727; color: #edf2ff; }
+      article { border-color: #2a3854; background: #182238; box-shadow: none; }
+      p { color: #bdc9df; }
+      a { color: #9fbcff; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <article>
+      <h1>Review workflow demo</h1>
+      <video controls playsinline preload="metadata" poster="finding-review.png">
+        <source src="finding-review.mp4" type="video/mp4">
+        <track src="finding-review.vtt" kind="captions" srclang="en" label="English" default>
+        Your browser does not support HTML5 video.
+      </video>
+      <p>This silent video includes English captions. It is an edited replay using a public toy fixture.</p>
+      <p><a href="https://github.com/volkan/duet/blob/main/docs/demos/README.md">Demo details and evidence</a></p>
+    </article>
+  </main>
+</body>
+</html>

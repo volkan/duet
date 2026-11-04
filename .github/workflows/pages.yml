@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "docs/demos/finding-review.mp4"
+      - "docs/demos/finding-review.png"
+      - "docs/demos/finding-review.vtt"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
 
@@ -27,6 +30,11 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: actions/configure-pages@1f0c5cde4bc74cd7e1254d0cb4de8d49e9068c7d # v4
+      - name: Copy demo assets
+        run: |
+          cp docs/demos/finding-review.mp4 site/demos/
+          cp docs/demos/finding-review.png site/demos/
+          cp docs/demos/finding-review.vtt site/demos/
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: site

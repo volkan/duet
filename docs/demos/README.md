@@ -8,17 +8,12 @@ the two-agent mechanism.
 
 ## Review workflow demo
 
-[![Watch the edited 80-second review demo](finding-review.png)](finding-review.mp4)
+[![Watch the review demo](finding-review.png)](https://volkan.github.io/duet/demos/)
 
-[Watch or download the MP4](finding-review.mp4) ·
-[Download the interactive HTML](finding-review.html) ·
-[Captions](finding-review.vtt) · [Source snapshot](finding-review.source.json)
+[Watch the review demo](https://volkan.github.io/duet/demos/)
 
-Download `finding-review.html` and open it in a browser. Playback, chapter
-navigation, scrubbing, and the embedded source work offline without an agent
-CLI, server, CDN, or account. GitHub displays HTML as source; download the raw
-file to play it. The silent MP4 is 80 seconds, 1280×720, with readable text in
-each scene; the WebVTT file provides accompanying captions.
+The silent MP4 is 80 seconds, 1280×720, with readable text in each scene.
+The player includes English captions.
 
 This is an **edited replay of saved findings**, not a terminal screen recording.
 It shows one intentional defect, one refuted comment, and an unresolved
