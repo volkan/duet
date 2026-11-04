@@ -12,9 +12,9 @@ Codex. Gemini and Copilot are also supported. A native ZCode account can
 provide a [read-only review peer](https://github.com/volkan/duet/blob/main/docs/ZCODE.md).
 [See examples using one CLI](https://github.com/volkan/duet/blob/main/docs/USAGE.md#same-backend-peering).
 
-[![Watch the 80-second review workflow demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://github.com/volkan/duet/blob/main/docs/demos/finding-review.mp4)
+[![Watch the review demo](https://raw.githubusercontent.com/volkan/duet/main/docs/demos/finding-review.png)](https://volkan.github.io/duet/demos/)
 
-An edited replay using a public toy fixture. [Playback and source](https://github.com/volkan/duet/blob/main/docs/demos/README.md).
+An edited replay using a public toy fixture. [Demo details and evidence](https://github.com/volkan/duet/blob/main/docs/demos/README.md).
 
 ## A real example
 
