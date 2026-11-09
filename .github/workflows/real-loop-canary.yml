@@ -36,11 +36,10 @@ jobs:
           git config --global user.email "canary@duet.invalid"
           git config --global user.name "duet canary"
 
-      # Tracking the latest CLI is deliberate: this canary should expose
-      # upstream CLI/model drift while the deterministic PR suite stays stable.
+      # Track the latest v2 CLI package to expose upstream CLI/model drift.
       - name: Install OpenCode
         run: |
-          npm install --global opencode-ai@latest
+          npm install --global @opencode/cli@latest
           opencode --version
 
       - name: Run S1 real-loop canary

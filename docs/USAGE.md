@@ -443,8 +443,8 @@ retarget the *same* scenarios at any backend, and the suite then requires only
 the backends it actually uses (not always `claude` + `codex`):
 
 ```bash
-# OpenCode loop — uses a currently-free OpenCode Zen model, so it needs NO auth
-# and no claude/codex on PATH (only git + opencode):
+# OpenCode v2 loop — big-pickle may be available without model credentials.
+# This needs no claude/codex on PATH (only git + opencode):
 make loop-test LOOP_TEST_ARGS="--scenario S1 \
   --lead-backend opencode --partner-backend opencode \
   --lead-model opencode/big-pickle --partner-model opencode/big-pickle"
@@ -453,19 +453,24 @@ make loop-test LOOP_TEST_ARGS="--scenario S1 \
 python3 scripts/duet_loop_e2e.py --scenario S1 --partner-backend gemini
 ```
 
+Use the supported v2 CLI when testing free-model access. Install it with the
+[official instructions](https://opencode.ai/docs/).
+
 This is how `codex`, `claude`, `gemini`, `copilot`, and `opencode` each get
-real-loop coverage. The OpenCode pairing is the cheapest to run in CI while a
-no-credential model is available.
+real-loop coverage. The OpenCode pairing can run without model credentials
+when OpenCode currently makes the model available that way.
 
 ### Scheduled S1 canary
 
 `.github/workflows/real-loop-canary.yml` runs scenario S1 every Monday at
 06:17 UTC and can also be started from **Actions → real-loop-canary → Run
-workflow**. It installs the latest OpenCode CLI and exercises both roles with
-`opencode/big-pickle`, so it deliberately detects upstream CLI, model-catalog,
-and live-loop drift. Each run has a 45-minute job limit, gives each model turn a
-300-second timeout, summarizes `results.tsv`, and uploads the run artifact
-directory for 14 days even when S1 fails.
+workflow**. It installs the latest v2 CLI from the official `@opencode/cli`
+package and exercises both roles with `opencode/big-pickle`. See the
+[official installation instructions](https://opencode.ai/docs/).
+The canary detects upstream CLI, model-catalog, and live-loop drift. Each run
+has a 45-minute job limit, gives each model turn a 300-second timeout,
+summarizes `results.tsv`, and uploads the run artifact directory for 14 days
+even when S1 fails.
 
 A failed canary stays red so it is visible, but the workflow has no pull-request
 trigger and `OpenCode S1 canary` must not be configured as a required check.
@@ -490,12 +495,13 @@ change is risky:
 |---|---|
 | any change at all | `make ci` (unit + reasoning + smoke + complexity + distribution) — the hard floor; it must be green |
 | a pure helper, flag, exit code, or YAML key | `make ci` (its unit/smoke case is mandatory in the same commit — see the sync table in `../CLAUDE.md`) |
-| backend adapter / `call_*` / session-resume / convergence / worktree / force-prompt — anything that affects the live loop | `make ci` **and** a real `make loop-test` for the affected backend(s); for a new or changed backend, run the loop-test with that backend (`--lead-backend`/`--partner-backend`), using a currently-free OpenCode model when you just need a no-auth real loop |
+| backend adapter / `call_*` / session-resume / convergence / worktree / force-prompt — anything that affects the live loop | `make ci` **and** a real `make loop-test` for the affected backend(s); for a new or changed backend, run the loop-test with that backend (`--lead-backend`/`--partner-backend`); use an OpenCode model without credentials only when OpenCode currently offers it that way |
 | packaging / plugin / release tooling | `make ci` + `make package-check` (+ `make plugin-check`) |
 
 If you cannot run the relevant real loop (no auth/keys for that backend), say so
-explicitly in the PR and fall back to the OpenCode free-model loop plus the
-dry-run matrix — do not silently skip it and call the change verified.
+explicitly in the PR. Use the OpenCode model loop only when OpenCode currently
+offers that model without credentials, and run the dry-run matrix. Do not
+silently skip the real loop and call the change verified.
 
 ---
 
