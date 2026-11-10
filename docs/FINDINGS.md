@@ -119,7 +119,9 @@ run is a dry-run (its session IDs are not real). The per-finding example in
 `duet --report` fills in the directory that it reads, so it stays correct after
 you move or copy a run. A `review.md` file written during a run keeps the
 directory from that time; regenerate it with `duet --report` after a move.
-Without a known directory, the example keeps the `<run>` placeholder.
+Without a known directory, the example keeps the `<run>` placeholder. For an
+incomplete ledger, `review.md` and `duet --report` print "Continuation is
+unavailable: the finding history is incomplete." in place of the example.
 
 The printed command does not add `--trust-state`. If the saved run holds a
 verify command, agent `extra_args`, or settings that widen authority,

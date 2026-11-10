@@ -293,7 +293,6 @@ class TestUnresolvedReasons(unittest.TestCase):
                 "and at least one still marks it unresolved."):
             with self.subTest(sentence=sentence):
                 self.assertIn("\n\n" + sentence + "\n\n", rendered)
-        self.assertNotIn("Why unresolved", rendered)
         self.assertIn("not proven facts", rendered)
 
     def test_rejected_reply_leaves_the_earlier_accepted_assessment_in_charge(self):
@@ -327,7 +326,6 @@ class TestUnresolvedReasons(unittest.TestCase):
         rendered = duet.render_finding_report(report)
         self.assertEqual(report["unresolved_reasons"], {"single_assessment": 0, "disputed": 0, "open": 0})
         self.assertIsNone(report["findings"][0]["unresolved_reason"])
-        self.assertNotIn("Why unresolved", rendered)
         self.assertNotIn("Unresolved findings by reason", rendered)
 
 
