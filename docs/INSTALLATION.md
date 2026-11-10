@@ -68,10 +68,12 @@ Use the [status report](USAGE.md#--status-run_dir_or_id) to find run logs after 
 Before launch, the skill checks installed CLI versions and relevant help output.
 See its [prerequisites](../plugins/duet/skills/duet/SKILL.md#prerequisites).
 The skill also covers custom launches and the steps after a run: reading the
-finding report, continuing unresolved findings, and recording feedback. See
-[After the run](CODEX_PLUGIN.md#after-the-run) and
-[Custom launches](CODEX_PLUGIN.md#custom-launches). Codex hosts also need
-[approval for the launch](CODEX_PLUGIN.md#approval-and-escalation).
+finding report, continuing unresolved findings, and recording feedback. See its
+[custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches) and
+[after the run](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends)
+sections. In Codex, a launch also needs
+[approval](../plugins/duet/skills/duet/SKILL.md#codex-host-approval); the
+[Codex guide](CODEX_PLUGIN.md#approval-and-escalation) explains it.
 For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 For peer access and write permissions, see [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
 With Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):

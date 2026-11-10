@@ -260,91 +260,26 @@ See [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
 Review or merge from the host repository using the commands duet prints at the
 end of the run.
 
-## Custom launches
+## Custom launches and results
 
-A custom launch sets its own agents, models, sandbox, or config instead of a
-recipe. Use `duet --help`, [duet.example.yaml](../duet.example.yaml), and the
-[usage guide](USAGE.md) as the reference. Do not read `duet.py` for flags. Do
-not use a flag that `duet --help` does not list. The CLI rejects it and no run
-starts.
+The [shared skill](../plugins/duet/skills/duet/SKILL.md) defines this workflow. This section is a summary.
 
-- Add `--finding-reports` to a custom review launch, also one that uses
-  `--task-from-cmd`. Only the recipes enable it. Without it, the run writes no
-  `review.md`.
-- Valid roles are `planner`, `coder`, `reviewer`, and `triage-reviewer`. Any
-  other role fails with `unknown role` on the first turn of that agent. For a
-  custom role, set `role_prompt` for that agent in a `--config` file. The CLI has
-  no flag for it. JSON works without extras. YAML needs `duet-cli[yaml]`.
-- The partner speaks first. Put the agent that opens the loop in `--partner`.
-- Pass the brief as `--task @FILE`. Peers usually have no network, because the
-  Codex sandboxes block it. `gh` and `curl` fail inside a turn. Write the diff
-  or other needed context into the file. Do not put secrets in it. Every peer
-  receives it.
-- Label the claims in the brief `L1`, `L2`, and so on. Releases up to 0.2.20
-  accept only `L<n>` or `P<n>` as finding IDs. One other ID, such as `F1` or
-  `C1`, makes Duet drop the whole findings block of that agent for that turn.
+For a launch without a recipe, the host agent reads flags from `duet --help`,
+not from the `duet.py` source. It adds `--finding-reports`, passes the brief as
+`--task @FILE`, and puts the needed context in that file, because peers usually
+have no network. It uses only valid roles. See
+[Custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches),
+[Same-backend peering](USAGE.md#same-backend-peering), and
+[Start a review](FINDINGS.md#start-a-review).
 
-Two read-only Codex reviewers:
-
-```bash
-duet --lead codex:reviewer --partner codex:reviewer --sandbox read-only \
-  --no-worktree --turns 4 --finding-reports --task @"$DUET_CONTROL_DIR/brief.md" \
-  --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --run-info-file "$DUET_RUN_INFO"
-```
-
-Add `--lead-model` and `--partner-model` only for models that you name. The
-default for `--turns` is 2. `--no-worktree` lets the reviewers see uncommitted
-changes, because a worktree holds only `HEAD`. If a peer can edit files, use a
-worktree. Two Codex peers in one directory must each report a session UUID on
-the first turn. If one does not, Duet stops the run. See
-[Same-backend peering](USAGE.md#same-backend-peering).
-
-## After the run
-
-Do these steps when the run ends, for any `finished_reason`.
-
-1. Read `<run_dir>/review.md` first when finding reports were on. Run
-   `duet --report <run_dir>` to rebuild it. Add `--json` for data. Then read
-   `recap.md` (only with recap) or `transcript.md`.
-2. Relay each finding with its disposition. `supported` and `refuted` mean both
-   agents assessed it the same way. `unresolved` means they disagree or
-   evidence is missing. These are agent assessments, not proof. Agreement does
-   not confirm a finding. The skill reports the cited evidence and the last open
-   objection, and says which findings it checked itself. See
-   [FINDINGS.md](FINDINGS.md).
-3. Name the run directory in the final message.
-
-When the report lists unresolved findings, for example after `max_turns`, the
-skill offers this command and runs it only after you agree:
-
-```bash
-duet --continue <run_dir> --runs-dir <parent of run_dir> --resolve L1 --resolve P2
-```
-
-`--resolve` accepts only IDs that `--report` lists as unresolved. It takes two
-turns by default. If you set `--turns`, the value must be 2 or more. The old run
-and its stop reason stay unchanged. The findings can end unresolved again, and
-Duet does not promise agreement. If the report says that the finding history is
-incomplete, Duet refuses `--resolve`. Start a fresh review.
-
-Use `duet --continue` for any follow-up with the same agents, sessions, and
-worktree. Always pass `--runs-dir` set to the directory that holds the source
-run, which is the parent of its run directory. Without it, Duet can write the new
-run to `./runs/<id>` in the current directory. If Duet refuses to replay saved
-commands or wider permissions, the skill reports the refusal. It adds
-`--trust-state` only when you ask for it after you see the refusal.
-
-`duet --feedback <run_dir> --usefulness V --decision D` records your verdict on
-the run. Both flags are required. `V` is `useful`, `mixed`, `not_useful`, or
-`unknown`. `D` is `accepted_finding`, `rejected_finding`, `corrected_comment`,
-`no_change`, or `not_applied`. The skill runs it only when you state the outcome
-and your words map exactly to a label. Otherwise it shows the command and asks.
-It never chooses labels from agent agreement, test results, or a merge.
-
-For a worktree run, the skill relays the printed `review:`, `merge:`, and
-`drop:` lines as written. It does not build a drop command that Duet did not
-print. It does not remove a worktree or branch that holds unmerged commits or
-uncommitted changes without your go.
+When a run ends, the host agent runs `duet --report`, relays each finding as an
+agent assessment and not as proof, and names the run directory. For unresolved
+findings, it offers `duet --continue` with `--resolve` and runs it only after
+you agree. It always passes `--runs-dir`. It records `--feedback` only when you
+state the outcome. It relays the worktree hints that Duet prints. It removes no
+unmerged work without your go. See [After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
+[Continue an unresolved finding](FINDINGS.md#continue-an-unresolved-finding), and
+[After a run finishes](USAGE.md#after-a-run-finishes).
 
 ## Troubleshooting
 
