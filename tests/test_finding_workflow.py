@@ -138,6 +138,7 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertIn("duet-findings", prompt)
         self.assertIn('"id":"L1"', prompt)
         self.assertIn("reuse that exact ID", prompt)
+        self.assertIn("at most 32 characters", prompt)
 
     def test_successful_turns_persist_updates_and_rebuild_local_report(self) -> None:
         state = self._run([_reply("supported"), _reply("supported")])
@@ -149,6 +150,18 @@ class TestFindingWorkflow(unittest.TestCase):
         duet._write_run_state(run / "state.json", saved)
         self.assertEqual((run / "review.md").read_text(encoding="utf-8"),
                          duet.render_finding_report(duet.build_finding_report(saved)))
+
+    def test_caller_defined_ids_differing_by_case_stay_separate_through_a_run(self) -> None:
+        def reply(identity: str) -> str:
+            return "```duet-findings\n" + json.dumps(
+                {"findings": [_assessment(identity=identity)]}) + "\n```"
+        state = self._run([reply("F1"), reply("f1")])
+        stored = [entry["finding_updates"]["items"][0]["id"] for entry in state["history"]]
+        self.assertEqual(stored, ["F1", "f1"])
+        run = pathlib.Path(state["transcript_path"]).parent
+        report = (run / "review.md").read_text(encoding="utf-8")
+        self.assertIn("## F1 — ", report)
+        self.assertIn("## f1 — ", report)
 
     def test_failed_reply_cannot_publish_structured_claims_from_error_text(self) -> None:
         state = self._run([duet.AgentRunError("agent_error", _reply("supported"))])

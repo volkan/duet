@@ -7722,8 +7722,10 @@ def _finding_prompt_addendum(agent: Agent, cfg: DuetConfig) -> str:
         'concrete check and result"],"objection":"remaining concern or null"}. '
         "Use actual enum values, not the pipe-separated alternatives. Preserve IDs "
         "from the prior conversation. When the task, the kickoff, or the other agent "
-        "already gives a claim an ID, reuse that exact ID. Otherwise allocate a new ID "
-        "with your prefix " + prefix + " and an unused positive integer. Reassess disputed findings explicitly. "
+        "already gives a claim an ID, reuse that exact ID. IDs use ASCII letters, "
+        "digits, '.', '_', or '-', at most 32 characters. Otherwise allocate a new ID "
+        "with your prefix " + prefix + " and an unused positive integer. Reassess "
+        "disputed findings explicitly. "
         "Use unresolved when evidence is missing. Cite only evidence you inspected; "
         "never invent executed checks or human acceptance. An empty findings array "
         "means no finding updates, not proof that the review is correct. Keep recap "
