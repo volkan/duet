@@ -159,6 +159,53 @@ not pre-add `--recap`, because it would conflict with an explicit
 Run duet as a long-running command; when the execution tool yields a live
 session, retain that session for later output/exit-code collection.
 
+## Custom launches
+
+A custom launch sets its own agents, models, sandbox, or config instead of a
+recipe. Read flags from `duet --help`, `duet.example.yaml`, and
+`docs/USAGE.md` (Duet repository), not from `duet.py`. Never pass a flag that
+`duet --help` does not list; argparse rejects it and no run starts.
+
+- Add `--finding-reports` to a custom review launch, also one that uses
+  `--task-from-cmd`; only the recipes enable it. Without it there is no
+  `review.md`.
+- Roles are `planner`, `coder`, `reviewer`, `triage-reviewer`. Any other role
+  fails with `unknown role` on that agent's first turn. A custom role needs
+  `role_prompt` on that agent in a `--config` file (JSON; YAML needs
+  `duet-cli[yaml]`). The CLI has no flag for it.
+- The partner speaks first; put the opening agent in `--partner`.
+- Pass the brief as `--task @FILE`. Peers usually have no network (Codex
+  sandboxes block it), so `gh` and `curl` fail in a turn: write the diff or
+  other needed context into the file. Leave secrets out; every peer gets it.
+- Label claims in the brief `L1`, `L2`, and so on. Releases up to 0.2.20 accept
+  only `L<n>` or `P<n>` as finding IDs; one other ID (`F1`, `C1`) makes Duet
+  drop that agent's whole findings block for the turn.
+
+Read-only two-reviewer shape (add model flags only for models the user named):
+
+```bash
+duet --lead codex:reviewer --partner codex:reviewer --sandbox read-only \
+  --no-worktree --turns 4 --finding-reports --task @"$DUET_CONTROL_DIR/brief.md" \
+  --cwd "$(pwd)" --runs-dir "$(pwd)/.duet/runs" --run-info-file "$DUET_RUN_INFO"
+```
+
+`--no-worktree` lets reviewers see uncommitted changes; a worktree holds
+`HEAD` only. `--turns` defaults to 2. If a peer can edit files, drop
+`--no-worktree` and apply the worktree defaults above.
+
+## Codex host approval
+
+In Codex, run each Duet launch as an escalated command. If auto-review denies
+it, for example because the run sends repository content to external model
+services, stop: do not retry, rephrase, split the command, or widen
+permissions. Tell the user the denial, name the content (task text, files,
+diff) and the model services (the peers' backends), and ask for explicit
+approval. Only the user approves; a user message that names that content and
+those services counts. Launch after that. Never add
+`--sandbox danger-full-access` or `--permission-mode bypassPermissions` unless
+the user asked for those exact flags. Reading results (`--status`, `--report`,
+`review.md`) needs no approval.
+
 ## Discover and monitor
 
 Do not scrape `[duet] run:` or other prose. Poll for `DUET_RUN_INFO`, parse it
@@ -231,6 +278,61 @@ the invocation that created the clone. Continuation never restores clone
 ownership, even with `--trust-state`; do not reconstruct an `rm -rf` command
 from state or repository topology. Explicit `--worktree-path` paths receive
 no drop hint. Validated linked-worktree continuation can retain its drop hint.
+
+## After the run ends
+
+When status is terminal, whatever `finished_reason` says:
+
+1. Read `<run_dir>/review.md` first if finding reports were on (both recipes,
+   or `--finding-reports`). To rebuild it or get data, run `duet --report
+   '<run_dir>'` or `duet --report '<run_dir>' --json`. Then read
+   `artifacts.recap` (only with recap) or `artifacts.transcript` from status.
+2. Relay findings by disposition. `supported` and `refuted` mean both agents
+   assessed alike; `unresolved` means they disagree or evidence is missing.
+   These are agent assessments, not proof: agreement does not confirm a
+   finding. Give ID, claim, cited evidence, and last open objection, and say
+   which findings you checked yourself. Only the report's executed-checks
+   section holds harness results.
+3. Name the run directory, `finished_reason`, and any worktree in your final
+   message.
+
+If the report lists unresolved findings (for example after `max_turns`), tell
+the user and offer this command. Run it only after the user says yes; it starts
+a new run that costs model turns:
+
+```bash
+duet --continue '<run_dir>' --runs-dir '<parent of run_dir>' --resolve L1 --resolve P2 \
+  --run-info-file "$DUET_RUN_INFO"
+```
+
+`--resolve` accepts only IDs that `--report` lists as unresolved and takes two
+turns by default (`--turns N` needs N of at least 2). The old run and its stop
+reason stay unchanged, the findings can end unresolved again, and agreement is
+not promised. If the report says the finding history is incomplete, Duet
+refuses `--resolve`; start a fresh review.
+
+Use `--continue` for any follow-up with the same agents, sessions, and
+worktree: after a timeout, turn limit, or stop, or to add one instruction (at
+most one of `--task`, `--kickoff`, `--task-from-cmd`). Always pass `--runs-dir`
+set to the directory that holds the source run (the parent of its `run_dir`)
+and a new `--run-info-file` path. Without `--runs-dir`, Duet can write the new run
+to `./runs/<id>` in the current directory. If Duet refuses to replay saved
+commands or wider permissions, report the refusal; add `--trust-state` only
+when the user asks for it after seeing that refusal.
+
+`duet --feedback '<run_dir>' --usefulness V --decision D` records the user's
+own verdict on the run; both flags are required. `V` is `useful`, `mixed`,
+`not_useful`, or `unknown`. `D` is `accepted_finding`, `rejected_finding`,
+`corrected_comment`, `no_change`, or `not_applied`. Run it only when the user
+stated the outcome in this conversation and their words map exactly to a label;
+otherwise show the command and ask for the labels. Never choose labels from
+agent agreement, test results, or a merge: a wrong label corrupts the record.
+
+For a worktree run, relay Duet's printed `worktree left intact` lines
+(`review:`, `merge:`, and `drop:` when printed) as written. Never build a drop
+command Duet did not print. Never remove a worktree or branch that holds
+unmerged commits or uncommitted changes without the user's go; check with
+`git -C <worktree> status --short` and the printed `review:` command first.
 
 ## Stop one run safely
 
