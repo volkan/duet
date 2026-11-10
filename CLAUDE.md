@@ -212,7 +212,8 @@ its own directory, and `_announce_finding_report` prints the counts plus one
 shell-quoted `duet --continue` command with at most five IDs. Without a known
 directory the placeholder `<run>` stays; a dry-run (`state["dry_run"]`) passes no
 directory and prints no command, and an incomplete ledger gets no command. The
-`--continue` kickoff JSON omits `unresolved_reason` so agent-facing text is unchanged. The announced command never adds `--trust-state`.
+`--continue` kickoff JSON omits `unresolved_reason` so agent-facing text is
+unchanged. The announced command never adds `--trust-state`.
 `--continue` inherits validated `finding_baseline` events; `--resolve` selects
 unresolved IDs with a two-turn default and refuses an incomplete ledger. None
 of these helpers changes convergence or promotes agent evidence to executed
