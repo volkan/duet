@@ -51,12 +51,13 @@ The report includes:
   otherwise `unresolved`, with the last open objection when supplied.
 - For each unresolved finding, the reason, and the count per reason near the top
   of the report. The three reasons are:
-  - `single_assessment`: only one slot assessed the claim. The other agent did
-    not cross-check it.
-  - `disputed`: both slots assessed it, and their latest dispositions are
-    `supported` and `refuted`.
-  - `open`: both slots assessed it, and at least one latest disposition is
-    `unresolved`.
+  - `single_assessment`: only one slot has an accepted assessment of the claim.
+    The other agent did not cross-check it, or its reply was rejected as
+    malformed.
+  - `disputed`: both slots have an accepted assessment, and their latest
+    dispositions are `supported` and `refuted`.
+  - `open`: both slots have an accepted assessment, and at least one latest
+    disposition is `unresolved`.
 - The actual run phase and stop reason, even when findings remain unresolved.
 - Executed harness checks from recorded `verify` results, separate from
   agent-supplied evidence. A passing run check does not verify every claim.
@@ -98,8 +99,10 @@ duet --continue RUN_DIR_OR_ID --resolve L1
 duet --continue RUN_DIR_OR_ID --resolve L1 --resolve P2 --turns 4
 ```
 
-Both commands run as written. When a run ends with unresolved findings, Duet
-prints the real run directory, shell-quoted, with the counts per reason:
+The examples above use the placeholder `RUN_DIR_OR_ID`. When a run ends with
+unresolved findings, Duet prints a command that runs as written. It names the
+real run directory, shell-quoted, and the line before it gives the counts per
+reason:
 
 ```text
 [duet] finding report: /path/to/run/review.md (3 unresolved: 2 single_assessment, 1 disputed, 0 open)
@@ -108,9 +111,11 @@ prints the real run directory, shell-quoted, with the counts per reason:
 
 The command lists at most five IDs, in report order. When more are unresolved,
 a third line gives the number of IDs left out and points to the report. Duet
-prints no command when no finding is unresolved or when the finding history is
-incomplete, because a continuation cannot start from an incomplete ledger. The
-per-finding example in `review.md` uses the same real directory.
+prints no command when no finding is unresolved, when the finding history is
+incomplete (a continuation cannot start from an incomplete ledger), or when the
+run is a dry-run (its session IDs are not real). The per-finding example in
+`review.md` uses the same real directory. A dry-run's `review.md` and
+`duet --report` for a dry-run keep the `<run>` placeholder.
 `duet --report` fills in the directory that it reads, so it stays correct after
 you move or copy a run. A `review.md` file written during a run keeps the
 directory from that time; regenerate it with `duet --report` after a move.

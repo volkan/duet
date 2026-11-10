@@ -306,8 +306,13 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertIn("(8 unresolved: 8 single_assessment, 0 disputed, 0 open)", lines[0])
         resolved = shlex.split(lines[1].split(": ", 1)[1])[3:]
         self.assertEqual(resolved, [part for number in range(1, 6) for part in ("--resolve", f"L{number}")])
-        self.assertIn("3 more unresolved findings", lines[2])
+        self.assertIn("3 more unresolved findings are not in this command", lines[2])
         self.assertIn(str(run / "review.md"), lines[2])
+        one_more = {f"L{number}": ("supported", None) for number in range(1, 7)}
+        lines = self._announce(self._announce_state(run, one_more))
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("1 more unresolved finding is not in this command", lines[2])
+        self.assertNotIn("findings are", lines[2])
         exactly = {f"L{number}": ("supported", None) for number in range(1, 6)}
         self.assertEqual(len(self._announce(self._announce_state(run, exactly))), 2)
 
@@ -326,6 +331,43 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("(1 unresolved: 1 single_assessment, 0 disputed, 0 open)", lines[0])
         self.assertNotIn("duet --continue", lines[0])
+
+    def test_dry_run_continuation_prints_counts_but_no_command(self) -> None:
+        run = self._saved_run(history=self._history(), turns_used=2)
+        cfg = self._continue(run, "--resolve", "L1", "--dry-run", "--runs-dir", str(self.root / "continued"))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            state = duet.run_duet(cfg)
+        self.assertIs(state["dry_run"], True)
+        lines = self._announce(state)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("(1 unresolved: 0 single_assessment, 0 disputed, 1 open)", lines[0])
+        dry_dir = pathlib.Path(state["transcript_path"]).parent
+        review = (dry_dir / "review.md").read_text(encoding="utf-8")
+        self.assertIn("duet --continue <run> --resolve L1 --turns 2", review)
+        self.assertNotIn(shlex.quote(str(dry_dir.resolve())), review)
+        code, out, err = self._cli("--report", str(dry_dir))
+        self.assertEqual(code, 0, err)
+        self.assertIn("duet --continue <run> --resolve L1 --turns 2", out)
+        live_state = self._announce_state(self.root / "live", {"L1": ("supported", None)})
+        self.assertEqual(len(self._announce(dict(live_state, dry_run=False))), 2)
+
+    def test_continuation_kickoff_is_free_of_report_only_keys(self) -> None:
+        run = self._saved_run(history=self._history(), turns_used=2)
+        lead = {"id": "L1", "claim": "A partial batch is counted as full",
+                "disposition": "supported",
+                "evidence": ["toy.py:18; five items produce three batches"],
+                "objection": None, "slot": "lead", "turn": 1, "inherited": False}
+        partner = dict(lead, disposition="unresolved", slot="partner", turn=2,
+                       objection="Need the partner to check the contract")
+        focus = [{"id": "L1", "claim": lead["claim"], "disposition": "unresolved",
+                  "assessment_basis": "agent_assessment", "assessments": [lead, partner],
+                  "missing_evidence_slots": [],
+                  "last_open_objection": "Need the partner to check the contract"}]
+        for extra in (["--resolve", "L1"], []):
+            with self.subTest(extra=extra):
+                kickoff = self._continue(run, *extra).kickoff
+                self.assertNotIn("unresolved_reason", kickoff)
+                self.assertTrue(kickoff.endswith(json.dumps(focus, ensure_ascii=True)), kickoff)
 
     def test_resolve_defaults_two_turns_and_preserves_inherited_identity(self) -> None:
         run = self._saved_run(history=self._history(), turns_used=2)

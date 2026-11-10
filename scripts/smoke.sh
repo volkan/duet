@@ -890,7 +890,7 @@ assert report["unresolved_reasons"] == {"single_assessment": 0, "disputed": 0, "
 assert report["findings"][0]["unresolved_reason"] == "open"
 assert report["structured_turns"]["ok"] == 2
 assert "L1" in (run / "review.md").read_text()
-assert "Why unresolved: both agents assessed this claim" in (run / "review.md").read_text()
+assert "Both agents have an accepted assessment of this claim, and at least one still marks it unresolved." in (run / "review.md").read_text()
 assert "(1 unresolved: 0 single_assessment, 0 disputed, 1 open)" in first_output
 printed = [line for line in first_output.splitlines() if line.startswith("[duet] continue unresolved findings: ")]
 assert len(printed) == 1
@@ -898,9 +898,11 @@ printed_argv = shlex.split(printed[0].split(": ", 1)[1])
 assert printed_argv[:3] == ["duet", "--continue", str(run.resolve())] and printed_argv[3:] == ["--resolve", "L1"]
 before = (run / "state.json").read_bytes()
 continued_info = root / "continued.json"
-command(*printed_argv[1:], "--dry-run", "--recap",
+dry_output = command(*printed_argv[1:], "--dry-run", "--recap",
         "--run-info-file", str(continued_info), "--runs-dir", str(root / "continued"))
 continued = pathlib.Path(json.loads(continued_info.read_text())["run_dir"])
+assert "[duet] finding report:" in dry_output and "continue unresolved findings" not in dry_output
+assert "duet --continue <run> --resolve L1 --turns 2" in (continued / "review.md").read_text()
 state = json.loads((continued / "state.json").read_text())
 assert state["max_turns"] == 2 and state["finding_focus"] == ["L1"]
 assert all(event["inherited"] for event in json.loads(command("--report", str(continued), "--json"))["events"])

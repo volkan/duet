@@ -270,22 +270,57 @@ class TestUnresolvedReasons(unittest.TestCase):
     def test_json_keeps_schema_one_and_adds_only_new_keys(self):
         report = json.loads(json.dumps(self.report(), sort_keys=True))
         self.assertEqual((report["schema_version"], report["kind"]), (1, "duet.finding.report"))
-        for key in ("id", "claim", "disposition", "assessment_basis", "assessments",
-                    "missing_evidence_slots", "last_open_objection", "unresolved_reason"):
-            self.assertIn(key, report["findings"][0])
+        schema_one = {"schema_version", "kind", "enabled", "available", "phase", "finished_reason",
+                      "events", "findings", "summary", "structured_turns", "executed_checks",
+                      "truncated"}
+        self.assertEqual(set(report), schema_one | {"unresolved_reasons"})
+        finding_schema_one = {"id", "claim", "disposition", "assessment_basis", "assessments",
+                              "missing_evidence_slots", "last_open_objection"}
+        for finding in report["findings"]:
+            self.assertEqual(set(finding), finding_schema_one | {"unresolved_reason"})
 
     def test_markdown_gives_one_sentence_per_reason_and_the_counts(self):
         rendered = duet.render_finding_report(self.report())
         self.assertIn("Unresolved findings by reason: 3 single_assessment", rendered)
         self.assertIn("2 disputed", rendered)
         self.assertIn("3 open", rendered)
-        self.assertIn("Why unresolved: only the lead assessed this claim. The partner has not.", rendered)
-        self.assertIn("Why unresolved: only the partner assessed this claim. The lead has not.", rendered)
-        self.assertIn("Why unresolved: the lead and the partner disagree. One assessed the claim "
-                      "as supported and the other as refuted.", rendered)
-        self.assertIn("Why unresolved: both agents assessed this claim, "
-                      "and at least one still marks it unresolved.", rendered)
+        for sentence in (
+                "Only the lead has an accepted assessment of this claim.",
+                "Only the partner has an accepted assessment of this claim.",
+                "The lead assessed this claim as supported and the partner assessed it as refuted.",
+                "The lead assessed this claim as refuted and the partner assessed it as supported.",
+                "Both agents have an accepted assessment of this claim, "
+                "and at least one still marks it unresolved."):
+            with self.subTest(sentence=sentence):
+                self.assertIn("\n\n" + sentence + "\n\n", rendered)
+        self.assertNotIn("Why unresolved", rendered)
         self.assertIn("not proven facts", rendered)
+
+    def test_rejected_reply_leaves_the_earlier_accepted_assessment_in_charge(self):
+        rejected = {"turn": 3, "agent": "reviewer",
+                    "finding_updates": duet.parse_finding_updates("```duet-findings\nnot JSON\n```")}
+        history = assessed("L1", "supported", "refuted") + [rejected]
+        report = duet.build_finding_report(state(history))
+        self.assertEqual(report["structured_turns"]["malformed"], 1)
+        self.assertEqual(report["findings"][0]["unresolved_reason"], "disputed")
+        history = [turn(1, "reviewer", [item("L1", "supported")]),
+                   {"turn": 2, "agent": "coder",
+                    "finding_updates": duet.parse_finding_updates("```duet-findings\nnot JSON\n```")}]
+        report = duet.build_finding_report(state(history))
+        self.assertEqual(report["findings"][0]["unresolved_reason"], "single_assessment")
+        rendered = duet.render_finding_report(report)
+        self.assertIn("Only the lead has an accepted assessment of this claim.", rendered)
+
+    def test_reason_covers_inherited_baseline_events(self):
+        baseline = duet.build_finding_report(state(assessed("L1", "supported") + assessed("L2", "supported")))
+        self.assertEqual(baseline["unresolved_reasons"]["single_assessment"], 2)
+        history = [turn(3, "coder", [item("L1", "refuted")])]
+        report = duet.build_finding_report(state(history, finding_baseline=baseline["events"]))
+        found = {finding["id"]: finding["unresolved_reason"] for finding in report["findings"]}
+        self.assertEqual(found, {"L1": "disputed", "L2": "single_assessment"})
+        self.assertEqual([event["inherited"] for event in report["events"]], [True, True, False])
+        self.assertEqual(report["unresolved_reasons"],
+                         {"single_assessment": 1, "disputed": 1, "open": 0})
 
     def test_markdown_omits_reasons_when_nothing_is_unresolved(self):
         report = duet.build_finding_report(state(assessed("L1", "supported", "supported")))
