@@ -166,17 +166,20 @@ recipe. Take flags from `duet --help`, not `duet.py`; argparse rejects an
 unlisted flag. `duet.example.yaml` and `docs/USAGE.md` exist only in a source
 checkout; stable copies:
 `https://github.com/volkan/duet/blob/main/duet.example.yaml` and
-`https://github.com/volkan/duet/blob/main/docs/USAGE.md`.
+`https://github.com/volkan/duet/blob/main/docs/USAGE.md`. If you cannot open the
+URLs, ask the user for a source checkout or the file.
 
 - Add `--finding-reports` to a custom review launch (also `--task-from-cmd`)
   unless the user passed `--no-finding-reports`; they conflict. Only recipes
   enable it; without it there is no `review.md`.
-- Roles: `planner`, `coder`, `reviewer`, `triage-reviewer`. Duet rejects any
-  other with an `unknown role` error; a custom role needs `role_prompt` in a
-  `--config` file (JSON; YAML needs `duet-cli[yaml]`).
-- The partner speaks first; put the opening agent in `--partner`.
-- Brief: `--task @FILE`. Peers usually have no network (Codex sandboxes), so put
-  the diff or other context in the file. No secrets: every peer gets it.
+- Roles: `planner`, `coder`, `reviewer`, `triage-reviewer`. Any other role gives
+  an `unknown role` error unless that agent has `role_prompt` in a `--config`
+  file (JSON; YAML needs `duet-cli[yaml]`).
+- The partner speaks first (in a config file, the second agent in `agents`); put
+  the opening agent there. Exception: the `codex-review` recipe, whose lead
+  speaks first.
+- Brief: `--task @FILE`, with the diff or other context inside: peers usually
+  have no network. Every peer gets the file; leave secrets out.
 - Label claims `L1`, `L2`, and so on: every release accepts that form; older
   releases drop a findings block with any other ID.
 
@@ -191,17 +194,21 @@ duet --lead codex:reviewer --partner codex:reviewer --sandbox read-only \
 
 ## Codex host approval
 
-In Codex, run each Duet launch, including `--continue`, as an escalated command.
-If auto-review denies it (for example, for sending repository content to model
-services), stop: a retry, rephrase, or split sends the same content and evades
-the user's check. Ask for approval that names the content (task, files, diff)
-and the model services (the peers' backends). Approval is a user message sent
-after the denial; a plain "yes" counts if your question named both. Launch after
-it; after a second denial, stop and report. Never widen permissions or add
-`--sandbox danger-full-access` or `--permission-mode bypassPermissions` unless
-the user asked for those exact flags: they widen peer access. `--status` and
-`--report` send nothing to a model service: no content approval, normally no
-escalation.
+In Codex, run each Duet launch, including `--continue`, as an escalated command;
+that is the normal path, not a widening. If auto-review denies a launch (for
+example, for sending repository content to model services), stop; do not retry,
+rephrase, or split it, because it sends the same content. Ask the user to
+approve, naming the content (task, files, diff) and the model services (the
+peers' backends). Approval is an affirmative user reply, sent after the denial,
+to that question; the original request does not count. Launch after it; after a
+second denial, stop and report.
+
+After a denial, do not change the launch to get it accepted (wider peer access,
+another sandbox or permission mode): the user approved this launch only. Never
+add `--sandbox danger-full-access` or `--permission-mode bypassPermissions`
+unless the user named those exact flags: they remove the peers' sandbox and
+permission checks. `--status` and `--report` send nothing to a model service: no
+content approval, normally no escalation.
 
 ## Discover and monitor
 
@@ -287,38 +294,42 @@ When status is terminal, whatever `finished_reason` says:
    are agent assessments, not proof; say which you checked. Name the run
    directory, `finished_reason`, and any worktree.
 
-If findings are unresolved (for example after `max_turns`), offer this command;
-run it only after the user says yes. `<run_dir>`, `<parent of run_dir>`, `L1`,
-and `P2` are placeholders: use the real paths and the unresolved IDs that the
-report lists.
+If findings are unresolved (for example after `max_turns`), offer this command:
 
 ```bash
+# Replace <run_dir>, <parent of run_dir>, L1, P2 with real values (IDs: `duet --report`).
+DUET_CONTROL_DIR=$(mktemp -d)
+DUET_RUN_INFO="$DUET_CONTROL_DIR/run.json"
 duet --continue '<run_dir>' --runs-dir '<parent of run_dir>' --resolve L1 --resolve P2 \
-  --run-info-file "$DUET_CONTROL_DIR/continue-1.json"
+  --run-info-file "$DUET_RUN_INFO"
 ```
 
-`--resolve` takes two turns by default (`--turns N`, N at least 2) and promises
-no agreement. `--continue` resumes the same agents and worktree as a new run: it
-costs model turns and sends repository content out again. Start one only when
-the user asked or said yes to your offer. Pass `--runs-dir` set to the directory
-that holds the source run; older releases write the new run to `./runs/<id>`
-without it. Use an unused `--run-info-file` path each time; Duet will not
-overwrite one.
+Run it, or any `--continue`, only when the user asked for the follow-up or said
+yes to your offer: it is a new run that resumes the same agents and worktree,
+costs model turns, and sends repository content out again. `--resolve` takes two
+turns by default (`--turns N`, N at least 2) and promises no agreement. Always
+pass `--runs-dir` set to the directory that holds the source run: older releases
+write the new run to `./runs/<id>` without it. If `--continue` refuses
+state-sourced settings (saved `verify_cmd`, `extra_args`, access roots), report
+the message; add `--trust-state` only when the user asks after seeing it,
+because it replays saved commands and wider access. A dry-run does not show this
+guard.
 
 `duet --feedback '<run_dir>' --usefulness V --decision D` records the user's
 verdict (both flags required) in `feedback.json` and, unless metrics are off, a
 curated copy under `~/.duet/metrics/feedback/`. `V`: `useful`, `mixed`,
 `not_useful`, `unknown`. `D`: `accepted_finding`, `rejected_finding`,
 `corrected_comment`, `no_change`, `not_applied`. Run it only if the user stated
-the outcome in this conversation and their words map exactly to a label; else
-show it and ask. Never choose labels from agent agreement, tests, or a merge: it
-is the user's record.
+the outcome in this conversation and their words map exactly to a label.
+Otherwise show the command with `V` and `D` unfilled, list the accepted values,
+and ask. Never choose labels from agent agreement, tests, or a merge: it is the
+user's record.
 
 For a worktree run, relay the printed `review:`, `merge:`, and `drop:` lines as
-written. Run `merge:` only if the user asks. Never build a drop command Duet did
-not print. Never remove a worktree or branch with unmerged commits or
-uncommitted changes without the user's go (check `git -C <worktree> status
---short`).
+written. Run neither `merge:` nor `drop:` unless the user asks: `drop:` deletes
+the worktree and force-deletes its branch. Never remove a worktree or branch
+that holds unmerged commits or uncommitted changes without the user's go (check
+`git -C <worktree> status --short`).
 
 ## Stop one run safely
 

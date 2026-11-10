@@ -262,24 +262,14 @@ end of the run.
 
 ## Custom launches and results
 
-The [shared skill](../plugins/duet/skills/duet/SKILL.md) defines this workflow. This section is a summary.
-
-For a launch without a recipe, the host agent reads flags from `duet --help`,
-not from the `duet.py` source. It adds `--finding-reports`, passes the brief as
-`--task @FILE`, and puts the needed context in that file, because peers usually
-have no network. It uses only valid roles. See
+For a custom launch, the skill reads flags from `duet --help`, adds
+`--finding-reports`, and puts context in a `--task @FILE` brief. After a run, it
+relays findings as assessments, not proof. It runs `duet --continue --resolve`
+only after you agree, with `--runs-dir`: older releases write the new run to
+`./runs/<id>` in the project root. See
 [Custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches),
-[Same-backend peering](USAGE.md#same-backend-peering), and
-[Start a review](FINDINGS.md#start-a-review).
-
-When a run ends, the host agent runs `duet --report`, relays each finding as an
-agent assessment and not as proof, and names the run directory. For unresolved
-findings, it offers `duet --continue` with `--resolve` and runs it only after
-you agree. It always passes `--runs-dir`. It records `--feedback` only when you
-state the outcome. It relays the worktree hints that Duet prints. It removes no
-unmerged work without your go. See [After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
-[Continue an unresolved finding](FINDINGS.md#continue-an-unresolved-finding), and
-[After a run finishes](USAGE.md#after-a-run-finishes).
+[After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
+[FINDINGS.md](FINDINGS.md#continue-an-unresolved-finding), and [USAGE.md](USAGE.md#after-a-run-finishes).
 
 ## Troubleshooting
 
