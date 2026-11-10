@@ -137,6 +137,7 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertNotIn("{SENTINEL}", prompt)
         self.assertIn("duet-findings", prompt)
         self.assertIn('"id":"L1"', prompt)
+        self.assertIn("reuse that exact ID", prompt)
 
     def test_successful_turns_persist_updates_and_rebuild_local_report(self) -> None:
         state = self._run([_reply("supported"), _reply("supported")])
@@ -234,6 +235,16 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertEqual([event["inherited"] for event in report["events"]], [True, True, False, False])
         self.assertEqual([finding["id"] for finding in report["findings"]], ["L1"])
         self.assertEqual(report["findings"][0]["disposition"], "refuted")
+
+    def test_resolve_selects_caller_defined_id(self) -> None:
+        history = [{"turn": turn, "agent": agent, "finding_updates": {
+            "status": "ok", "items": [_assessment(identity="P1-1", disposition=disposition)]}}
+            for turn, agent, disposition in ((1, "lead", "supported"), (2, "partner", "unresolved"))]
+        run = self._saved_run("caller-id", history=history, turns_used=2)
+        cfg = self._continue(run, "--resolve", "P1-1")
+        self.assertEqual(cfg.resolve_findings, ["P1-1"])
+        self.assertEqual([event["id"] for event in cfg.finding_baseline], ["P1-1", "P1-1"])
+        self.assertIn("P1-1", cfg.kickoff)
 
     def test_resolve_rejects_unknown_resolved_ids_and_short_budget(self) -> None:
         open_run = self._saved_run("open", history=self._history())

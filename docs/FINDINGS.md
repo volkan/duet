@@ -18,8 +18,9 @@ override config and continued-run settings. This setting is independent of
 central metrics; `--no-metrics` still permits local finding reports.
 
 Duet asks each agent to append one structured assessment block to its normal
-reply. New claims use IDs such as `L1` or `P1`; subsequent assessments preserve
-the ID. The initial review or kickoff supplies claims to investigate, not an
+reply. A claim that the task, kickoff, or other agent already labels keeps that
+ID, such as `F1` or `P1-1`. New claims use `L1` or `P1`. Later assessments
+preserve the ID. The initial review or kickoff supplies claims to investigate, not an
 independent vote supporting them.
 
 Each successful turn stores validated assessments in `state.json` and updates
@@ -128,7 +129,9 @@ Use exactly one top-level triple-backtick block labelled `duet-findings`.
 Keep LGTM rationale and the sentinel outside it. An empty `findings` array
 means no updates. The block is bounded at 64 KiB and 50 unique IDs. Claims,
 objections, and each of up to eight evidence strings are limited to 2,000
-characters; IDs use `L` or `P` followed by an integer from 1 to 9,999. Malformed
+characters. An ID has 1 to 32 ASCII characters: it starts with a letter or digit,
+then uses letters, digits, `.`, `_`, or `-`. Agents use `L<n>` or `P<n>` for
+claims that they introduce. IDs are case-sensitive. Malformed
 blocks are rejected as a whole. Reports cap history/events at 1,000 and expose
 truncation explicitly.
 

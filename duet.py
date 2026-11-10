@@ -6230,7 +6230,7 @@ _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
 
 # ---------- structured finding reports ----------
 
-_FINDING_ID_RE = re.compile(r"\A[LP][1-9][0-9]{0,3}\Z")
+_FINDING_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 _FINDING_BLOCK_MAX_BYTES = 64 * 1024
 _FINDING_EVENT_LIMIT = 1000
 _FINDING_DISPOSITIONS = frozenset({"supported", "refuted", "unresolved"})
@@ -7721,8 +7721,9 @@ def _finding_prompt_addendum(agent: Agent, cfg: DuetConfig) -> str:
         '"disposition":"supported|refuted|unresolved","evidence":["file:line or '
         'concrete check and result"],"objection":"remaining concern or null"}. '
         "Use actual enum values, not the pipe-separated alternatives. Preserve IDs "
-        "from the prior conversation; allocate new IDs with your prefix " + prefix +
-        " and an unused positive integer. Reassess disputed findings explicitly. "
+        "from the prior conversation. When the task, the kickoff, or the other agent "
+        "already gives a claim an ID, reuse that exact ID. Otherwise allocate a new ID "
+        "with your prefix " + prefix + " and an unused positive integer. Reassess disputed findings explicitly. "
         "Use unresolved when evidence is missing. Cite only evidence you inspected; "
         "never invent executed checks or human acceptance. An empty findings array "
         "means no finding updates, not proof that the review is correct. Keep recap "
