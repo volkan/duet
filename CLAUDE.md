@@ -64,7 +64,7 @@ make uninstall
 ./duet.py --continue runs/<id>/ --task "next"    # fresh run from saved state/session ids
 ```
 
-Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the runtime checks on every PR (unit + reasoning + smoke on Python 3.9/3.11/3.13), plus source/package metadata validation, Claude Code plugin validation, and complexity once. The source metadata validation covers both native manifests, the shared skill, and the OpenCode command wrapper. `make ci` runs the fast local subset that does not install external CLIs or build frontends. All jobs are advisory until marked **required** in branch protection; see `.github/BRANCH_PROTECTION.md` (admins can still force-merge). `.github/workflows/real-loop-canary.yml` runs the bounded S1 scenario weekly and on demand against the latest OpenCode CLI and the currently-free `opencode/big-pickle` model, then retains its run artifacts for 14 days. It is an upstream-health signal, not a PR trigger or required check. `.github/workflows/release.yml` detects when `duet.__version__` changed on `main` and no matching tag exists, then runs gate → build → OIDC PyPI publish → GitHub Release. `.github/workflows/bump-version.yml` bumps `duet.py` plus both plugin manifests and opens the release PR.
+Six merge gates, in order of granularity. `.github/workflows/ci.yml` runs the runtime checks on every PR (unit + reasoning + smoke on Python 3.9/3.11/3.13), plus source/package metadata validation, Claude Code plugin validation, and complexity once. The source metadata validation covers both native manifests, the shared skill, and the OpenCode command wrapper. `make ci` runs the fast local subset that does not install external CLIs or build frontends. All jobs are advisory until marked **required** in branch protection; see `.github/BRANCH_PROTECTION.md` (admins can still force-merge). `.github/workflows/real-loop-canary.yml` runs the bounded S1 scenario weekly and on demand with the latest v2 CLI from the official `@opencode/cli` package and `opencode/big-pickle`, then retains its run artifacts for 14 days. Install the CLI with the [official instructions](https://opencode.ai/docs/). The model may be available without credentials, depending on OpenCode's current access. This canary is an upstream-health signal, not a PR trigger or required check. `.github/workflows/release.yml` detects when `duet.__version__` changed on `main` and no matching tag exists, then runs gate → build → OIDC PyPI publish → GitHub Release. `.github/workflows/bump-version.yml` bumps `duet.py` plus both plugin manifests and opens the release PR.
 
 1. `tests/` (run via `make unit-test`) — stdlib `unittest` only. Outside `make`, always prefix `DUET_METRICS=0` (one class: `DUET_METRICS=0 python3 -m unittest tests.test_duet.TestReasoningHelpers`); without it the suite writes metrics snapshots and home-index symlinks into your real `~/.duet/`. `test_duet.py` covers pure helpers; `test_zcode_backend.py` covers the native ZCode backend and its launch check; `test_control_plane.py` covers the recipe, run-info/status schemas, deferred kickoff, strict worktree failure, and secret exclusion; `test_stop_control_plane.py` covers `--stop`; `test_no_subagents.py` covers delegation controls; `test_metrics_*.py` and `test_backend_metrics.py` cover central metrics; `test_finding_*.py` and `test_feedback_concurrency.py` cover findings and feedback. Add tests in the same commit as contract changes.
 2. `scripts/smoke.sh` (run via `make smoke-test` or as part of `make test`) — the integration net. Each `expect` line is a self-contained `--dry-run` invocation; to run a single case, copy its command out of the script and execute it directly. Smoke compares exit codes, so anything that changes `print_run_status`, the argparse error paths, or `resolve_seed_inputs` will surface there first. The smoke also asserts on side-effects (`<TMPD>/.duet/runs` created, `state.json` contains `duet_pid`, etc.) — read the bottom half of `smoke.sh` before touching foreign-cwd or status logic.
@@ -98,11 +98,12 @@ change touches — and always against this repo's code, never an installed copy.
    force prompt — also needs a **real `make loop-test` for the affected
    backend(s)**. The loop-test is multi-backend: `--lead-backend` /
    `--partner-backend` / `--lead-model` / `--partner-model` retarget the
-   scenarios at any backend, and the currently-free OpenCode model pairing
+   scenarios at any backend, and the OpenCode model pairing
    (`--lead-backend opencode --partner-backend opencode --lead-model
-   opencode/big-pickle …`) gives a real loop with **no auth** while that model is
-   available, so there is no excuse to silently skip a real-loop check for a
-   backend change. Packaging/plugin
+   opencode/big-pickle …`) can give a real loop without model credentials when
+   OpenCode makes that model available without credentials. Use v2 when testing
+   free-model access; install it with the [official instructions](https://opencode.ai/docs/).
+   Do not silently skip a real-loop check for a backend change. Packaging/plugin
    changes additionally need `make package-check` (+ `make plugin-check`).
 3. **Always test the repo code, via the root path.** Every test harness must
    invoke duet through the repo-root `duet.py` resolved from the harness's own
@@ -116,8 +117,9 @@ change touches — and always against this repo's code, never an installed copy.
    exercising the plugins locally, `make install` so PATH `duet` is the repo
    symlink.)
 4. **No silent skips.** If you genuinely cannot run a relevant real loop (no
-   auth for that backend), say so in the PR and fall back to the OpenCode
-   free-model loop plus the dry-run matrix — do not call the change verified.
+   auth for that backend), say so in the PR. Use the OpenCode model loop only
+   when OpenCode currently offers that model without credentials, and run the
+   dry-run matrix. Do not silently skip the real loop and call the change verified.
 
 The full how-to and the per-change matrix live in `docs/USAGE.md`
 ("Which tests to run for a change").
