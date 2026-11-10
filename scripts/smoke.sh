@@ -850,6 +850,7 @@ expect "finding report continuation and feedback CLI" 0 python3 - "$DUET_ABS" "$
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 
@@ -879,17 +880,25 @@ def command(*args):
     assert result.returncode == 0, (result.returncode, result.stderr)
     return result.stdout
 info = root / "info.json"
-command("--finding-reports", "--lead", "opencode:reviewer", "--partner", "opencode:reviewer",
+first_output = command("--finding-reports", "--lead", "opencode:reviewer", "--partner", "opencode:reviewer",
         "--task", "private-task-marker", "--cwd", str(root), "--turns", "2", "--recap",
         "--metrics-kind", "test", "--runs-dir", str(root / "runs"), "--run-info-file", str(info))
 run = pathlib.Path(json.loads(info.read_text())["run_dir"])
 report = json.loads(command("--report", str(run), "--json"))
 assert report["summary"]["unresolved"] == 1
+assert report["unresolved_reasons"] == {"single_assessment": 0, "disputed": 0, "open": 1}
+assert report["findings"][0]["unresolved_reason"] == "open"
 assert report["structured_turns"]["ok"] == 2
 assert "L1" in (run / "review.md").read_text()
+assert "Why unresolved: both agents assessed this claim" in (run / "review.md").read_text()
+assert "(1 unresolved: 0 single_assessment, 0 disputed, 1 open)" in first_output
+printed = [line for line in first_output.splitlines() if line.startswith("[duet] continue unresolved findings: ")]
+assert len(printed) == 1
+printed_argv = shlex.split(printed[0].split(": ", 1)[1])
+assert printed_argv[:3] == ["duet", "--continue", str(run.resolve())] and printed_argv[3:] == ["--resolve", "L1"]
 before = (run / "state.json").read_bytes()
 continued_info = root / "continued.json"
-command("--continue", str(run), "--resolve", "L1", "--dry-run", "--recap",
+command(*printed_argv[1:], "--dry-run", "--recap",
         "--run-info-file", str(continued_info), "--runs-dir", str(root / "continued"))
 continued = pathlib.Path(json.loads(continued_info.read_text())["run_dir"])
 state = json.loads((continued / "state.json").read_text())

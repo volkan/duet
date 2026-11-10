@@ -7066,6 +7066,8 @@ _FINDING_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 _FINDING_BLOCK_MAX_BYTES = 64 * 1024
 _FINDING_EVENT_LIMIT = 1000
 _FINDING_DISPOSITIONS = frozenset({"supported", "refuted", "unresolved"})
+_FINDING_UNRESOLVED_REASONS = ("single_assessment", "disputed", "open")
+_FINDING_CONTINUE_ID_LIMIT = 5
 
 
 def _finding_text(value: object, *, empty: bool = False) -> Optional[str]:
@@ -7267,6 +7269,14 @@ def _finding_collect_history(state: dict, events: list[dict]) -> tuple[dict, lis
     return coverage, checks, truncated
 
 
+def _finding_unresolved_reason(assessments: list[dict]) -> str:
+    if len(assessments) < 2:
+        return "single_assessment"
+    if {event["disposition"] for event in assessments} == {"supported", "refuted"}:
+        return "disputed"
+    return "open"
+
+
 def _finding_current(events: list[dict]) -> list[dict]:
     """Keep claim identity and latest assessment per slot in arrival order."""
     findings: dict[str, dict] = {}
@@ -7289,6 +7299,8 @@ def _finding_current(events: list[dict]) -> list[dict]:
                    if not current["assessments"].get(slot, {}).get("evidence")]
         result.append({"id": current["id"], "claim": current["claim"],
                        "disposition": disposition, "assessment_basis": "agent_assessment",
+                       "unresolved_reason": _finding_unresolved_reason(assessments)
+                       if disposition == "unresolved" else None,
                        "assessments": assessments, "missing_evidence_slots": missing,
                        "last_open_objection": objections[-1]
                        if disposition == "unresolved" and objections else None})
@@ -7329,14 +7341,18 @@ def build_finding_report(state: dict) -> dict:
     coverage, checks, truncated = _finding_collect_history(state, events)
     findings = _finding_current(events)
     summary = {value: 0 for value in ("supported", "refuted", "unresolved")}
+    unresolved_reasons = dict.fromkeys(_FINDING_UNRESOLVED_REASONS, 0)
     for finding in findings:
         summary[finding["disposition"]] += 1
+        if finding["unresolved_reason"] is not None:
+            unresolved_reasons[finding["unresolved_reason"]] += 1
     return {"schema_version": 1, "kind": "duet.finding.report",
             "enabled": state.get("finding_reports") is True,
             "available": bool(events) or coverage["ok"] > 0,
             "phase": _finding_text(state.get("phase")),
             "finished_reason": _finding_text(state.get("finished_reason")),
             "events": events, "findings": findings, "summary": summary,
+            "unresolved_reasons": unresolved_reasons,
             "structured_turns": coverage, "executed_checks": checks,
             "execution_limits": _finding_execution_limits(state),
             "truncated": truncated or len(baseline) > _FINDING_EVENT_LIMIT}
@@ -7350,10 +7366,37 @@ def _finding_code(value: object) -> str:
     return f"{fence}text\n{text}\n{fence}"
 
 
-def _render_finding(finding: dict) -> str:
+def _finding_continue_command(run_dir: Optional[pathlib.Path], ids: list[str],
+                              *, turns: Optional[int] = None) -> str:
+    target = shlex.quote(str(run_dir)) if run_dir is not None else "<run>"
+    words = ["duet", "--continue", target]
+    for identity in ids:
+        words.extend(["--resolve", shlex.quote(identity)])
+    if turns is not None:
+        words.extend(["--turns", str(turns)])
+    return " ".join(words)
+
+
+def _finding_unresolved_sentence(finding: dict) -> str:
+    reason = finding["unresolved_reason"]
+    if reason == "single_assessment":
+        assessed = finding["assessments"][0]["slot"]
+        other = "partner" if assessed == "lead" else "lead"
+        return f"Why unresolved: only the {assessed} assessed this claim. The {other} has not."
+    if reason == "disputed":
+        return ("Why unresolved: the lead and the partner disagree. "
+                "One assessed the claim as supported and the other as refuted.")
+    return ("Why unresolved: both agents assessed this claim, "
+            "and at least one still marks it unresolved.")
+
+
+def _render_finding(finding: dict, run_dir: Optional[pathlib.Path] = None,
+                    can_continue: bool = True) -> str:
     # Inline code keeps IDs such as www.example.com or a._b_ from rendering as a link or emphasis.
     parts = [f"## `{finding['id']}` — {finding['disposition']} (agent assessment)",
              _finding_code(finding["claim"])]
+    if finding["disposition"] == "unresolved":
+        parts.append(_finding_unresolved_sentence(finding))
     for event in finding["assessments"]:
         origin = "inherited" if event["inherited"] else "current run"
         parts.append(f"### {event['slot']} — {event['disposition']} "
@@ -7371,12 +7414,15 @@ def _render_finding(finding: dict) -> str:
         parts.append("Last open objection:")
         objection = finding["last_open_objection"]
         parts.append(_finding_code(objection) if objection else "No explicit objection recorded; agreement is incomplete.")
-        parts.extend(["Bounded continuation example:", _finding_code(
-            f"duet --continue <run> --resolve {finding['id']} --turns 2")])
+        if can_continue:
+            parts.extend(["Bounded continuation example:", _finding_code(
+                _finding_continue_command(run_dir, [finding["id"]], turns=2))])
+        else:
+            parts.append("Continuation is unavailable: the finding history is incomplete.")
     return "\n\n".join(parts)
 
 
-def render_finding_report(report: dict) -> str:
+def render_finding_report(report: dict, run_dir: Optional[pathlib.Path] = None) -> str:
     """Render a build_finding_report result as an inert local Markdown report."""
     parts = ["# Finding report",
              "Local report: this file may contain private code, paths, and review content. "
@@ -7391,6 +7437,13 @@ def render_finding_report(report: dict) -> str:
     counts = report["summary"]
     parts.append(f"Agent assessment summary: {counts['supported']} supported, "
                  f"{counts['refuted']} refuted, {counts['unresolved']} unresolved.")
+    if counts["unresolved"]:
+        reasons = report["unresolved_reasons"]
+        parts.append(
+            "Unresolved findings by reason: "
+            f"{reasons['single_assessment']} single_assessment (only one agent assessed the claim), "
+            f"{reasons['disputed']} disputed (one agent supported it and the other refuted it), "
+            f"{reasons['open']} open (both agents assessed it and at least one still marks it unresolved).")
     coverage = report["structured_turns"]
     parts.append(f"Structured turns: {coverage['ok']} valid, {coverage['missing']} missing, "
                  f"{coverage['malformed']} malformed; {coverage['failed']} failed calls ignored.")
@@ -7401,7 +7454,8 @@ def render_finding_report(report: dict) -> str:
         parts.append(f"Execution limits: `{limit['agent']}`{slot} was denied "
                      f"{limit['denied_tool_calls']} tool call(s). Checks that "
                      "needed them did not run.")
-    parts.extend(_render_finding(finding) for finding in report["findings"])
+    parts.extend(_render_finding(finding, run_dir, not report["truncated"])
+                 for finding in report["findings"])
     parts.extend(["## Executed harness checks",
                   "These recorded run checks are separate from agent-supplied evidence. "
                   "They do not establish the correctness of individual findings."])
@@ -8630,7 +8684,8 @@ def _persist_finding_report(state: dict, state_path: pathlib.Path) -> None:
         return
     try:
         report = build_finding_report(state)
-        write_text_atomic(state_path.parent / "review.md", render_finding_report(report))
+        write_text_atomic(state_path.parent / "review.md",
+                          render_finding_report(report, state_path.parent.resolve()))
     except (OSError, ValueError, TypeError, RuntimeError):
         key = str(state_path)
         if key not in _FINDING_REPORT_WARNED:
@@ -8639,12 +8694,30 @@ def _persist_finding_report(state: dict, state_path: pathlib.Path) -> None:
                   "from local state.", file=sys.stderr)
 
 
+def _finding_announcement(report: dict, path: pathlib.Path) -> list[str]:
+    unresolved = [item["id"] for item in report["findings"]
+                  if item["disposition"] == "unresolved"]
+    detail = ""
+    if unresolved:
+        reasons = report["unresolved_reasons"]
+        detail = ": " + ", ".join(f"{reasons[name]} {name}" for name in _FINDING_UNRESOLVED_REASONS)
+    lines = [f"[duet] finding report: {path} ({len(unresolved)} unresolved{detail})"]
+    if unresolved and not report["truncated"]:
+        listed = unresolved[:_FINDING_CONTINUE_ID_LIMIT]
+        run_dir = path.parent.resolve()
+        lines.append("[duet] continue unresolved findings: "
+                     + _finding_continue_command(run_dir, listed))
+        if len(unresolved) > len(listed):
+            lines.append(f"[duet] {len(unresolved) - len(listed)} more unresolved findings "
+                         f"are not in this command; see {path}")
+    return lines
+
+
 def _announce_finding_report(state: dict) -> None:
     if state.get("finding_reports") is True:
         path = pathlib.Path(state["transcript_path"]).parent / "review.md"
-        report = build_finding_report(state)
-        unresolved = sum(item["disposition"] == "unresolved" for item in report["findings"])
-        print(f"[duet] finding report: {path} ({unresolved} unresolved)")
+        for line in _finding_announcement(build_finding_report(state), path):
+            print(line)
 
 
 def _apply_finding_options(cfg: DuetConfig, args: argparse.Namespace,
@@ -8860,7 +8933,7 @@ def _maybe_handle_findings(args: argparse.Namespace,
         if report:
             result = build_finding_report(state)
             print(json.dumps(result, sort_keys=True, allow_nan=False) if args.json_output
-                  else render_finding_report(result), end="\n" if args.json_output else "")
+                  else render_finding_report(result, run_dir), end="\n" if args.json_output else "")
         else:
             print("[duet] feedback " + _save_feedback(run_dir, state, args.usefulness, args.decision))
     except (OSError, ValueError, TypeError, RuntimeError) as exc:

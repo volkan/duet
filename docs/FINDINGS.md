@@ -49,6 +49,14 @@ The report includes:
   turn provenance. Missing cited evidence remains explicit.
 - A disposition of `supported` or `refuted` only when both slots agree on it;
   otherwise `unresolved`, with the last open objection when supplied.
+- For each unresolved finding, the reason, and the count per reason near the top
+  of the report. The three reasons are:
+  - `single_assessment`: only one slot assessed the claim. The other agent did
+    not cross-check it.
+  - `disputed`: both slots assessed it, and their latest dispositions are
+    `supported` and `refuted`.
+  - `open`: both slots assessed it, and at least one latest disposition is
+    `unresolved`.
 - The actual run phase and stop reason, even when findings remain unresolved.
 - Executed harness checks from recorded `verify` results, separate from
   agent-supplied evidence. A passing run check does not verify every claim.
@@ -66,10 +74,15 @@ visible. Human acceptance is recorded separately through feedback.
 
 `--report --json` emits schema 1, `kind: "duet.finding.report"`. Its `findings`
 array contains each ID, claim, disposition, latest `assessments`,
-`missing_evidence_slots`, and `last_open_objection`. `events` preserves the
-validated update sequence; `structured_turns`, `executed_checks`, `summary`,
-`available`, and `truncated` explain coverage and limits. `execution_limits`
-lists `agent`, `slot`, and `denied_tool_calls` for each agent with denials.
+`missing_evidence_slots`, `last_open_objection`, and `unresolved_reason`. The
+reason is `single_assessment`, `disputed`, or `open` for an unresolved finding
+and `null` for a `supported` or `refuted` finding. `unresolved_reasons` counts
+the findings per reason; its keys are always present, with a count of `0` when
+none applies. The reason follows the same latest assessments that decide the
+disposition. `events` preserves the validated update sequence;
+`structured_turns`, `executed_checks`, `summary`, `available`, and `truncated`
+explain coverage and limits. `execution_limits` lists `agent`, `slot`, and
+`denied_tool_calls` for each agent with denials.
 
 These files contain private claim text, code references, paths, and commands.
 They stay in the raw run directory and are never copied into central metrics.
@@ -84,6 +97,29 @@ unchanged.
 duet --continue RUN_DIR_OR_ID --resolve L1
 duet --continue RUN_DIR_OR_ID --resolve L1 --resolve P2 --turns 4
 ```
+
+Both commands run as written. When a run ends with unresolved findings, Duet
+prints the real run directory, shell-quoted, with the counts per reason:
+
+```text
+[duet] finding report: /path/to/run/review.md (3 unresolved: 2 single_assessment, 1 disputed, 0 open)
+[duet] continue unresolved findings: duet --continue /path/to/run --resolve L1 --resolve L2 --resolve L3
+```
+
+The command lists at most five IDs, in report order. When more are unresolved,
+a third line gives the number of IDs left out and points to the report. Duet
+prints no command when no finding is unresolved or when the finding history is
+incomplete, because a continuation cannot start from an incomplete ledger. The
+per-finding example in `review.md` uses the same real directory.
+`duet --report` fills in the directory that it reads, so it stays correct after
+you move or copy a run. A `review.md` file written during a run keeps the
+directory from that time; regenerate it with `duet --report` after a move.
+Without a known directory, the example keeps the `<run>` placeholder.
+
+The printed command does not add `--trust-state`. If the saved run holds a
+verify command, agent `extra_args`, or settings that widen authority,
+`--continue` refuses to replay them and names the option. Inspect `state.json`
+before you add it.
 
 Only IDs currently marked unresolved can be selected. A focused continuation
 defaults to two turns for a response and confirmation; an explicit `--turns`

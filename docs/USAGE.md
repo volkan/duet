@@ -793,6 +793,15 @@ When a turn recorded denied tool calls, `review.md` names the agent and its
 total in an "Execution limits" line. The `review` recipe kickoff appears there
 as `review-kickoff`.
 
+Each unresolved finding carries a reason: `single_assessment` (only one agent
+assessed it), `disputed` (one supported it and the other refuted it), or `open`
+(both assessed it and at least one still marks it unresolved). The report and
+`--report --json` show the reason and the count per reason. When a run ends
+with unresolved findings, the `[duet] finding report:` line shows these counts
+and a second line prints a `duet --continue RUN_DIR --resolve ID ...` command
+with the real, shell-quoted run directory and at most five IDs. See
+[FINDINGS.md](FINDINGS.md) for the schema and limits.
+
 `duet --continue RUN --resolve L1` preserves inherited IDs and focuses a new,
 two-turn run on an unresolved finding. The original run and stop reason remain
 unchanged; ordinary convergence, timeout, and force controls still apply.
