@@ -137,17 +137,34 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertNotIn("{SENTINEL}", prompt)
         self.assertIn("duet-findings", prompt)
         self.assertIn('"id":"L1"', prompt)
+        self.assertIn("1 to 32 ASCII characters", prompt)
+        self.assertIn("letters, digits, '.', '_', or '-'", prompt)
+        self.assertIn("starts with a letter or digit", prompt)
+        self.assertIn("reuse that exact ID, including its case", prompt)
+        self.assertIn("Never copy a label that is not a valid ID", prompt)
 
     def test_successful_turns_persist_updates_and_rebuild_local_report(self) -> None:
         state = self._run([_reply("supported"), _reply("supported")])
         run = pathlib.Path(state["transcript_path"]).parent
         saved = json.loads((run / "state.json").read_text(encoding="utf-8"))
         self.assertEqual([entry["finding_updates"]["status"] for entry in saved["history"]], ["ok", "ok"])
-        self.assertIn("L1 — supported", (run / "review.md").read_text(encoding="utf-8"))
+        self.assertIn("`L1` — supported", (run / "review.md").read_text(encoding="utf-8"))
         (run / "review.md").unlink()
         duet._write_run_state(run / "state.json", saved)
         self.assertEqual((run / "review.md").read_text(encoding="utf-8"),
                          duet.render_finding_report(duet.build_finding_report(saved)))
+
+    def test_caller_defined_ids_differing_by_case_stay_separate_through_a_run(self) -> None:
+        def reply(identity: str) -> str:
+            return "```duet-findings\n" + json.dumps(
+                {"findings": [_assessment(identity=identity)]}) + "\n```"
+        state = self._run([reply("F1"), reply("f1")])
+        stored = [entry["finding_updates"]["items"][0]["id"] for entry in state["history"]]
+        self.assertEqual(stored, ["F1", "f1"])
+        run = pathlib.Path(state["transcript_path"]).parent
+        report = (run / "review.md").read_text(encoding="utf-8")
+        self.assertIn("## `F1` — ", report)
+        self.assertIn("## `f1` — ", report)
 
     def test_failed_reply_cannot_publish_structured_claims_from_error_text(self) -> None:
         state = self._run([duet.AgentRunError("agent_error", _reply("supported"))])
@@ -173,7 +190,7 @@ class TestFindingWorkflow(unittest.TestCase):
             self.assertFalse((run / "review.md").exists())
             code, out, err = self._cli("--report", str(run))
             self.assertEqual(code, 0, err)
-            self.assertIn("L1 — supported", out)
+            self.assertIn("`L1` — supported", out)
             self.assertFalse((run / "review.md").exists())
 
     def test_forced_success_and_failure_follow_same_update_contract(self) -> None:
@@ -234,6 +251,16 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertEqual([event["inherited"] for event in report["events"]], [True, True, False, False])
         self.assertEqual([finding["id"] for finding in report["findings"]], ["L1"])
         self.assertEqual(report["findings"][0]["disposition"], "refuted")
+
+    def test_resolve_selects_caller_defined_id(self) -> None:
+        history = [{"turn": turn, "agent": agent, "finding_updates": {
+            "status": "ok", "items": [_assessment(identity="P1-1", disposition=disposition)]}}
+            for turn, agent, disposition in ((1, "lead", "supported"), (2, "partner", "unresolved"))]
+        run = self._saved_run("caller-id", history=history, turns_used=2)
+        cfg = self._continue(run, "--resolve", "P1-1")
+        self.assertEqual(cfg.resolve_findings, ["P1-1"])
+        self.assertEqual([event["id"] for event in cfg.finding_baseline], ["P1-1", "P1-1"])
+        self.assertIn("P1-1", cfg.kickoff)
 
     def test_resolve_rejects_unknown_resolved_ids_and_short_budget(self) -> None:
         open_run = self._saved_run("open", history=self._history())

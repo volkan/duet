@@ -6230,7 +6230,7 @@ _RUN_ID_RE = re.compile(r"^\d{8}-\d{6}(?:-\d+)?$")
 
 # ---------- structured finding reports ----------
 
-_FINDING_ID_RE = re.compile(r"\A[LP][1-9][0-9]{0,3}\Z")
+_FINDING_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 _FINDING_BLOCK_MAX_BYTES = 64 * 1024
 _FINDING_EVENT_LIMIT = 1000
 _FINDING_DISPOSITIONS = frozenset({"supported", "refuted", "unresolved"})
@@ -6497,7 +6497,8 @@ def _finding_code(value: object) -> str:
 
 
 def _render_finding(finding: dict) -> str:
-    parts = [f"## {finding['id']} — {finding['disposition']} (agent assessment)",
+    # Inline code keeps IDs such as www.example.com or a._b_ from rendering as a link or emphasis.
+    parts = [f"## `{finding['id']}` — {finding['disposition']} (agent assessment)",
              _finding_code(finding["claim"])]
     for event in finding["assessments"]:
         origin = "inherited" if event["inherited"] else "current run"
@@ -7721,8 +7722,14 @@ def _finding_prompt_addendum(agent: Agent, cfg: DuetConfig) -> str:
         '"disposition":"supported|refuted|unresolved","evidence":["file:line or '
         'concrete check and result"],"objection":"remaining concern or null"}. '
         "Use actual enum values, not the pipe-separated alternatives. Preserve IDs "
-        "from the prior conversation; allocate new IDs with your prefix " + prefix +
-        " and an unused positive integer. Reassess disputed findings explicitly. "
+        "from the prior conversation. A valid ID has 1 to 32 ASCII characters: it "
+        "starts with a letter or digit, then uses letters, digits, '.', '_', or '-'. "
+        "When the task, the kickoff, or the other agent already labels a claim with a "
+        "valid ID, reuse that exact ID, including its case. Otherwise allocate a new "
+        "ID with your prefix " + prefix + " and an unused positive integer. Never "
+        "copy a label that is not a valid ID, such as '#1' or 'Finding 3': allocate "
+        "a new ID and name that label in the claim. Reassess disputed findings "
+        "explicitly. "
         "Use unresolved when evidence is missing. Cite only evidence you inspected; "
         "never invent executed checks or human acceptance. An empty findings array "
         "means no finding updates, not proof that the review is correct. Keep recap "

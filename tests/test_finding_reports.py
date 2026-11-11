@@ -47,7 +47,7 @@ class TestFindingParser(unittest.TestCase):
     def test_duplicate_blocks_unclosed_json_and_duplicate_ids_reject_atomically(self):
         for reply in (block([]) + "\n" + block([]), "```duet-findings\n{}",
                       "```duet-findings\nnot JSON\n```", block([item(), item()]),
-                      block([item(), item("bad")])):
+                      block([item(), item("bad id")])):
             with self.subTest(reply=reply):
                 self.assertEqual(duet.parse_finding_updates(reply), {"status": "malformed", "items": []})
 
@@ -56,8 +56,18 @@ class TestFindingParser(unittest.TestCase):
         self.assertEqual(duet.parse_finding_updates(reply)["status"], "missing")
         self.assertEqual(duet.parse_finding_updates(reply + "\n" + block([]))["status"], "ok")
 
+    def test_caller_defined_ids_are_accepted_and_bad_ids_rejected(self):
+        valid = ["F1", "C1", "P1-1", "a.b_c-d", "9", "L" + "x" * 31]
+        parsed = duet.parse_finding_updates(block([item(identity) for identity in valid]))
+        self.assertEqual([entry["id"] for entry in parsed["items"]], valid)
+        invalid = ["", "F 1", "L" + "x" * 32, "-F1", ".F1", "\u00c9\u00c91", "F1\n",
+                   "_F1", "#1", "Finding 3"]
+        for identity in invalid:
+            with self.subTest(identity=identity):
+                self.assertEqual(duet.parse_finding_updates(block([item(identity)]))["status"], "malformed")
+
     def test_field_limits_and_types(self):
-        invalid = [item("L0"), item("L10000"), item("P01"), item(claim=""),
+        invalid = [item(claim=""),
                    item(claim="x" * 2001), item(disposition=[]), item(evidence="test"),
                    item(evidence=["x"] * 9), item(evidence=["x" * 2001]),
                    item(objection="x" * 2001), item(claim="\ud800")]
@@ -164,6 +174,15 @@ class TestFindingRendering(unittest.TestCase):
         self.assertIn("duet --continue <run> --resolve L1 --turns 2", rendered)
         self.assertIn("private", rendered)
         self.assertIn("not proven facts", rendered)
+
+    def test_heading_shows_id_as_inline_code(self):
+        for identity in ["L1", "bug_12", "F1._note_", "www.example.com"]:
+            with self.subTest(identity=identity):
+                report = duet.build_finding_report(state([turn(1, "reviewer", [item(identity)])]))
+                rendered = duet.render_finding_report(report)
+                self.assertIn(f"## `{identity}` \u2014 unresolved (agent assessment)\n", rendered)
+                self.assertEqual(report["findings"][0]["id"], identity)
+                self.assertIn(f"--resolve {identity} --turns 2", rendered)
 
 
 if __name__ == "__main__":
