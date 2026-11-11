@@ -60,7 +60,8 @@ class TestFindingParser(unittest.TestCase):
         valid = ["F1", "C1", "P1-1", "a.b_c-d", "9", "L" + "x" * 31]
         parsed = duet.parse_finding_updates(block([item(identity) for identity in valid]))
         self.assertEqual([entry["id"] for entry in parsed["items"]], valid)
-        invalid = ["", "F 1", "L" + "x" * 32, "-F1", ".F1", "\u00c9\u00c91", "F1\n"]
+        invalid = ["", "F 1", "L" + "x" * 32, "-F1", ".F1", "\u00c9\u00c91", "F1\n",
+                   "_F1", "#1", "Finding 3"]
         for identity in invalid:
             with self.subTest(identity=identity):
                 self.assertEqual(duet.parse_finding_updates(block([item(identity)]))["status"], "malformed")

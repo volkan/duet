@@ -137,8 +137,9 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertNotIn("{SENTINEL}", prompt)
         self.assertIn("duet-findings", prompt)
         self.assertIn('"id":"L1"', prompt)
-        self.assertIn("reuse that exact ID", prompt)
-        self.assertIn("at most 32 characters", prompt)
+        self.assertIn("starts with a letter or digit", prompt)
+        self.assertIn("reuse that exact ID, including its case", prompt)
+        self.assertIn("Never copy a label that is not a valid ID", prompt)
 
     def test_successful_turns_persist_updates_and_rebuild_local_report(self) -> None:
         state = self._run([_reply("supported"), _reply("supported")])

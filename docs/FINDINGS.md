@@ -132,7 +132,10 @@ means no updates. The block is bounded at 64 KiB and 50 unique IDs. Claims,
 objections, and each of up to eight evidence strings are limited to 2,000
 characters. An ID has 1 to 32 ASCII characters: it starts with a letter or digit,
 then uses letters, digits, `.`, `_`, or `-`. Agents use `L<n>` or `P<n>` for
-claims that they introduce. IDs are case-sensitive. Malformed blocks are
+claims that they introduce. IDs are case-sensitive. An agent reuses a valid ID
+that the task, the kickoff, or the other agent gives to a claim. When a label is
+not a valid ID, such as `#1`, the agent allocates `L<n>` or `P<n>` and names the
+label in the claim. Malformed blocks are
 rejected as a whole. Reports cap history/events at 1,000 and expose truncation
 explicitly.
 
