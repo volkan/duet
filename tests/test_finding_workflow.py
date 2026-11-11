@@ -137,6 +137,8 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertNotIn("{SENTINEL}", prompt)
         self.assertIn("duet-findings", prompt)
         self.assertIn('"id":"L1"', prompt)
+        self.assertIn("1 to 32 ASCII characters", prompt)
+        self.assertIn("letters, digits, '.', '_', or '-'", prompt)
         self.assertIn("starts with a letter or digit", prompt)
         self.assertIn("reuse that exact ID, including its case", prompt)
         self.assertIn("Never copy a label that is not a valid ID", prompt)
