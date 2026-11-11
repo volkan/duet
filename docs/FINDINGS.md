@@ -18,11 +18,11 @@ override config and continued-run settings. This setting is independent of
 central metrics; `--no-metrics` still permits local finding reports.
 
 Duet asks each agent to append one structured assessment block to its normal
-reply. A claim that the task, kickoff, or other agent already labels keeps that
-ID, such as `F1` or `P1-1`. New claims use `L1` or `P1`. Later assessments
-preserve the ID. The ID grammar is in "Structured reply contract" below. The
-initial review or kickoff supplies claims to investigate, not an independent
-vote supporting them.
+reply. A claim that the task, kickoff, or other agent already labels with a
+valid ID keeps that ID, such as `F1` or `P1-1`. New claims use `L1` or `P1`.
+Later assessments preserve the ID. The ID grammar is in "Structured reply
+contract" below. The initial review or kickoff supplies claims to investigate,
+not an independent vote supporting them.
 
 Each successful turn stores validated assessments in `state.json` and updates
 `review.md` atomically in the run directory. Failed calls cannot supply finding
@@ -65,9 +65,10 @@ validated update sequence; `structured_turns`, `executed_checks`, `summary`,
 
 These files contain private claim text, code references, paths, and commands.
 They stay in the raw run directory and are never copied into central metrics.
-Inspect them before sharing. Markdown renders supplied content as inert text. `review.md` shows each finding
-ID as inline code in its heading, so that an ID cannot render as a link or as
-emphasis. JSON and `--resolve` use the ID unchanged.
+Inspect them before sharing. Markdown renders supplied content as inert text.
+`review.md` shows each finding ID as inline code in its heading, so that an ID
+cannot render as a link or as emphasis. JSON and `--resolve` use the ID
+unchanged.
 
 ## Continue an unresolved finding
 
@@ -128,18 +129,17 @@ an acceptance rate over all users or proof that the tool saves time.
 ```
 ````
 
-Use exactly one top-level triple-backtick block labelled `duet-findings`.
-Keep LGTM rationale and the sentinel outside it. An empty `findings` array
-means no updates. The block is bounded at 64 KiB and 50 unique IDs. Claims,
-objections, and each of up to eight evidence strings are limited to 2,000
-characters. An ID has 1 to 32 ASCII characters: it starts with a letter or digit,
-then uses letters, digits, `.`, `_`, or `-`. Agents use `L<n>` or `P<n>` for
-claims that they introduce. IDs are case-sensitive. An agent reuses a valid ID
-that the task, the kickoff, or the other agent gives to a claim. When a label is
-not a valid ID, such as `#1`, the agent allocates `L<n>` or `P<n>` and names the
-label in the claim. Malformed blocks are
-rejected as a whole. Reports cap history/events at 1,000 and expose truncation
-explicitly.
+Use exactly one top-level triple-backtick block labelled `duet-findings`. Keep
+LGTM rationale and the sentinel outside it. An empty `findings` array means no
+updates. The block is bounded at 64 KiB and 50 unique IDs. Claims, objections,
+and each of up to eight evidence strings are limited to 2,000 characters. An ID
+has 1 to 32 ASCII characters: it starts with a letter or digit, then uses
+letters, digits, `.`, `_`, or `-`. Agents use `L<n>` or `P<n>` for claims that
+they introduce. IDs are case-sensitive. An agent reuses a valid ID that the
+task, the kickoff, or the other agent gives to a claim. When a label is not a
+valid ID, such as `#1`, the agent allocates `L<n>` or `P<n>` and names the label
+in the claim. Malformed blocks are rejected as a whole. Reports cap
+history/events at 1,000 and expose truncation explicitly.
 
 The [review evidence fixture](../examples/review-evidence/README.md) supplies
 fresh toy code and repeatable checks for a defect, a refuted comment, and an
