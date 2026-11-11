@@ -65,7 +65,9 @@ validated update sequence; `structured_turns`, `executed_checks`, `summary`,
 
 These files contain private claim text, code references, paths, and commands.
 They stay in the raw run directory and are never copied into central metrics.
-Inspect them before sharing. Markdown renders supplied content as inert text.
+Inspect them before sharing. Markdown renders supplied content as inert text. `review.md` shows each finding
+ID as inline code in its heading, so that an ID cannot render as a link or as
+emphasis. JSON and `--resolve` use the ID unchanged.
 
 ## Continue an unresolved finding
 

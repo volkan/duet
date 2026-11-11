@@ -146,7 +146,7 @@ class TestFindingWorkflow(unittest.TestCase):
         run = pathlib.Path(state["transcript_path"]).parent
         saved = json.loads((run / "state.json").read_text(encoding="utf-8"))
         self.assertEqual([entry["finding_updates"]["status"] for entry in saved["history"]], ["ok", "ok"])
-        self.assertIn("L1 — supported", (run / "review.md").read_text(encoding="utf-8"))
+        self.assertIn("`L1` — supported", (run / "review.md").read_text(encoding="utf-8"))
         (run / "review.md").unlink()
         duet._write_run_state(run / "state.json", saved)
         self.assertEqual((run / "review.md").read_text(encoding="utf-8"),
@@ -161,8 +161,8 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertEqual(stored, ["F1", "f1"])
         run = pathlib.Path(state["transcript_path"]).parent
         report = (run / "review.md").read_text(encoding="utf-8")
-        self.assertIn("## F1 — ", report)
-        self.assertIn("## f1 — ", report)
+        self.assertIn("## `F1` — ", report)
+        self.assertIn("## `f1` — ", report)
 
     def test_failed_reply_cannot_publish_structured_claims_from_error_text(self) -> None:
         state = self._run([duet.AgentRunError("agent_error", _reply("supported"))])
@@ -188,7 +188,7 @@ class TestFindingWorkflow(unittest.TestCase):
             self.assertFalse((run / "review.md").exists())
             code, out, err = self._cli("--report", str(run))
             self.assertEqual(code, 0, err)
-            self.assertIn("L1 — supported", out)
+            self.assertIn("`L1` — supported", out)
             self.assertFalse((run / "review.md").exists())
 
     def test_forced_success_and_failure_follow_same_update_contract(self) -> None:

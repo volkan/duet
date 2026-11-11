@@ -6497,7 +6497,8 @@ def _finding_code(value: object) -> str:
 
 
 def _render_finding(finding: dict) -> str:
-    parts = [f"## {finding['id']} — {finding['disposition']} (agent assessment)",
+    # Inline code keeps IDs such as www.example.com or a._b_ from rendering as a link or emphasis.
+    parts = [f"## `{finding['id']}` — {finding['disposition']} (agent assessment)",
              _finding_code(finding["claim"])]
     for event in finding["assessments"]:
         origin = "inherited" if event["inherited"] else "current run"

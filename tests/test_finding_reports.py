@@ -175,6 +175,15 @@ class TestFindingRendering(unittest.TestCase):
         self.assertIn("private", rendered)
         self.assertIn("not proven facts", rendered)
 
+    def test_heading_shows_id_as_inline_code(self):
+        for identity in ["L1", "bug_12", "F1._note_", "www.example.com"]:
+            with self.subTest(identity=identity):
+                report = duet.build_finding_report(state([turn(1, "reviewer", [item(identity)])]))
+                rendered = duet.render_finding_report(report)
+                self.assertIn(f"## `{identity}` \u2014 unresolved (agent assessment)\n", rendered)
+                self.assertEqual(report["findings"][0]["id"], identity)
+                self.assertIn(f"--resolve {identity} --turns 2", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
