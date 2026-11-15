@@ -258,6 +258,12 @@ coder roles, custom API providers, `extra_args`,
 untracked sessions, and model/effort changes on resume. Complete the real
 affected-backend loop before reporting ZCode integration verified.
 
+Supported reasoning levels are a property of the model and its provider
+catalog, not of Duet or ZCode. When the validation error names an unsupported
+level, it also lists the supported levels. Relay those levels and propose the
+closest one on Duet's scale, as for OpenCode peers; launch with a changed
+level only after the user picks one.
+
 Duet checks each ZCode peer before the first agent call. For a peer in a
 worktree, the MCP check runs after the configured kickoff command, which can
 call a model. A failed check ends the run with `setup_error`. Report the full `[duet] ERROR:` message to the
