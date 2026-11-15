@@ -154,6 +154,35 @@ requires an explicit model to receive effort through `-m provider/model#<level>`
 Without a model, v2 receives only the prompt prefix and Duet prints a note.
 High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
 Report this limit without choosing another model or changing the requested effort.
+
+For an explicit v2 peer model, inspect its resolved variants before launch.
+Run discovery from the peer's effective cwd with the run's configuration and environment:
+
+```sh
+opencode models --standalone
+opencode api --standalone model.list --param 'location[directory]=<absolute-peer-cwd>'
+```
+
+Use the model list for discovery. Forward an exact requested ID even when discovery omits it.
+In the API response's `data` array, match `providerID` and `id`, then read `variants[].id`.
+Resolved variants include provider handling, budget-derived levels, and configured overrides.
+If the installed CLI lacks this API command, report that discovery is unavailable.
+OpenCode v2.3.0 [caches its catalog in the database](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/core/src/models-dev.ts#L531-L575).
+Thus, `cache/models.json` can be a stale legacy file.
+The [models.dev API](https://models.dev/api.json) supplies supplementary metadata for the exact provider and model.
+Its `reasoning_options` array can contain an object with `type: "effort"` and a `values` list.
+For example, `zai-coding-plan/glm-5.3` lists `low`, `high`, and `max`.
+Missing catalog values do not prove that resolved variants are unavailable.
+Report unknown support when discovery is inconclusive. Preserve the requested selection.
+Ask the user before launching without the requested level. These discovery commands are for v2 only.
+
+If resolved variants exclude the level, or a turn fails with `Variant unavailable`, report the resolved variant IDs.
+For recommendations, keep only variants on Duet's scale (`minimal < low < medium < high < xhigh < max`).
+Propose the smallest supported level at or above the request, else the largest below it.
+If none remain, report that Duet's effort option cannot select those variants.
+Do not map `none`, `thinking`, `default`, or null to a Duet level.
+Launch with a changed level only after the user picks it.
+
 For nested checkout paths and clone cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
 ## Upgrade
