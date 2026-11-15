@@ -291,25 +291,36 @@ only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
 nudges; the other levels have no prompt nudge.
 Report this effort limit without inventing a model or changing the requested effort.
 
-When the user requests an effort level for an OpenCode peer, check the model's
-supported values before launch. Confirm the ID exists with `opencode models`,
-then read the model's effort values from the models.dev catalog OpenCode
-resolves variants from: the `models.json` file inside the cache directory that
-`opencode debug paths` reports under `cache`, else `https://models.dev/api.json`.
-In the model entry's `reasoning_options`, the `effort` entry's `values` list is
-authoritative, for example `low`, `high`, `max` on GLM models. If the model has
-no `reasoning_options`, no `effort` entry, or that entry has no `values`, the
-catalog gives no effort values; report that instead of guessing values, and
-ask the user before launching without the requested level.
+When the user requests effort for an explicit OpenCode v2 peer model, inspect
+its resolved variants before launch. Run `opencode models --standalone` from
+the peer's effective cwd with the same configuration and environment as the run.
+Use the list for discovery; a missing ID does not override the exact-ID rule above.
+Read the resolved model metadata with:
 
-If the requested level is not in `values`, or a turn fails with
+```sh
+opencode api --standalone model.list --param 'location[directory]=<absolute-peer-cwd>'
+```
+
+In the response's `data` array, match `providerID` and `id`, then read `variants[].id`.
+These variants include provider handling, budget-derived levels, and configured overrides.
+If the installed CLI lacks this API command, report that discovery is unavailable.
+OpenCode v2.3.0 caches its catalog in the database; `cache/models.json` can be a stale legacy file.
+Use `https://models.dev/api.json` only as supplementary metadata for the exact provider and model.
+Its `reasoning_options` is an array; select the object with `type: "effort"` and read `values`.
+For example, `zai-coding-plan/glm-5.3` lists `low`, `high`, and `max`.
+Missing catalog effort values do not prove that a resolved variant is unavailable.
+If discovery cannot establish support, report it as unknown and preserve the requested selection.
+Ask the user before launching without the requested level. Do not apply v2 discovery commands to v1.
+
+If resolved variants exclude the requested level, or a turn fails with
 `Variant unavailable for <provider/model>: <level>`, stop and report the
-supported values. Propose the closest level on Duet's scale
-(`minimal < low < medium < high < xhigh < max`): nearest at or above the
-request, else nearest below. Launch with a changed level only after the user
-picks one. Duet reports that failure as `agent_error` even when the OpenCode
-process exits 0; check the `[duet] AGENT ERROR` block in the transcript, not
-the exit code.
+resolved variant IDs. For recommendations, keep only variants on Duet's scale
+(`minimal < low < medium < high < xhigh < max`). Propose the smallest supported
+level at or above the request, else the largest below it. If none remain, report
+that Duet cannot select those variants through its effort option. Do not map
+`none`, `thinking`, `default`, or null to a Duet level. Launch with a changed level
+only after the user picks one. Duet reports that failure as `agent_error` even when
+OpenCode exits 0; check the `[duet] AGENT ERROR` block in the transcript, not the exit code.
 
 For an unclear friendly name or version, verify the selected backend's current
 IDs before you choose one. Aliases such as `opus` and `sonnet` can move. Use
