@@ -291,6 +291,26 @@ only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
 nudges; the other levels have no prompt nudge.
 Report this effort limit without inventing a model or changing the requested effort.
 
+When the user requests an effort level for an OpenCode peer, check the model's
+supported values before launch. Confirm the ID exists with `opencode models`,
+then read the model's effort values from the models.dev catalog OpenCode
+resolves variants from: the `models.json` file inside the cache directory that
+`opencode debug paths` reports under `cache`, else `https://models.dev/api.json`.
+In the model entry's `reasoning_options`, the `effort` entry's `values` list is
+authoritative, for example `low`, `high`, `max` on GLM models. If the model has
+no `reasoning_options`, no `effort` entry, or that entry has no `values`, the
+catalog gives no effort values; report that instead of guessing values, and
+ask the user before launching without the requested level.
+
+If the requested level is not in `values`, or a turn fails with
+`Variant unavailable for <provider/model>: <level>`, stop and report the
+supported values. Propose the closest level on Duet's scale
+(`minimal < low < medium < high < xhigh < max`): nearest at or above the
+request, else nearest below. Launch with a changed level only after the user
+picks one. Duet reports that failure as `agent_error` even when the OpenCode
+process exits 0; check the `[duet] AGENT ERROR` block in the transcript, not
+the exit code.
+
 For an unclear friendly name or version, verify the selected backend's current
 IDs before you choose one. Aliases such as `opus` and `sonnet` can move. Use
 `claude-opus-5-5` when the user requests that explicit version. The request

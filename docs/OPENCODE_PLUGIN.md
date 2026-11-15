@@ -154,6 +154,22 @@ requires an explicit model to receive effort through `-m provider/model#<level>`
 Without a model, v2 receives only the prompt prefix and Duet prints a note.
 High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
 Report this limit without choosing another model or changing the requested effort.
+
+Before launch, check that the requested model supports the requested level.
+Confirm the ID with `opencode models`. Then read the model's
+`reasoning_options` from the models.dev catalog. Use the `models.json` file
+inside the cache directory that `opencode debug paths` reports; fetch
+`https://models.dev/api.json` when the cache lacks the model. The `effort`
+entry lists supported values, for example `low`, `high`, `max` for GLM
+models. A model with no usable `effort` values has unknown effort support;
+report that and ask the user before launching without the requested level.
+
+If the level is unsupported, or a turn fails with `Variant unavailable`,
+report the supported values. Propose the closest level on Duet's scale
+(`minimal < low < medium < high < xhigh < max`); prefer the nearest at or
+above the request, else the nearest below. Launch with a changed level only
+after the user picks it.
+
 For nested checkout paths and clone cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
 ## Upgrade
