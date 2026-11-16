@@ -1279,6 +1279,8 @@ class TestToolDenialStatus(unittest.TestCase):
         self.assertIn("tool_denials:    1", human.getvalue())
 
     def test_counts_above_the_bound_are_unknown_through_the_cli(self) -> None:
+        # 4,300 digits is the most json.loads accepts on Python 3.11+; the sum
+        # of two such counts exceeds the integer-to-text limit.
         huge = 9 * 10 ** 4299
         with tempfile.TemporaryDirectory() as raw:
             run = pathlib.Path(raw).resolve() / "20260719-120000"
@@ -1292,7 +1294,7 @@ class TestToolDenialStatus(unittest.TestCase):
                      "tool_denials": {"Bash": duet.TOOL_DENIAL_MAX_COUNT + 1}},
                 ],
             }), encoding="utf-8")
-            script = str(pathlib.Path(duet.__file__).resolve())
+            script = str(pathlib.Path(__file__).resolve().parent.parent / "duet.py")
             env = dict(duet.os.environ, DUET_METRICS="0", HOME=raw)
             status = subprocess.run(
                 [duet.sys.executable, script, "--status", str(run), "--json"],

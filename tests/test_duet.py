@@ -2360,8 +2360,11 @@ class TestStatusHelpers(unittest.TestCase):
     def test_tool_denial_total_accepts_only_name_to_count_maps(self) -> None:
         self.assertEqual(duet.tool_denial_total({"Bash": 2, "Read": 1}), 3)
         self.assertEqual(duet.tool_denial_total({}), 0)
+        self.assertEqual(duet.tool_denial_total({"Bash": duet.TOOL_DENIAL_MAX_COUNT}),
+                         duet.TOOL_DENIAL_MAX_COUNT)
         for value in (None, 3, "3", [1], {"Bash": True}, {"Bash": "2"},
-                      {"Bash": -1}, {"Bash": 1.0}, {1: 1}, {"Bash": 1, "Read": None}):
+                      {"Bash": -1}, {"Bash": 1.0}, {1: 1}, {"Bash": 1, "Read": None},
+                      {"Bash": duet.TOOL_DENIAL_MAX_COUNT + 1}):
             with self.subTest(value=value):
                 self.assertIsNone(duet.tool_denial_total(value))
 
