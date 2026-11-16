@@ -5773,9 +5773,23 @@ def resolve_at_text(value: Optional[str], option_name: str,
     return _check_task_size(text, parser)
 
 
+def _kickoff_stdout_detail(out: str) -> Optional[str]:
+    """Bounded failure text from kickoff stdout, never raw JSON.
+
+    A JSON envelope contributes only its string `result` (Claude's error text);
+    its other fields (session id, tool input) are not echoed.
+    """
+    try:
+        payload = json.loads(out)
+    except (ValueError, RecursionError):
+        return _stream_tail(out)
+    result = payload.get("result") if isinstance(payload, dict) else None
+    return _stream_tail(result) if isinstance(result, str) and result.strip() else None
+
+
 def _run_kickoff_shell(cmd_str: str, cwd: pathlib.Path, timeout: int,
                        run_dir: pathlib.Path, *, label: str,
-                       max_chars: int) -> str:
+                       max_chars: int, stdout_detail: bool = False) -> str:
     """Run a kickoff command after allocation and return its stdout."""
     global LIVE_PREFIX
     old_prefix = LIVE_PREFIX
@@ -5793,10 +5807,12 @@ def _run_kickoff_shell(cmd_str: str, cwd: pathlib.Path, timeout: int,
     finally:
         LIVE_PREFIX = old_prefix
     if rc != 0:
-        raise AgentRunError(
-            FINISHED_KICKOFF_ERROR,
-            f"{label} exited {rc}\nstderr:\n{err}",
-        )
+        message = f"{label} exited {rc}\nstderr:\n{err}"
+        detail = (_kickoff_stdout_detail(out)
+                  if stdout_detail and not err.strip() and out.strip() else None)
+        if detail:
+            message += f"\nstdout (tail):\n{detail}"
+        raise AgentRunError(FINISHED_KICKOFF_ERROR, message)
     if out == "":
         raise AgentRunError(
             FINISHED_KICKOFF_ERROR,
@@ -5831,9 +5847,10 @@ def _parse_review_kickoff_output(stdout: str) -> tuple[str, Optional[dict]]:
         raise fail(f"output is not valid JSON ({type(exc).__name__})") from None
     if not isinstance(payload, dict):
         raise fail("output is not a JSON object")
-    if payload.get("is_error") is True:
-        raise fail("reported is_error")
     result = payload.get("result")
+    if payload.get("is_error") is True:
+        cause = _stream_tail(result) if isinstance(result, str) else "(no result)"
+        raise fail(f"reported is_error\nresult (tail):\n{cause}")
     if not isinstance(result, str) or not result.strip():
         raise fail("result is missing or empty")
     if len(result) > TASK_MAX_CHARS:
@@ -5846,7 +5863,8 @@ def run_review_kickoff(cmd_str: str, cwd: pathlib.Path, timeout: int,
     """Run the recipe-built review kickoff; return its seed and denial counts."""
     out = _run_kickoff_shell(cmd_str, cwd, timeout, run_dir,
                              label="review kickoff",
-                             max_chars=KICKOFF_ENVELOPE_MAX_CHARS)
+                             max_chars=KICKOFF_ENVELOPE_MAX_CHARS,
+                             stdout_detail=True)
     return _parse_review_kickoff_output(out)
 
 

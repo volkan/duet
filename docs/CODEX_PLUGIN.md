@@ -137,8 +137,10 @@ duet --recipe review --run-info-file "$DUET_RUN_INFO"
 `--recipe review` expands to the current project, `.duet/runs`, recap mode,
 `claude:reviewer`, `codex:coder`, six turns, strict worktree isolation, and a
 `claude -p /review --model sonnet` kickoff. Claude loop turns use Sonnet too.
-It continues past one non-final automatic-turn timeout. Explicit flags
-override recipe values.
+It continues past one non-final automatic-turn timeout. Duet runs that kickoff
+with JSON output, requests `--permission-mode plan` for a `plan` run and
+`default` otherwise, and counts its tool denials. Explicit flags override recipe
+values.
 
 Codex-only review:
 
@@ -272,10 +274,10 @@ can inspect its failure block and worktree handoff.
 A `converged` or `converged_after_force` result means that the two agents
 agreed. It is not an independent review. When `tool_denials` is a number above
 zero, report it. Checks that needed the denied tools did not run, so dependent
-claims are unverified. The count covers successful loop and forced turns and
-the `review` recipe kickoff, but not seed extraction. `null` means that the backend did not
-report denials. Tell the user that convergence is not an independent review.
-Recommend that they review the final diff in a fresh context and run its
+claims are unverified. The count covers successful loop and forced turns and the
+`review` recipe kickoff, but not seed extraction. `null` means that the backend
+did not report denials. Tell the user that convergence is not an independent
+review. Recommend that they review the final diff in a fresh context and run its
 checks before they accept or merge the code.
 
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.

@@ -1571,11 +1571,69 @@ class TestReviewKickoffParsing(unittest.TestCase):
 
     def test_error_text_never_echoes_the_output(self) -> None:
         secret = "private-envelope-secret"
-        for out in (secret, json.dumps([secret]), _envelope(secret, is_error=True)):
+        for out in (secret, json.dumps([secret]),
+                    json.dumps({"is_error": False, "result": "", "note": secret})):
             with self.subTest(out=out[:20]):
                 with self.assertRaises(duet.AgentRunError) as raised:
                     duet._parse_review_kickoff_output(out)
                 self.assertNotIn(secret, str(raised.exception))
+
+    def test_is_error_envelope_keeps_only_the_result_text_as_the_cause(self) -> None:
+        out = _envelope(
+            "Invalid API key. Please run /login.", [_denial("Bash", "curl SECRET-TOKEN")],
+            is_error=True, note="other-field-value")
+        with self.assertRaises(duet.AgentRunError) as raised:
+            duet._parse_review_kickoff_output(out)
+        message = str(raised.exception)
+        self.assertEqual(raised.exception.finished_reason, duet.FINISHED_KICKOFF_ERROR)
+        self.assertIn("Invalid API key. Please run /login.", message)
+        for hidden in ("kickoff-session-id", "SECRET-TOKEN", "other-field-value",
+                       '"is_error"', "{"):
+            self.assertNotIn(hidden, message)
+
+    def test_is_error_cause_is_bounded(self) -> None:
+        with self.assertRaises(duet.AgentRunError) as raised:
+            duet._parse_review_kickoff_output(
+                _envelope("x" * 100000, is_error=True))
+        self.assertLess(len(str(raised.exception)),
+                        duet.AGENT_ERROR_STDOUT_TAIL_CHARS + 200)
+
+    def test_nonzero_exit_with_blank_stderr_keeps_the_stdout_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            envelope = _envelope("Invalid API key. Please run /login.",
+                                 [_denial("Bash", "curl SECRET-TOKEN")], is_error=True)
+            for out, expected in ((envelope, "Invalid API key. Please run /login."),
+                                  ("claude: command crashed\n", "claude: command crashed")):
+                with self.subTest(out=out[:20]), \
+                        mock.patch.object(duet, "_run", return_value=(1, out, "")), \
+                        self.assertRaises(duet.AgentRunError) as raised:
+                    duet.run_review_kickoff("cmd", root, 10, root)
+                message = str(raised.exception)
+                self.assertTrue(message.startswith("review kickoff exited 1\nstderr:\n"))
+                self.assertIn("stdout (tail):\n" + expected, message)
+                for hidden in ("kickoff-session-id", "SECRET-TOKEN", '"is_error"'):
+                    self.assertNotIn(hidden, message)
+
+    def test_nonzero_exit_shows_no_stdout_tail_when_stderr_has_text_or_json_has_no_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            for out, err in (("stdout text", "boom"), (json.dumps({"a": 1}), ""),
+                             (json.dumps([1]), ""), ("", "")):
+                with self.subTest(out=out, err=err), \
+                        mock.patch.object(duet, "_run", return_value=(1, out, err)), \
+                        self.assertRaises(duet.AgentRunError) as raised:
+                    duet.run_review_kickoff("cmd", root, 10, root)
+                self.assertNotIn("stdout (tail)", str(raised.exception))
+
+    def test_custom_task_from_cmd_failure_text_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            with mock.patch.object(duet, "_run", return_value=(1, "some stdout", "")), \
+                    self.assertRaises(duet.AgentRunError) as raised:
+                duet.run_task_from_cmd("cmd", root, 10, root)
+        self.assertEqual(str(raised.exception),
+                         "--task-from-cmd exited 1\nstderr:\n")
 
     def test_result_limit_applies_to_the_result_not_the_envelope(self) -> None:
         # "é" becomes a six-character é escape, so this envelope is far
@@ -1803,6 +1861,44 @@ class TestReviewKickoffRun(unittest.TestCase):
                     state_path=root / "state.json")
         self.assertEqual(state["finished_reason"], duet.FINISHED_FORCE_STOP)
         self.assertEqual(state["turns_used"], 0)
+
+
+class TestSeedExtractTurnCount(unittest.TestCase):
+    """A seed-extraction entry (--resume-claude) is not a loop or forced turn."""
+
+    def test_forced_turn_number_and_turns_used_skip_the_seed_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            transcript = root / "transcript.md"
+            transcript.write_text("", encoding="utf-8")
+            state_path = root / "state.json"
+            agents = _agents()
+            cfg = duet.DuetConfig(cwd=root, agents=agents, task="review",
+                                  runs_dir=root, metrics_enabled=False)
+            history = [
+                {"turn": 0, "kind": "seed_extract", "agent": "claude-reviewer"},
+                {"turn": 1, "agent": "codex-coder"},
+                {"turn": 2, "agent": "claude-reviewer"},
+            ]
+            labels: list = []
+
+            def fake_call_agent(agent, message, cfg_, first_turn_for_agent, *,
+                                run_dir=None, turn_label=None):
+                labels.append(turn_label)
+                agent.last_tool_denials = None
+                return "forced reply"
+
+            with mock.patch.object(duet, "call_agent", fake_call_agent), \
+                    mock.patch.object(duet.sys.stdin, "isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=["more please", ""]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                duet.ask_force(
+                    cfg, history, transcript, state_path, "last", 1,
+                    {a.name: True for a in agents}, duet.FINISHED_MAX_TURNS)
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(labels, ["03-forced"])
+        self.assertEqual(history[-1]["turn"], 3)
+        self.assertEqual(saved["turns_used"], 3)
 
 
 class TestReviewEvidenceSplit(unittest.TestCase):

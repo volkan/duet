@@ -913,7 +913,8 @@ the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 During a live turn, `active_turn.budget_seconds` repeats that budget and
 `active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
 at zero. All three fields are `null` when saved state contains a missing or
-invalid budget; status never performs arithmetic on the raw state value.
+invalid budget; status never performs arithmetic on the raw state value. `turns_used` counts
+loop and forced turns only; kickoff and seed-extraction entries are not counted.
 `last_completed_turn.finished_reason` is that turn's sanitized outcome or
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
