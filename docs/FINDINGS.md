@@ -54,7 +54,8 @@ The report includes:
   agent-supplied evidence. A passing run check does not verify every claim.
 - Execution limits, when Claude reported denied tool calls. Each line names the
   agent, its slot, and its total denied calls. Checks that needed those tools
-  did not run. The report never shows tool names or tool input.
+  did not run. Only successful loop and forced turns count, not the kickoff or
+  seed extraction. The report never shows tool names or tool input.
 
 Dispositions are agent assessments, not correctness labels. An agent can cite
 inaccurate evidence or revise a claim's wording; the original wording remains

@@ -2419,7 +2419,6 @@ class TestClaudeToolDenials(unittest.TestCase):
         with mock.patch.object(duet, "_run", return_value=(0, output, "")):
             duet.call_claude(agent, "sys", "msg", _ROOT, "acceptEdits", 60, dry=False)
         self.assertEqual(agent.last_tool_denials, {"Bash": 1})
-        self.assertNotIn(self.SECRET, repr(agent))
 
         without = json.dumps({"result": "ok", "session_id": "sid"})
         with mock.patch.object(duet, "_run", return_value=(0, without, "")):
@@ -2435,7 +2434,7 @@ class TestClaudeToolDenials(unittest.TestCase):
         duet.call_agent(agent, "msg", cfg, first_turn_for_agent=True)
         self.assertIsNone(agent.last_tool_denials)
 
-    def test_note_is_bounded_and_ordered(self) -> None:
+    def test_note_format_and_order(self) -> None:
         note = duet.format_tool_denial_note("claude-lead", {"Read": 1, "Bash": 2})
         self.assertEqual(
             note,

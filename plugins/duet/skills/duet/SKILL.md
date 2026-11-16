@@ -202,10 +202,11 @@ A `finished_reason` of `converged` or `converged_after_force` means that the
 two agents agreed. It is not an independent review. Do not tell the user that
 the code is verified because the run converged. When `tool_denials` is a
 number above zero, report that number to the user. Checks that needed the
-denied tools did not run, so dependent claims are unverified. `null` means that
-the backend did not report denials.
-Before you accept code from a run, review the final diff in a fresh context
-and run its checks.
+denied tools did not run, so dependent claims are unverified. The count covers
+only successful loop and forced turns, not the kickoff or seed extraction.
+`null` means that the backend did not report denials. Tell the user that
+convergence is not an independent review. Recommend that they review the final
+diff in a fresh context and run its checks before they accept or merge the code.
 
 Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and

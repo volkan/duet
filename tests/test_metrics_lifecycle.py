@@ -146,6 +146,44 @@ class TestMetricsLifecycle(unittest.TestCase):
         self.assertGreater(history[0]["metrics"]["delivered_output_bytes"],
                            history[0]["metrics"]["handoff_bytes"])
 
+    def test_loop_handoff_bytes_exclude_denial_note(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            cfg = self._cfg(root)
+            speaker = cfg.agents[1]
+            speaker.cwd_override = root / "worktree"
+            handoff = "\nHANDOFF-BYTES"
+            history: list[dict] = []
+            logged: list[str] = []
+
+            def denied_call(agent, *args, **kwargs):
+                agent.last_tool_denials = {"Bash": 1}
+                return "implemented"
+
+            with mock.patch.object(duet, "_metrics_root", return_value=root / "metrics"), \
+                    mock.patch.object(duet, "_metrics_cli_version", return_value="1.2.3"), \
+                    mock.patch.object(duet, "call_agent", side_effect=denied_call), \
+                    mock.patch.object(duet, "append_worktree_diff", side_effect=lambda text, *_: text + handoff), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                duet._begin_run_metrics(cfg)
+                duet._execute_turn(
+                    cfg, turn=1, speaker=speaker, last_msg="x", run_dir=run_dir,
+                    transcript_path=run_dir / "transcript.md",
+                    recap_path=run_dir / "recap.md", state_path=run_dir / "state.json",
+                    history=history,
+                    seen_first_turn={agent.name: False for agent in cfg.agents},
+                    wt_path=speaker.cwd_override, wt_branch="branch",
+                    last_verify_state=None,
+                    log=lambda _name, _role, text, **_kw: logged.append(text),
+                )
+        self.assertIn("was denied 1 tool call(s)", logged[0])
+        self.assertEqual(history[0]["tool_denials"], {"Bash": 1})
+        self.assertEqual(history[0]["metrics"]["handoff_bytes"], len(handoff.encode()))
+        self.assertGreater(history[0]["metrics"]["delivered_output_bytes"],
+                           history[0]["metrics"]["handoff_bytes"])
+
 
 if __name__ == "__main__":
     unittest.main()

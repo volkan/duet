@@ -896,14 +896,16 @@ invalid budget; status never performs arithmetic on the raw state value.
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
 partner turn completes. Neither field exposes the saved error or raw history.
-`tool_denials` is the number of tool calls that the backend denied during the
-run. Each turn object has its own `tool_denials` count too. Today only Claude
-reports denials. The value is `null` when no turn recorded the field, for
-example with other backends, dry runs, or older Claude CLIs. The total counts
-only turns whose backend reports denials (today Claude), so `0` does not cover
-Codex or other backends. A value above
-zero means that some agent claims may not have been executed. Status never
-shows tool names, commands, or tool input. Invalid saved values become `null`.
+`tool_denials` is the number of tool calls that the backend denied in
+successful loop and forced turns. The `claude -p /review` kickoff and seed
+extraction are not counted. `last_completed_turn` and `last_timeout` each have
+their own `tool_denials` count; `active_turn` has none. The total counts only
+turns whose backend reports denials (today Claude), so `0` does not cover
+Codex or other backends. The value is `null` when no turn recorded the field,
+for example with other backends, dry runs, or older Claude CLIs. A value above
+zero means that some checks that needed the denied tools did not run. Status
+never shows tool names, commands, or tool input. Invalid saved values become
+`null`.
 
 The matching launch handoff is written by `--run-info-file FILE` with
 `schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
@@ -1061,8 +1063,10 @@ Duet prints this line:
 [duet] note: converged means both agents agreed; it is not an independent review. Review the final diff in a fresh context and run its checks before you merge.
 ```
 
-When any turn recorded denials, Duet also prints the run total and says that
-the claims that need those tools are unverified. Dry runs print neither note.
+After any non-dry run in which a turn recorded denials, Duet also prints the
+run total and says that the claims that need those tools are unverified. The
+total counts only successful loop and forced turns, not the kickoff or seed
+extraction. Dry runs print neither note.
 
 With `--verify-cmd`, that valid proposal is only counted after the command
 exits 0. A non-zero exit, timeout, or command execution error suppresses the

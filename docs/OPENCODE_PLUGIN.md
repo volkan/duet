@@ -220,8 +220,9 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 A `converged` result means that the two agents agreed. It is not an
 independent review. When `tool_denials` is a number above zero, report it.
 Checks that needed the denied tools did not run, so dependent claims are
-unverified. Before you accept code from a run, review the final diff in a fresh
-context and run its checks.
+unverified. Tell the user that convergence is not an independent review.
+Recommend that they review the final diff in a fresh context and run its
+checks before they accept or merge the code.
 
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
