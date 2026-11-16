@@ -247,10 +247,12 @@ During a live turn, `active_turn.budget_seconds` shows the saved budget and
 `last_timeout` is non-null, report its turn and agent; it remains present when
 the review recipe lets the partner react to one non-final coder timeout.
 
-A `converged` result means that the two agents agreed. It is not an
-independent review. When `tool_denials` is a number above zero, report it.
-Checks that needed the denied tools did not run, so dependent claims are
-unverified. Tell the user that convergence is not an independent review.
+A `converged` or `converged_after_force` result means that the two agents
+agreed. It is not an independent review. When `tool_denials` is a number above
+zero, report it. Checks that needed the denied tools did not run, so dependent
+claims are unverified. The count covers only successful loop and forced turns,
+not the kickoff or seed extraction. `null` means that the backend did not
+report denials. Tell the user that convergence is not an independent review.
 Recommend that they review the final diff in a fresh context and run its
 checks before they accept or merge the code.
 

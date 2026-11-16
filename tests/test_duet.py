@@ -2388,7 +2388,6 @@ class TestClaudeToolDenials(unittest.TestCase):
         ]}
         denials = duet.parse_claude_tool_denials(payload)
         self.assertEqual(denials, {"Bash": 2, "Read": 1})
-        self.assertNotIn(self.SECRET, repr(denials))
 
     def test_absent_or_non_list_field_is_unknown_and_empty_list_is_known(self) -> None:
         self.assertEqual(duet.parse_claude_tool_denials({"permission_denials": []}), {})

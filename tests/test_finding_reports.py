@@ -167,12 +167,16 @@ class TestFindingProjection(unittest.TestCase):
             turn(2, "coder", [], tool_denials={}),
             turn(3, "reviewer", [], tool_denials={"Bash": 1}),
             turn(4, "coder", [], tool_denials={"Bash": "secret command"}),
+            turn(5, "bad`name", [], tool_denials={"Read": 1}),
         ]))
         self.assertEqual(report["execution_limits"], [
-            {"agent": "reviewer", "slot": "lead", "denied_tool_calls": 3}])
+            {"agent": "reviewer", "slot": "lead", "denied_tool_calls": 3},
+            {"agent": "unknown", "slot": None, "denied_tool_calls": 1}])
         rendered = duet.render_finding_report(report)
         self.assertIn("Execution limits: `reviewer` (lead) was denied 3 tool call(s). "
                       "Checks that needed them did not run.", rendered)
+        self.assertIn("Execution limits: `unknown` was denied 1 tool call(s).", rendered)
+        self.assertNotIn("bad`name", rendered)
         self.assertNotIn("secret command", rendered)
 
     def test_no_execution_limits_without_recorded_denials(self):

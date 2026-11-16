@@ -899,7 +899,9 @@ partner turn completes. Neither field exposes the saved error or raw history.
 `tool_denials` is the number of tool calls that the backend denied in
 successful loop and forced turns. The `claude -p /review` kickoff and seed
 extraction are not counted. `last_completed_turn` and `last_timeout` each have
-their own `tool_denials` count; `active_turn` has none. The total counts only
+their own `tool_denials` count; `active_turn` has none. In state that Duet
+writes, `last_timeout.tool_denials` is always `null`, because a failed or
+timed-out call records nothing. The total counts only
 turns whose backend reports denials (today Claude), so `0` does not cover
 Codex or other backends. The value is `null` when no turn recorded the field,
 for example with other backends, dry runs, or older Claude CLIs. A value above
@@ -1038,8 +1040,9 @@ convergence with rationale. This lets one agent propose "I think this is done"
 while the partner can still reject the rationale and ask for another round.
 
 Convergence means that both agents agreed. It is not an independent review.
-Both agents can agree on code that they did not run. For example, Claude's
-default `acceptEdits` permission mode can deny the Bash tool in `claude -p`.
+Both agents can agree on code that they did not run. For example, Duet's
+default permission mode for Claude, `acceptEdits`, can deny the Bash tool in
+`claude -p`.
 The prompts ask each agent to name the checks that either agent ran. Each
 check needs who ran it, its command, and its result. A claim that depends on a
 check with no command and result in the conversation is unverified.

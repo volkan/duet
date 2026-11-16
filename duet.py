@@ -2190,6 +2190,7 @@ def _metrics_record_raw_output(agent: Agent, output: str) -> None:
 _TOOL_DENIAL_NAME_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 TOOL_DENIAL_MAX_NAMES = 8
 TOOL_DENIAL_OTHER = "other"
+TOOL_DENIAL_MAX_COUNT = 10**9
 
 
 def parse_claude_tool_denials(payload: object) -> Optional[dict[str, int]]:
@@ -2216,7 +2217,8 @@ def tool_denial_total(value: object) -> Optional[int]:
     total = 0
     for name, count in value.items():
         if (not isinstance(name, str) or not isinstance(count, int)
-                or isinstance(count, bool) or count < 0):
+                or isinstance(count, bool)
+                or not 0 <= count <= TOOL_DENIAL_MAX_COUNT):
             return None
         total += count
     return total

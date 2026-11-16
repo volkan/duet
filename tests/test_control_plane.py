@@ -1278,6 +1278,35 @@ class TestToolDenialStatus(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(snapshot))
         self.assertIn("tool_denials:    1", human.getvalue())
 
+    def test_counts_above_the_bound_are_unknown_through_the_cli(self) -> None:
+        huge = 9 * 10 ** 4299
+        with tempfile.TemporaryDirectory() as raw:
+            run = pathlib.Path(raw).resolve() / "20260719-120000"
+            run.mkdir()
+            (run / "state.json").write_text(json.dumps({
+                "phase": "finished", "turns_used": 2, "finished_reason": "max_turns",
+                "finding_reports": True, "agents": [{"name": "a"}, {"name": "b"}],
+                "history": [
+                    {"turn": 1, "agent": "a", "tool_denials": {"Bash": huge, "Read": huge}},
+                    {"turn": 2, "agent": "b",
+                     "tool_denials": {"Bash": duet.TOOL_DENIAL_MAX_COUNT + 1}},
+                ],
+            }), encoding="utf-8")
+            script = str(pathlib.Path(duet.__file__).resolve())
+            env = dict(duet.os.environ, DUET_METRICS="0", HOME=raw)
+            status = subprocess.run(
+                [duet.sys.executable, script, "--status", str(run), "--json"],
+                capture_output=True, text=True, env=env)
+            report = subprocess.run(
+                [duet.sys.executable, script, "--report", str(run)],
+                capture_output=True, text=True, env=env)
+        self.assertEqual(status.returncode, 0, status.stderr)
+        snapshot = json.loads(status.stdout)
+        self.assertIsNone(snapshot["tool_denials"])
+        self.assertIsNone(snapshot["last_completed_turn"]["tool_denials"])
+        self.assertEqual(report.returncode, 0, report.stderr)
+        self.assertNotIn("Execution limits", report.stdout)
+
     def test_top_level_total_is_null_when_no_turn_recorded_it(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             snapshot = self._status(pathlib.Path(raw), [{"turn": 1, "agent": "a"}])
@@ -1342,6 +1371,22 @@ class TestToolDenialLoop(unittest.TestCase):
             state, calls, out = self._run(root, [("done", None), ("checked", {})])
         self.assertEqual(state["history"][1]["tool_denials"], {})
         self.assertNotIn("was denied", out)
+
+    def test_unconverged_finish_prints_only_the_denial_total(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, _, out = self._run(root, [("done", None), ("checked", {"Bash": 2})])
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertIn("[duet] note: agents were denied 2 tool call(s) in this run.", out)
+        self.assertNotIn(duet.CONVERGED_RUN_NOTE, out)
+
+    def test_converged_after_force_prints_the_converged_note(self) -> None:
+        cfg = duet.DuetConfig(cwd=pathlib.Path("."), agents=_agents(), task="review",
+                              metrics_enabled=False)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            duet._print_run_end_notes(cfg, duet.FINISHED_CONVERGED_AFTER_FORCE, [])
+        self.assertEqual(out.getvalue(), duet.CONVERGED_RUN_NOTE + "\n")
 
     def test_dry_run_prints_no_end_notes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

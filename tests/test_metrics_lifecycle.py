@@ -181,8 +181,8 @@ class TestMetricsLifecycle(unittest.TestCase):
         self.assertIn("was denied 1 tool call(s)", logged[0])
         self.assertEqual(history[0]["tool_denials"], {"Bash": 1})
         self.assertEqual(history[0]["metrics"]["handoff_bytes"], len(handoff.encode()))
-        self.assertGreater(history[0]["metrics"]["delivered_output_bytes"],
-                           history[0]["metrics"]["handoff_bytes"])
+        self.assertEqual(history[0]["metrics"]["delivered_output_bytes"],
+                         len(logged[0].encode("utf-8")))
 
 
 if __name__ == "__main__":
