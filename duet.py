@@ -655,6 +655,24 @@ def effective_agent_cwd(agent: Agent, default_cwd: pathlib.Path) -> pathlib.Path
     return (agent.cwd_override or default_cwd).resolve()
 
 
+def _agent_add_dirs(agent: Agent, cfg: DuetConfig) -> list[pathlib.Path]:
+    # Derived per call and never written to cfg, state, or metrics, so
+    # --continue restores add_dirs exactly as saved and re-derives this grant.
+    own_cwd = effective_agent_cwd(agent, cfg.cwd)
+    roots = list(cfg.add_dirs)
+    resolved = [pathlib.Path(d).resolve() for d in roots]
+    for other in cfg.agents:
+        if other is agent or other.cwd_override is None:
+            continue
+        path = effective_agent_cwd(other, cfg.cwd)
+        covered = [own_cwd, *resolved]
+        if any(path == root or path.is_relative_to(root) for root in covered):
+            continue
+        roots.append(other.cwd_override)
+        resolved.append(path)
+    return roots
+
+
 def shared_cwd_backend_peers(cfg: DuetConfig, backend: str) -> bool:
     backend_agents = [a for a in cfg.agents if a.backend == backend]
     if len(backend_agents) != 2:
@@ -2884,7 +2902,7 @@ def _call_claude_backend(agent: Agent, system_prompt: str, message: str,
         reasoning=reasoning,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
-        add_dirs=cfg.add_dirs,
+        add_dirs=_agent_add_dirs(agent, cfg),
     )
 
 
@@ -2921,7 +2939,7 @@ def _call_gemini_backend(agent: Agent, system_prompt: str, message: str,
         reasoning=reasoning,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
-        add_dirs=cfg.add_dirs,
+        add_dirs=_agent_add_dirs(agent, cfg),
     )
 
 
@@ -2937,7 +2955,7 @@ def _call_copilot_backend(agent: Agent, system_prompt: str, message: str,
         reasoning=reasoning,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
-        add_dirs=cfg.add_dirs,
+        add_dirs=_agent_add_dirs(agent, cfg),
     )
 
 

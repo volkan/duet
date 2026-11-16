@@ -276,6 +276,16 @@ OpenCode v2 refuses linked `--worktree-path` paths through `_is_linked_worktree`
 Its confined peer policy also denies `external_directory` access.
 The child environment pins `PWD` to the effective cwd because v2 uses the logical cwd.
 
+`_agent_add_dirs(agent, cfg)` gives each Claude, Gemini, and Copilot call
+`cfg.add_dirs` plus every other agent's `cwd_override` that lies outside the
+agent's own cwd and the existing roots. A worktree outside the other agent's
+cwd (explicit `--runs-dir`/`--worktree-root`, OpenCode v2 clone) is otherwise
+unreadable for it. The grant is derived on every call, fresh or resumed, and is
+never written to `cfg.add_dirs`, `state.json`, metrics, or status. `--continue`
+therefore restores `add_dirs` as saved, needs no `--trust-state` for it, and
+re-derives it from the restored `cwd_override`. Under `acceptEdits` the root is
+writable. Codex, OpenCode, and ZCode calls do not use it.
+
 `--worktree-path` reuses an existing path. `--continue <run>` reuses the saved
 path. `--worktree` and `--worktree-path` remain mutually exclusive.
 
@@ -317,7 +327,7 @@ Without indexing, `duet --list` from cwd=A can't see runs created with `--cwd B`
   kickoff as `claude -p /review --model sonnet`; an explicit Claude lead model
   replaces `sonnet` in both places.
 - **Output is JSON-wrapped.** `claude -p ... --output-format json` returns `{"result":"...","session_id":"..."}`. We always re-read `session_id` and write it back to `agent.session_id` so the next turn picks up the rotated id (Claude rotates session ids on every reply). A malformed JSON output raises `RuntimeError` with a 500-char snippet — useful when claude crashes mid-stream.
-- **`--add-dir` is required for any path outside cwd.** Without it Claude silently refuses paths outside `cwd` with a generic permission error. YAML key `add_dirs:` (list); CLI flag `--add-dir` is repeatable. Pre-supply `add_dirs: [..]` (or repeat `--add-dir`) whenever the task writes paths above `cwd`.
+- **`--add-dir` is required for any path outside cwd.** Without it Claude silently refuses paths outside `cwd` with a generic permission error. YAML key `add_dirs:` (list); CLI flag `--add-dir` is repeatable. Pre-supply `add_dirs: [..]` (or repeat `--add-dir`) whenever the task writes paths above `cwd`. Duet adds the other agent's worktree path itself when it lies outside this agent's cwd (`_agent_add_dirs`); do not persist it in `add_dirs`.
 - **`--effort` is the authoritative reasoning control;** the high/xhigh/max prompt prefixes are belt-and-braces.
 - **Tool denials are silent unless duet surfaces them.** `claude -p` under `acceptEdits` can deny tools such as Bash and still exit 0. `call_claude` reduces the JSON `permission_denials` list to bounded tool-name counts (`parse_claude_tool_denials`: safe names only, at most `TOOL_DENIAL_MAX_NAMES`, the rest under `other`) on `agent.last_tool_denials`, which `call_agent` resets each call. It never keeps `tool_input`, which can hold commands and secrets. A missing field (older CLIs) is `None`, meaning unknown; other backends always stay unknown. Successful loop and forced turns store `history[].tool_denials`; failed turns store nothing. Denials only warn: they never block convergence.
 

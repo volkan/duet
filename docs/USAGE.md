@@ -690,7 +690,7 @@ worktree gated by `verify_cmd`.
 | `--no-metrics` | disable collection of the new central metrics snapshot for this run |
 | `--metrics-kind live\|test` | label a run for reporting (default `live`); manual evaluations belong under `test`. Dry runs are always counted separately |
 | `--list [PATH]` | list all runs found under `PATH` (or under the default search paths if omitted: `./runs/`, `./.duet/runs/`, `~/.duet/runs/*/`). Every run dir registers a symlink at `~/.duet/runs/<cwd-slug>/<run_id>` at creation time, so a foreign-cwd run (`duet --cwd /other/proj …`) shows up in `duet --list` from anywhere. One row per run; runs found via both a cwd-relative path and a home-index symlink are deduped. Read-only — except a self-healing backfill writes the symlink for any pre-existing run dir it discovers (idempotent) |
-| `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. YAML key: `add_dirs:` |
+| `--add-dir PATH` | extra path Claude, Gemini, or Copilot may access outside `--cwd` (repeatable). Claude and Copilot receive `--add-dir`; Gemini receives `--include-directories`; Codex and OpenCode ignore this and should use backend-specific `extra_args` when needed. With `--worktree`, Claude, Gemini, and Copilot also receive the other agent's worktree path when it is outside their own cwd (see [Worktree mode](#worktree-mode)); this derived root is not part of `add_dirs`. YAML key: `add_dirs:` |
 | `--quiet` | suppress live mirroring of subprocess stderr to your terminal |
 | `--recap` | compact per-turn debug view; suppresses the live `│`-mirror and writes `recap.md` next to `transcript.md` |
 | `--no-recap` | disable recap mode, including the review recipe default |
@@ -1186,6 +1186,33 @@ Project-specific test commands belong in `CLAUDE.md` / `README` — the handoff 
 If `--verify-cmd` is configured and an effective worktree path exists, duet
 runs verification in that worktree, not the host checkout. Without a worktree,
 verification runs in `--cwd`.
+
+### Access to the worktree from the other agent
+
+The worktree can sit outside the other agent's cwd. This happens with an
+explicit `--runs-dir` or `--worktree-root` outside `--cwd`, and with an OpenCode
+v2 clone under `~/.duet/worktrees/`. The default layout (`<cwd>/.duet/runs`) is
+inside the cwd and needs nothing extra.
+
+On every call, Duet adds the worktree path to the roots of a Claude, Gemini, or
+Copilot agent that does not run in the worktree. Claude and Copilot get
+`--add-dir`. Gemini gets `--include-directories`. Duet skips a path that equals
+or sits inside the agent's own cwd or an existing `add_dirs` entry. Without this
+grant, a Claude reviewer is denied `Read` on the worktree.
+
+Duet derives this grant at call time. It never writes it to `add_dirs`,
+`state.json`, metrics, or status. `--continue` restores `add_dirs` as saved,
+needs no `--trust-state` for the grant, and derives it again from the saved
+worktree path.
+
+An added root is writable too. Under Claude `acceptEdits`, the agent that does
+not run in the worktree can edit its files, as it can already edit its own cwd.
+Use `--permission-mode plan` for a Claude agent that must not edit.
+
+Codex, OpenCode, and ZCode get no derived root. Codex reads outside its cwd in
+its sandbox. OpenCode has no per-call extra-root flag, and its v2 peer policy
+denies external directories by design. ZCode peers are read-only and use their
+own permission checks.
 
 ### Where the worktree lives
 

@@ -212,6 +212,12 @@ Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and
 backend extra arguments.
 
+Claude, Gemini, and Copilot peers receive access to the other peer's worktree
+when it is outside their cwd. Fresh calls, resumed calls, and `--continue`
+derive this access without changing saved `add_dirs`. Added roots can permit
+writes; Claude `acceptEdits` allows edits there. Use `--permission-mode plan`
+when a Claude peer must not edit.
+
 OpenCode v2 worktree peers use independent clones, including when the source
 `--cwd` is a subdirectory or linked worktree. The peer starts at the clone
 root at the source checkout's committed `HEAD`; the other peer keeps its requested cwd.

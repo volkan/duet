@@ -286,6 +286,11 @@ The default recipe uses `--worktree`, so edits land under:
 <run_dir>/wt/
 ```
 
+Claude, Gemini, and Copilot peers also receive access to a worktree outside
+their cwd, including on resume and `--continue`. Added roots can permit writes;
+use `--permission-mode plan` when a Claude peer must not edit.
+See [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
+
 Review or merge from the host repository using the commands duet prints at the
 end of the run.
 
