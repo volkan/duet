@@ -1532,7 +1532,9 @@ class TestSetupClone(unittest.TestCase):
             linked = duet.setup_worktree(src, "source-peer", root / "linked source")
             (linked / "app.py").write_text("greet = 'linked'\n")
             self._git("commit", "-am", "linked change", cwd=linked)
-            for source, content in ((src, "greet = 'hello'\n"), (linked, "greet = 'linked'\n")):
+            sources = ((src, "greet = 'hello'\n"), (linked, "greet = 'linked'\n"))
+            for index, (source, content) in enumerate(sources):
+                run_id = f"r{index}"
                 with self.subTest(source=source):
                     nested = source / "nested dir"
                     nested.mkdir()
@@ -1544,10 +1546,10 @@ class TestSetupClone(unittest.TestCase):
                             mock.patch.object(pathlib.Path, "home", return_value=root / "home"), \
                             contextlib.redirect_stdout(io.StringIO()):
                         self.assertEqual(
-                            duet._worktree_dest(cfg, "opencode", "r1", root / "runs"),
-                            duet._worktree_dest(dataclasses.replace(cfg, cwd=source), "opencode", "r1", root / "runs"),
+                            duet._worktree_dest(cfg, "opencode", run_id, root / "runs"),
+                            duet._worktree_dest(dataclasses.replace(cfg, cwd=source), "opencode", run_id, root / "runs"),
                         )
-                        clone, _ = duet._setup_run_worktree(cfg, "r1", root / "runs")
+                        clone, _ = duet._setup_run_worktree(cfg, run_id, root / "runs")
                     self.assertEqual(cfg.cwd, nested)
                     self.assertEqual(cfg.agents[1].cwd_override, clone)
                     self.assertEqual((clone / "app.py").read_text(), content)
@@ -1650,7 +1652,9 @@ class TestSetupClone(unittest.TestCase):
                         self.assertIsNone(continued._owned_worktree_path)
 
     def test_same_run_id_in_two_repositories_creates_distinct_clones(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        # The slug keeps only the first 80 characters of the repository path,
+        # so a short parent keeps the two roots distinct whatever TMPDIR is.
+        with tempfile.TemporaryDirectory(dir=pathlib.Path("/tmp").resolve()) as raw:
             root = pathlib.Path(raw).resolve()
             clones = []
             for name in ("first", "second"):
