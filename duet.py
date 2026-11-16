@@ -2318,7 +2318,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
             "agent output to review.\n"
             f"{DEFAULT_SENTINEL}"
         ), new_sid
-    cmd = ["claude", "-p", message,
+    cmd = ["claude", "-p",
            "--output-format", "json",
            "--append-system-prompt", system_prompt,
            "--permission-mode", perm_mode,
@@ -2338,7 +2338,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd,
         backend="claude",
         cwd=eff_cwd,
-        stdin=None,
+        # A positional prompt that starts with "-" is parsed as an option.
+        stdin=message,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,

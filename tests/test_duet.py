@@ -309,6 +309,28 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertEqual(command[command.index("--model") + 1], "sonnet")
 
+    def test_claude_message_goes_on_stdin_not_in_argv(self) -> None:
+        message = "- a reply that starts with a list item"
+        for sid in (None, "claude-sid"):
+            with self.subTest(sid=sid):
+                calls = []
+
+                def fake_run(cmd, **kwargs):
+                    calls.append((cmd, kwargs))
+                    return 0, '{"result":"ok","session_id":"claude-sid"}', ""
+
+                agent = duet.Agent(name="claude-lead", backend="claude",
+                                   role="planner", session_id=sid)
+                with mock.patch.object(duet, "_run", fake_run):
+                    duet.call_claude(
+                        agent, "sys", message, _ROOT, "acceptEdits", 60, dry=False,
+                    )
+
+                command, kwargs = calls[-1]
+                self.assertNotIn(message, command)
+                self.assertEqual(kwargs["stdin"], message)
+                self.assertEqual("--resume" in command, sid is not None)
+
     def test_codex_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             return 124, "", "[duet] TIMEOUT after 1s"
