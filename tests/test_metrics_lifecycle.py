@@ -111,7 +111,7 @@ class TestMetricsLifecycle(unittest.TestCase):
         self.assertIsNotNone(kickoff["kickoff_elapsed_s"])
         self.assertNotIn("private kickoff", json.dumps(kickoff))
 
-    def test_forced_handoff_bytes_exclude_verification_block(self) -> None:
+    def test_forced_handoff_bytes_exclude_verification_and_denial_note(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
             cfg = self._cfg(root, verify_cmd="verify")
@@ -122,10 +122,14 @@ class TestMetricsLifecycle(unittest.TestCase):
             verify = duet.VerifyResult(True, "verify", root, 0, "", "", root / "verify.log")
             handoff = "\nHANDOFF-BYTES"
             history: list[dict] = []
+
+            def denied_call(agent, *args, **kwargs):
+                agent.last_tool_denials = {"Bash": 1}
+                return "LGTM rationale: this is enough detail for a valid proposal.\n<<<LGTM>>>"
+
             with mock.patch.object(duet, "_metrics_root", return_value=root / "metrics"), \
                     mock.patch.object(duet, "_metrics_cli_version", return_value="1.2.3"), \
-                    mock.patch.object(duet, "call_agent", return_value=(
-                    "LGTM rationale: this is enough detail for a valid proposal.\n<<<LGTM>>>")), \
+                    mock.patch.object(duet, "call_agent", side_effect=denied_call), \
                     mock.patch.object(duet, "run_verify_command", return_value=verify), \
                     mock.patch.object(duet, "append_worktree_diff", side_effect=lambda text, *_: text + handoff), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -137,9 +141,48 @@ class TestMetricsLifecycle(unittest.TestCase):
                     seen_first_turn={agent.name: False for agent in cfg.agents},
                     last_verify_state=None,
                 )
+        self.assertEqual(history[0]["tool_denials"], {"Bash": 1})
         self.assertEqual(history[0]["metrics"]["handoff_bytes"], len(handoff.encode()))
         self.assertGreater(history[0]["metrics"]["delivered_output_bytes"],
                            history[0]["metrics"]["handoff_bytes"])
+
+    def test_loop_handoff_bytes_exclude_denial_note(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            cfg = self._cfg(root)
+            speaker = cfg.agents[1]
+            speaker.cwd_override = root / "worktree"
+            handoff = "\nHANDOFF-BYTES"
+            history: list[dict] = []
+            logged: list[str] = []
+
+            def denied_call(agent, *args, **kwargs):
+                agent.last_tool_denials = {"Bash": 1}
+                return "implemented"
+
+            with mock.patch.object(duet, "_metrics_root", return_value=root / "metrics"), \
+                    mock.patch.object(duet, "_metrics_cli_version", return_value="1.2.3"), \
+                    mock.patch.object(duet, "call_agent", side_effect=denied_call), \
+                    mock.patch.object(duet, "append_worktree_diff", side_effect=lambda text, *_: text + handoff), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                duet._begin_run_metrics(cfg)
+                duet._execute_turn(
+                    cfg, turn=1, speaker=speaker, last_msg="x", run_dir=run_dir,
+                    transcript_path=run_dir / "transcript.md",
+                    recap_path=run_dir / "recap.md", state_path=run_dir / "state.json",
+                    history=history,
+                    seen_first_turn={agent.name: False for agent in cfg.agents},
+                    wt_path=speaker.cwd_override, wt_branch="branch",
+                    last_verify_state=None,
+                    log=lambda _name, _role, text, **_kw: logged.append(text),
+                )
+        self.assertIn("was denied 1 tool call(s)", logged[0])
+        self.assertEqual(history[0]["tool_denials"], {"Bash": 1})
+        self.assertEqual(history[0]["metrics"]["handoff_bytes"], len(handoff.encode()))
+        self.assertEqual(history[0]["metrics"]["delivered_output_bytes"],
+                         len(logged[0].encode("utf-8")))
 
 
 if __name__ == "__main__":

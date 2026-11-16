@@ -98,6 +98,7 @@ assert status["health"] == "terminal" and status["phase"] == "finished", status
 assert status["exit_code"] == 0, status
 assert status["per_turn_timeout"] == 900, status
 assert status["last_timeout"] is None, status
+assert "tool_denials" in status and status["tool_denials"] is None, status
 if status["active_turn"] is not None:
     assert "budget_seconds" in status["active_turn"], status
     assert "remaining_seconds" in status["active_turn"], status

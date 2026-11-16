@@ -137,6 +137,10 @@ verify_cmd: "make test"
 ```
 
 Roles ship with: `planner`, `coder`, `reviewer`, `triage-reviewer`. Override via `role_prompt` in YAML config to define new ones.
+The two reviewer roles ask the agent to test changed behavior with its own
+inputs. These include inputs that should fail, removed cases, and large inputs.
+When the reviewer cannot run a command, it asks its partner to run the check
+and paste the command and output.
 
 ---
 
@@ -754,6 +758,8 @@ can publish stable claim IDs, supported/refuted/unresolved agent assessments,
 cited evidence, and objections. `duet --report RUN` rebuilds the report from
 saved state without running commands. Private claim text stays in the run
 directory, outside central metrics. Missing structured output remains visible.
+When a turn recorded denied tool calls, `review.md` names the agent and its
+total in an "Execution limits" line.
 
 `duet --continue RUN --resolve L1` preserves inherited IDs and focuses a new,
 two-turn run on an unresolved finding. The original run and stop reason remain
@@ -870,7 +876,7 @@ For automation, always add `--json`. Schema version 1 has these top-level keys:
 ```text
 schema_version, kind, duet_version, run_id, run_dir, health, phase,
 exit_code, turns_used, finished_reason, per_turn_timeout, active_turn,
-last_completed_turn, last_timeout, artifacts, error
+last_completed_turn, last_timeout, tool_denials, artifacts, error
 ```
 
 `kind` is `duet.status`; paths are absolute, timestamps are UTC RFC 3339, and
@@ -890,6 +896,18 @@ invalid budget; status never performs arithmetic on the raw state value.
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
 partner turn completes. Neither field exposes the saved error or raw history.
+`tool_denials` is the number of tool calls that the backend denied in
+successful loop and forced turns. The `claude -p /review` kickoff and seed
+extraction are not counted. `last_completed_turn` and `last_timeout` each have
+their own `tool_denials` count; `active_turn` has none. In state that Duet
+writes, `last_timeout.tool_denials` is always `null`, because a failed or
+timed-out call records nothing. The total counts only
+turns whose backend reports denials (today Claude), so `0` does not cover
+Codex or other backends. The value is `null` when no turn recorded the field,
+for example with other backends, dry runs, or older Claude CLIs. A value above
+zero means that some checks that needed the denied tools did not run. Status
+never shows tool names, commands, or tool input. Invalid saved values become
+`null`.
 
 The matching launch handoff is written by `--run-info-file FILE` with
 `schema_version: 1`, `kind: duet.run`, `duet_version`, `run_id`, absolute
@@ -1020,6 +1038,38 @@ does not stop the loop unless it also has an `LGTM rationale:` / `Rationale:`
 outside fenced code, and the immediately previous agent turn also proposed
 convergence with rationale. This lets one agent propose "I think this is done"
 while the partner can still reject the rationale and ask for another round.
+
+Convergence means that both agents agreed. It is not an independent review.
+Both agents can agree on code that they did not run. For example, Duet's
+default permission mode for Claude, `acceptEdits`, can deny the Bash tool in
+`claude -p`.
+The prompts ask each agent to name the checks that either agent ran. Each
+check needs who ran it, its command, and its result. A claim that depends on a
+check with no command and result in the conversation is unverified.
+Duet cannot confirm that an agent followed these instructions.
+
+When Claude reports denied tool calls in a turn, Duet appends one note to that
+reply. The note goes to the transcript and to the partner's next message:
+
+```text
+[duet] note: claude-reviewer was denied 2 tool call(s) this turn (Bash×2). Checks that needed them did not run; treat dependent claims as unverified.
+```
+
+The note never blocks convergence. Duet detects convergence on the agent's own
+reply text, before it adds the note. `state.json` stores only tool names and
+counts for each turn, never tool input.
+
+After a non-dry run that ends with `converged` or `converged_after_force`,
+Duet prints this line:
+
+```text
+[duet] note: converged means both agents agreed; it is not an independent review. Review the final diff in a fresh context and run its checks before you merge.
+```
+
+After any non-dry run in which a turn recorded denials, Duet also prints the
+run total and says that the claims that need those tools are unverified. The
+total counts only successful loop and forced turns, not the kickoff or seed
+extraction. Dry runs print neither note.
 
 With `--verify-cmd`, that valid proposal is only counted after the command
 exits 0. A non-zero exit, timeout, or command execution error suppresses the
@@ -1209,7 +1259,10 @@ duet --list
 
 When the loop converged (both agents accepted with rationale-backed
 `<<<LGTM>>>` turns), claude already has the full diff and the spec in its
-session context — it reviewed every turn. The
+session context — it reviewed every turn. Convergence is pair agreement, not
+an independent review. Before you merge, review the final diff in a fresh
+context and run its checks. Check `tool_denials` in `duet --status RUN --json`
+too. The
 quickest way to land the work is to resume claude interactively and just
 ask:
 

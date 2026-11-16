@@ -52,6 +52,12 @@ The report includes:
 - The actual run phase and stop reason, even when findings remain unresolved.
 - Executed harness checks from recorded `verify` results, separate from
   agent-supplied evidence. A passing run check does not verify every claim.
+- Execution limits, when Claude reported denied tool calls. Each line names the
+  agent, its slot, and its total denied calls. Checks that needed those tools
+  did not run. Only successful loop and forced turns count, not the kickoff or
+  seed extraction. Execution limits cover only the current run's turns.
+  Assessments inherited by `--continue` or `--resolve` keep their limits in the
+  source run's `review.md`. The report never shows tool names or tool input.
 
 Dispositions are agent assessments, not correctness labels. An agent can cite
 inaccurate evidence or revise a claim's wording; the original wording remains
@@ -61,7 +67,8 @@ visible. Human acceptance is recorded separately through feedback.
 array contains each ID, claim, disposition, latest `assessments`,
 `missing_evidence_slots`, and `last_open_objection`. `events` preserves the
 validated update sequence; `structured_turns`, `executed_checks`, `summary`,
-`available`, and `truncated` explain coverage and limits.
+`available`, and `truncated` explain coverage and limits. `execution_limits`
+lists `agent`, `slot`, and `denied_tool_calls` for each agent with denials.
 
 These files contain private claim text, code references, paths, and commands.
 They stay in the raw run directory and are never copied into central metrics.
