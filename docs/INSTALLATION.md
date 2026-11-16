@@ -65,6 +65,7 @@ selections, and proposes supported Duet effort levels for approval.
 Before launch, the skill checks installed CLI versions and relevant help output.
 See its [prerequisites](../plugins/duet/skills/duet/SKILL.md#prerequisites).
 For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).
+For peer access and write permissions, see [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
 With Node.js/npm available, use the [skills installer](https://github.com/vercel-labs/skills):
 
 ```bash

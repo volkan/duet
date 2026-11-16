@@ -2484,6 +2484,185 @@ class TestReviewEvidencePrompts(unittest.TestCase):
             self.assertNotIn(shared, duet.ROLE_PROMPTS[role])
 
 
+# ---------- derived access roots for worktree peers ----------
+
+
+class TestWorktreeAddDirs(unittest.TestCase):
+    _git = TestSetupClone._git
+    _repo = TestSetupClone._repo
+
+    def _cfg(self, cwd, worktree, add_dirs=(), lead="claude"):
+        lead_agent = duet.Agent("lead", lead, role="planner")
+        partner = duet.Agent("partner", "codex", role="coder")
+        partner.cwd_override = worktree
+        return duet.DuetConfig(
+            cwd=cwd, agents=[lead_agent, partner], task="x",
+            add_dirs=[pathlib.Path(d) for d in add_dirs],
+        )
+
+    def _command(self, backend, cfg, agent, first_turn=True):
+        calls = []
+        outputs = {
+            "claude": '{"result":"ok","session_id":"sid"}',
+            "gemini": '{"response":"ok","session_id":"sid"}',
+            "copilot": (
+                '{"type":"assistant.message","data":{"content":"ok"}}\n'
+                '{"type":"result","sessionId":"sid","exitCode":0}'
+            ),
+        }
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return 0, outputs[backend], ""
+
+        call = getattr(duet, f"_call_{backend}_backend")
+        with mock.patch.object(duet, "_run", fake_run), \
+                contextlib.redirect_stderr(io.StringIO()):
+            result = call(agent, "sys", "msg", cfg, first_turn, None, None, None)
+        self.assertEqual(result, ("ok", "sid"))
+        self.assertEqual(len(calls), 1)
+        return calls[0]
+
+    @staticmethod
+    def _values(cmd, flag):
+        return [cmd[i + 1] for i, item in enumerate(cmd) if item == flag]
+
+    def _assert_fresh_and_resumed_access(self, backend, flag, own_roots=()):
+        cfg = self._cfg(
+            pathlib.Path("/repo"), pathlib.Path("/elsewhere/wt"),
+            add_dirs=["/extra"], lead=backend,
+        )
+        agent = cfg.agents[0]
+        for session_id, worktree in (
+            (None, "/elsewhere/wt"), ("saved-session", "/elsewhere/next-wt"),
+        ):
+            with self.subTest(session_id=session_id):
+                agent.session_id = session_id
+                cfg.agents[1].cwd_override = pathlib.Path(worktree)
+                cmd = self._command(backend, cfg, agent, first_turn=session_id is None)
+                self.assertEqual(self._values(cmd, flag), [*own_roots, "/extra", worktree])
+                if backend == "copilot":
+                    self.assertEqual(
+                        [arg for arg in cmd if arg.startswith("--resume=")],
+                        [f"--resume={session_id}"] if session_id else [],
+                    )
+                else:
+                    self.assertEqual(
+                        self._values(cmd, "--resume"), [session_id] if session_id else [],
+                    )
+                self.assertEqual(cfg.add_dirs, [pathlib.Path("/extra")])
+
+    def test_claude_fresh_and_resumed_worktree_access(self) -> None:
+        self._assert_fresh_and_resumed_access("claude", "--add-dir", ["/repo"])
+
+    def test_worktree_agent_gets_no_grant_for_its_own_path(self) -> None:
+        cfg = self._cfg(pathlib.Path("/repo"), pathlib.Path("/elsewhere/wt"))
+        cfg.agents[1].backend = "claude"
+        self.assertEqual(
+            self._values(self._command("claude", cfg, cfg.agents[1]), "--add-dir"),
+            ["/elsewhere/wt"],
+        )
+        cfg.agents[0].cwd_override = pathlib.Path("/elsewhere/lead-wt")
+        self.assertEqual(
+            duet._agent_add_dirs(cfg.agents[1], cfg),
+            [pathlib.Path("/elsewhere/lead-wt")],
+        )
+
+    def test_worktree_inside_lead_cwd_adds_no_grant(self) -> None:
+        cfg = self._cfg(
+            pathlib.Path("/repo"), pathlib.Path("/repo/.duet/runs/r1/wt"),
+        )
+        self.assertEqual(
+            self._values(self._command("claude", cfg, cfg.agents[0]), "--add-dir"),
+            ["/repo"],
+        )
+
+    def test_existing_roots_suppress_duplicate_grant(self) -> None:
+        wt = pathlib.Path("/elsewhere/wt")
+        for roots in (["/elsewhere/wt"], ["/elsewhere"]):
+            with self.subTest(roots=roots):
+                cfg = self._cfg(pathlib.Path("/repo"), wt, add_dirs=roots)
+                self.assertEqual(
+                    self._values(
+                        self._command("claude", cfg, cfg.agents[0]), "--add-dir"
+                    ),
+                    ["/repo", *roots],
+                )
+
+    def test_unrelated_roots_keep_order_before_derived_grant(self) -> None:
+        cfg = self._cfg(
+            pathlib.Path("/repo"), pathlib.Path("/elsewhere/wt"),
+            add_dirs=["/data", "/other"],
+        )
+        self.assertEqual(
+            duet._agent_add_dirs(cfg.agents[0], cfg),
+            [pathlib.Path("/data"), pathlib.Path("/other"),
+             pathlib.Path("/elsewhere/wt")],
+        )
+
+    def test_gemini_fresh_and_resumed_worktree_access(self) -> None:
+        self._assert_fresh_and_resumed_access("gemini", "--include-directories")
+
+    def test_copilot_fresh_and_resumed_worktree_access(self) -> None:
+        self._assert_fresh_and_resumed_access("copilot", "--add-dir")
+
+    def test_derived_roots_are_never_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            cfg = duet.DuetConfig(
+                cwd=src, runs_dir=root / "runs", task="x", max_turns=1,
+                agents=[duet.Agent("lead", "claude", role="planner"),
+                        duet.Agent("partner", "codex", role="coder")],
+                dry_run=True, metrics_enabled=False,
+                worktree=True, worktree_root=root / "trees",
+            )
+            with mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+            saved = json.loads(
+                next((root / "runs").glob("*/state.json")).read_text(encoding="utf-8")
+            )
+            self.assertEqual(cfg.add_dirs, [])
+            self.assertEqual(state["add_dirs"], [])
+            self.assertEqual(saved["add_dirs"], [])
+            self.assertEqual(
+                duet._agent_add_dirs(cfg.agents[0], cfg),
+                [cfg.agents[1].cwd_override],
+            )
+
+    def test_continue_rederives_grant_without_trust_state(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            src = self._repo(root)
+            wt = duet.setup_worktree(src, "duet/r1", root / "trees" / "r1")
+            prior = root / "prior"
+            prior.mkdir()
+            cfg = duet.DuetConfig(
+                cwd=src, task="x", agents=[duet.Agent("lead", "claude"),
+                                           duet.Agent("partner", "codex")],
+            )
+            state = duet._build_run_state(
+                cfg, turns_used=0, history=[], finished_reason="max_turns",
+                transcript_path=prior / "transcript.md",
+                recap_path=prior / "recap.md", wt_path=wt, wt_branch="duet/r1",
+            )
+            self.assertEqual(state["add_dirs"], [])
+            duet._write_run_state(prior / "state.json", state)
+            parser = duet._build_arg_parser()
+            args = parser.parse_args(["--continue", str(prior)])
+            with contextlib.redirect_stderr(io.StringIO()):
+                continued = duet.build_continue_config(str(prior), args, parser, {})
+            self.assertFalse(args.trust_state)
+            self.assertEqual(continued.add_dirs, [])
+            with contextlib.redirect_stdout(io.StringIO()):
+                duet._setup_run_worktree(continued, "r2", root / "runs")
+            self.assertEqual(continued.agents[1].cwd_override, wt)
+            self.assertEqual(duet._agent_add_dirs(continued.agents[0], continued), [wt])
+            self.assertEqual(continued.add_dirs, [])
+
+
 # ---------- normalize_verify_cmd ----------
 
 
