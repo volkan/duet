@@ -1241,6 +1241,26 @@ def _live_stream_target(enabled: bool = True):
     return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
 
 
+def _feed_stdin(proc: subprocess.Popen, text: Optional[str]) -> None:
+    """Write `text` to the child and close its stdin.
+
+    Runs on its own thread: a child that stalls before reading would block a
+    large write, and the caller must already be waiting with its timeout.
+    """
+    if proc.stdin is None:
+        return
+    try:
+        if text is not None:
+            proc.stdin.write(text)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
@@ -1334,14 +1354,9 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                                 daemon=True)
         t_hb.start()
 
+        t_in = threading.Thread(target=_feed_stdin, args=(proc, stdin), daemon=True)
+        t_in.start()
         try:
-            if stdin is not None and proc.stdin is not None:
-                try:
-                    proc.stdin.write(stdin)
-                except BrokenPipeError:
-                    pass
-            if proc.stdin is not None:
-                proc.stdin.close()
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _signal_proc_tree(proc, signal.SIGTERM)
@@ -1350,11 +1365,11 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             except subprocess.TimeoutExpired:
                 _signal_proc_tree(proc, signal.SIGKILL)
                 proc.wait()
-            t_out.join(timeout=2); t_err.join(timeout=2)
+            t_out.join(timeout=2); t_err.join(timeout=2); t_in.join(timeout=2)
             return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
         finally:
             _unregister_proc(proc)
-        t_out.join(timeout=5); t_err.join(timeout=5)
+        t_out.join(timeout=5); t_err.join(timeout=5); t_in.join(timeout=2)
         return proc.returncode, "".join(out_chunks), "".join(err_chunks)
     finally:
         if stderr_file is not None:
