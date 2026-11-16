@@ -161,6 +161,25 @@ class TestFindingProjection(unittest.TestCase):
         self.assertIsNone(report["executed_checks"][0]["exit_code"])
         self.assertIn("Structured findings unavailable", duet.render_finding_report(report))
 
+    def test_execution_limits_report_agent_totals_only(self):
+        report = duet.build_finding_report(state([
+            turn(1, "reviewer", [item()], tool_denials={"Bash": 2}),
+            turn(2, "coder", [], tool_denials={}),
+            turn(3, "reviewer", [], tool_denials={"Bash": 1}),
+            turn(4, "coder", [], tool_denials={"Bash": "secret command"}),
+        ]))
+        self.assertEqual(report["execution_limits"], [
+            {"agent": "reviewer", "slot": "lead", "denied_tool_calls": 3}])
+        rendered = duet.render_finding_report(report)
+        self.assertIn("Execution limits: `reviewer` (lead) was denied 3 tool call(s). "
+                      "Claims that depend on those tools were not executed.", rendered)
+        self.assertNotIn("secret command", rendered)
+
+    def test_no_execution_limits_without_recorded_denials(self):
+        report = duet.build_finding_report(state([turn(1, "reviewer", [item()])]))
+        self.assertEqual(report["execution_limits"], [])
+        self.assertNotIn("Execution limits", duet.render_finding_report(report))
+
 
 class TestFindingRendering(unittest.TestCase):
     def test_fences_make_agent_html_and_markdown_inert(self):

@@ -19,7 +19,7 @@ STATUS_KEYS = {
     "schema_version", "kind", "duet_version", "run_id", "run_dir",
     "health", "phase", "exit_code", "turns_used", "finished_reason",
     "per_turn_timeout", "active_turn", "last_completed_turn", "last_timeout",
-    "artifacts", "error",
+    "tool_denials", "artifacts", "error",
 }
 ARTIFACT_KEYS = {"state", "transcript", "recap", "worktree"}
 

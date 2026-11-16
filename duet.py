@@ -216,7 +216,20 @@ CONVERGENCE_INSTRUCTION = (
     "checked, and any remaining low-risk follow-ups; then put {SENTINEL} on "
     "its own line. A bare sentinel without that rationale is ignored. If your "
     "partner proposed convergence and you disagree with the rationale, do not "
-    "emit the sentinel; explain the gap and ask for another round."
+    "emit the sentinel; explain the gap and ask for another round. In the "
+    "rationale, name each check you ran with its command and result, "
+    "separately from conclusions you reached only by reading. If a conclusion "
+    "depends on a check you could not run, say so and treat it as unverified. "
+    "An unverified claim that code is correct, fast, or safe does not support "
+    "convergence."
+)
+
+REVIEWER_EVIDENCE_INSTRUCTION = (
+    "Test changed behavior with inputs you choose yourself, not only the "
+    "partner's examples. Include inputs that should fail, removed or renamed "
+    "cases, and large inputs where cost can grow. If you cannot run a command, "
+    "name the missing check and ask your partner to run it and paste the "
+    "command and its output."
 )
 
 ROLE_PROMPTS = {
@@ -242,7 +255,8 @@ ROLE_PROMPTS = {
         "latest message and critically evaluate it: bugs, missing tests, "
         "security, simpler designs. When reviewing concrete code changes, "
         "inspect the actual files, diffs, and test output rather than relying "
-        "only on the partner's summary. Be specific and brief. If the work "
+        "only on the partner's summary. " + REVIEWER_EVIDENCE_INSTRUCTION + " "
+        "Be specific and brief. If the work "
         "meets the task and you have no material issues, follow the "
         "convergence instructions."
     ),
@@ -257,7 +271,8 @@ ROLE_PROMPTS = {
         "or naming/readability fix that is nice to handle. [P3] means a "
         "follow-up, future refactor, or scope creep. When reviewing concrete "
         "code changes, inspect the actual files, diffs, and test output rather "
-        "than relying only on the partner's summary. Be specific and brief. "
+        "than relying only on the partner's summary. "
+        + REVIEWER_EVIDENCE_INSTRUCTION + " Be specific and brief. "
         "If the coder reasonably argues a finding is over-scored, either "
         "accept the lower score or explain why the higher score still applies. "
         "Emit convergence only when no unfixed [P0] or [P1] findings remain. "
@@ -430,6 +445,10 @@ class Agent:
     # stays out of Agent's repr and serialized config/state shape; the run
     # lifecycle records it alongside the turn when metrics are enabled.
     last_call_metrics: dict = dataclasses.field(default_factory=dict, repr=False)
+    # Ephemeral per-call tool-denial counts (tool name -> count). None means
+    # the backend did not report denials for the last call.
+    last_tool_denials: Optional[dict] = dataclasses.field(
+        default=None, repr=False, compare=False)
     zcode_selection: Optional[dict] = None  # native resume cannot change model/effort
 
     def __post_init__(self) -> None:
@@ -2165,6 +2184,76 @@ def _metrics_record_raw_output(agent: Agent, output: str) -> None:
     agent.last_call_metrics["raw_output_bytes"] = len(output.encode("utf-8"))
 
 
+# Keep tool names only: each permission_denials entry also carries tool_input,
+# which can hold commands, paths, and secrets.
+_TOOL_DENIAL_NAME_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+TOOL_DENIAL_MAX_NAMES = 8
+TOOL_DENIAL_OTHER = "other"
+
+
+def parse_claude_tool_denials(payload: object) -> Optional[dict[str, int]]:
+    """Reduce Claude's `permission_denials` to bounded tool-name counts."""
+    raw = payload.get("permission_denials") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return None
+    counts: dict[str, int] = {}
+    for item in raw:
+        name = item.get("tool_name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not _TOOL_DENIAL_NAME_RE.fullmatch(name):
+            name = TOOL_DENIAL_OTHER
+        elif (name not in counts
+              and len(counts.keys() - {TOOL_DENIAL_OTHER}) >= TOOL_DENIAL_MAX_NAMES):
+            name = TOOL_DENIAL_OTHER
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def tool_denial_total(value: object) -> Optional[int]:
+    """Total of a saved tool-name -> count map; None when absent or invalid."""
+    if not isinstance(value, dict):
+        return None
+    total = 0
+    for name, count in value.items():
+        if (not isinstance(name, str) or not isinstance(count, int)
+                or isinstance(count, bool) or count < 0):
+            return None
+        total += count
+    return total
+
+
+def history_tool_denial_total(history: object) -> Optional[int]:
+    """Sum of recorded per-turn denials; None when no turn recorded them."""
+    if not isinstance(history, list):
+        return None
+    totals = [tool_denial_total(item.get("tool_denials"))
+              for item in history if isinstance(item, dict)]
+    known = [total for total in totals if total is not None]
+    return sum(known) if known else None
+
+
+def format_tool_denial_note(agent_name: str, denials: Optional[dict]) -> Optional[str]:
+    total = tool_denial_total(denials)
+    if not total:
+        return None
+    ordered = sorted(denials.items(), key=lambda item: (-item[1], item[0]))
+    detail = ", ".join(f"{name}×{count}" for name, count in ordered)
+    return (f"[duet] note: {agent_name} was denied {total} tool call(s) this "
+            f"turn ({detail}). Conclusions in this reply that depend on those "
+            "tools were not executed; run the needed checks before relying on them.")
+
+
+def _append_tool_denial_note(reply: str, agent: Agent,
+                             call_succeeded: bool) -> tuple[str, Optional[dict]]:
+    denials = agent.last_tool_denials if call_succeeded else None
+    note = format_tool_denial_note(agent.name, denials)
+    return (f"{reply}\n\n{note}" if note else reply), denials
+
+
+def _record_tool_denials(entry: dict, denials: Optional[dict]) -> None:
+    if denials is not None:
+        entry["tool_denials"] = dict(denials)
+
+
 def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
                 reasoning: Optional[str] = None,
@@ -2222,6 +2311,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         payload = json.loads(out)
         _metrics_record_raw_output(agent, out)
         _metrics_record_claude_metadata(agent, payload)
+        agent.last_tool_denials = parse_claude_tool_denials(payload)
         return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
     except json.JSONDecodeError:
         snippet = out[:500].strip()
@@ -3375,6 +3465,7 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
                *, run_dir: Optional[pathlib.Path] = None,
                turn_label: Optional[str] = None) -> str:
     agent.last_call_metrics = {}
+    agent.last_tool_denials = None
     metrics_enabled = getattr(cfg, "metrics_enabled", True)
     sys_prompt = agent.system_prompt(cfg.sentinel, recap=cfg.recap)
     if cfg.finding_reports:
@@ -4578,12 +4669,14 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         append_text_atomic(recap_path, recap_block)
 
     before_handoff_bytes = len(reply.encode("utf-8"))
+    reply, tool_denials = _append_tool_denial_note(reply, speaker, call_succeeded)
     if wt_path is not None and speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
 
     log(speaker.name, speaker.role, reply)
     history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                      "len_chars": len(reply), "session_id": speaker.session_id}
+    _record_tool_denials(history_entry, tool_denials)
     history_entry["metrics"] = _record_turn_metrics(
         speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
@@ -5068,12 +5161,31 @@ def run_duet(cfg: DuetConfig) -> dict:
     )
     _write_run_state(state_path, state)
     print(f"\n[duet] done. reason={finished_reason}. transcript: {transcript_path}")
+    _print_run_end_notes(cfg, finished_reason, history)
     if cfg.recap:
         print(f"[duet] recap: {recap_path}")
     print(f"[duet] resumable session ids — "
           + ", ".join(f"{a.name}={a.session_id}" for a in cfg.agents if a.session_id))
     _print_worktree_notice(cfg, wt_path, wt_branch)
     return state
+
+
+CONVERGED_RUN_NOTE = (
+    "[duet] note: converged means both agents agreed; it is not an independent "
+    "review. Review the final diff in a fresh context and run its checks "
+    "before you merge."
+)
+
+
+def _print_run_end_notes(cfg: DuetConfig, finished_reason: str, history: list) -> None:
+    if cfg.dry_run:
+        return
+    if finished_reason in (FINISHED_CONVERGED, FINISHED_CONVERGED_AFTER_FORCE):
+        print(CONVERGED_RUN_NOTE)
+    denied = history_tool_denial_total(history)
+    if denied:
+        print(f"[duet] note: agents were denied {denied} tool call(s) in this run. "
+              "Claims that depend on those tools are unverified.")
 
 
 def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
@@ -5138,6 +5250,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
             reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
             convergence_hit = False
     before_handoff_bytes = len(reply.encode("utf-8"))
+    reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
     if wt_path is not None and next_speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
     recap_block = ""
@@ -5166,6 +5279,7 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
                      "forced": True, "len_chars": len(reply), "elapsed_s": elapsed,
                      "session_id": next_speaker.session_id,
                      **({"verify": verify_state} if verify_state is not None else {})}
+    _record_tool_denials(history_entry, tool_denials)
     history_entry["metrics"] = _record_turn_metrics(
         next_speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
@@ -5895,6 +6009,7 @@ def _status_base(arg: str, run_dir: Optional[pathlib.Path]) -> dict:
         "active_turn": None,
         "last_completed_turn": None,
         "last_timeout": None,
+        "tool_denials": None,
         "artifacts": {
             "state": str((run_dir / "state.json").resolve()) if run_dir else None,
             "transcript": None,
@@ -5922,6 +6037,9 @@ def _absolute_status_path(run_dir: pathlib.Path, value: object) -> Optional[str]
     return str(path.resolve())
 
 
+_STATUS_AGENT_NAME_RE = re.compile(r"[\w.:-]{1,128}")
+
+
 def _status_history_turn(item: object) -> Optional[dict]:
     """Sanitize one history entry for the public status contract."""
     if not isinstance(item, dict):
@@ -5930,7 +6048,7 @@ def _status_history_turn(item: object) -> Optional[dict]:
     if not isinstance(turn, int) or isinstance(turn, bool):
         return None
     agent = item.get("agent")
-    if not isinstance(agent, str) or not re.fullmatch(r"[\w.:-]{1,128}", agent):
+    if not isinstance(agent, str) or not _STATUS_AGENT_NAME_RE.fullmatch(agent):
         agent = None
     elapsed = item.get("elapsed_s")
     if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool):
@@ -5951,6 +6069,7 @@ def _status_history_turn(item: object) -> Optional[dict]:
         "elapsed_seconds": elapsed,
         "output_chars": output_chars,
         "finished_reason": finished_reason,
+        "tool_denials": tool_denial_total(item.get("tool_denials")),
     }
 
 
@@ -6080,6 +6199,7 @@ def build_run_status(arg: str) -> dict:
         snapshot["finished_reason"] = "unknown"
     snapshot["last_completed_turn"] = _last_completed_turn(state)
     snapshot["last_timeout"] = _last_timeout(state)
+    snapshot["tool_denials"] = history_tool_denial_total(state.get("history"))
     snapshot["artifacts"] = _status_artifacts(run_dir, state)
     per_turn_timeout = _positive_int_or_none(state.get("per_turn_timeout"))
     snapshot["per_turn_timeout"] = per_turn_timeout
@@ -6157,6 +6277,9 @@ def _print_human_status(snapshot: dict, arg: str) -> None:
     print(f"  finished_reason: {snapshot['finished_reason']!r}")
     budget = snapshot["per_turn_timeout"]
     print(f"  turn_timeout:    {f'{budget}s' if budget is not None else '?'}")
+    if snapshot.get("tool_denials"):
+        print(f"  tool_denials:    {snapshot['tool_denials']} "
+              "(claims that need those tools are unverified)")
     recap = snapshot["artifacts"]["recap"]
     if recap is not None:
         print(f"  recap:           {recap}")
@@ -6463,6 +6586,27 @@ def _finding_current(events: list[dict]) -> list[dict]:
     return result
 
 
+def _finding_execution_limits(state: dict) -> list[dict]:
+    """Per-agent denied tool-call totals; names only, never tool input."""
+    history = state.get("history")
+    if not isinstance(history, list):
+        return []
+    slots = _finding_slot_map(state)
+    totals: dict[str, int] = {}
+    for entry in history[:_FINDING_EVENT_LIMIT]:
+        if not isinstance(entry, dict):
+            continue
+        count = tool_denial_total(entry.get("tool_denials"))
+        agent = entry.get("agent")
+        if not count:
+            continue
+        if not isinstance(agent, str) or not _STATUS_AGENT_NAME_RE.fullmatch(agent):
+            agent = "unknown"
+        totals[agent] = totals.get(agent, 0) + count
+    return [{"agent": agent, "slot": slots.get(agent), "denied_tool_calls": count}
+            for agent, count in totals.items()]
+
+
 def build_finding_report(state: dict) -> dict:
     """Project local structured assessments without asserting their correctness."""
     state = state if isinstance(state, dict) else {}
@@ -6485,6 +6629,7 @@ def build_finding_report(state: dict) -> dict:
             "finished_reason": _finding_text(state.get("finished_reason")),
             "events": events, "findings": findings, "summary": summary,
             "structured_turns": coverage, "executed_checks": checks,
+            "execution_limits": _finding_execution_limits(state),
             "truncated": truncated or len(baseline) > _FINDING_EVENT_LIMIT}
 
 
@@ -6542,6 +6687,11 @@ def render_finding_report(report: dict) -> str:
                  f"{coverage['malformed']} malformed; {coverage['failed']} failed calls ignored.")
     if report["truncated"]:
         parts.append("The bounded event/history limit was reached. This report is incomplete.")
+    for limit in report.get("execution_limits") or []:
+        slot = f" ({limit['slot']})" if limit["slot"] else ""
+        parts.append(f"Execution limits: `{limit['agent']}`{slot} was denied "
+                     f"{limit['denied_tool_calls']} tool call(s). Claims that depend "
+                     "on those tools were not executed.")
     parts.extend(_render_finding(finding) for finding in report["findings"])
     parts.extend(["## Executed harness checks",
                   "These recorded run checks are separate from agent-supplied evidence. "

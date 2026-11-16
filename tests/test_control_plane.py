@@ -524,7 +524,7 @@ class TestStatusSchema(unittest.TestCase):
                 "schema_version", "kind", "duet_version", "run_id", "run_dir",
                 "health", "phase", "exit_code", "turns_used", "finished_reason",
                 "per_turn_timeout", "active_turn", "last_completed_turn",
-                "last_timeout", "artifacts", "error",
+                "last_timeout", "tool_denials", "artifacts", "error",
             })
             self.assertEqual(snapshot["kind"], "duet.status")
             self.assertEqual(snapshot["health"], "terminal")
@@ -604,6 +604,7 @@ class TestStatusSchema(unittest.TestCase):
                 "elapsed_seconds": 10.5,
                 "output_chars": 456,
                 "finished_reason": None,
+                "tool_denials": None,
             })
             self.assertEqual(snapshot["last_timeout"], {
                 "turn": 1,
@@ -611,6 +612,7 @@ class TestStatusSchema(unittest.TestCase):
                 "elapsed_seconds": 60.2,
                 "output_chars": 123,
                 "finished_reason": "timeout",
+                "tool_denials": None,
             })
             self.assertNotIn(secret, json.dumps(snapshot))
 
@@ -1239,6 +1241,149 @@ class TestTimeoutContinueLoop(unittest.TestCase):
         # so it can review the on-disk work the coder never got to summarize.
         self.assertIn("[duet] TIMEOUT: turn 01", calls[1]["message"])
         self.assertIn("#### worktree changes", calls[1]["message"])
+
+
+class TestToolDenialStatus(unittest.TestCase):
+    def _status(self, root: pathlib.Path, history: list) -> dict:
+        run = root / "20260719-120000"
+        run.mkdir()
+        (run / "state.json").write_text(json.dumps({
+            "phase": "finished", "turns_used": len(history),
+            "finished_reason": "converged", "history": history,
+        }), encoding="utf-8")
+        return duet.build_run_status(str(run))
+
+    def test_turn_values_are_coerced_to_a_total_or_null(self) -> None:
+        cases = (
+            ({"Bash": 2, "Read": 1}, 3), ({}, 0), ({"Bash": True}, None),
+            ({"Bash": "2"}, None), ({"Bash": -1}, None), ("3", None), (3, None),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                turn = duet._status_history_turn(
+                    {"turn": 1, "agent": "a", "tool_denials": value})
+                self.assertEqual(turn["tool_denials"], expected)
+        self.assertIsNone(duet._status_history_turn({"turn": 1})["tool_denials"])
+
+    def test_top_level_total_counts_only_recorded_turns(self) -> None:
+        secret = "tool-input-secret"
+        with tempfile.TemporaryDirectory() as raw:
+            snapshot = self._status(pathlib.Path(raw), [
+                {"turn": 1, "agent": "codex-coder"},
+                {"turn": 2, "agent": "claude-reviewer",
+                 "tool_denials": {"Bash": 2, secret: "bad"}},
+                {"turn": 3, "agent": "claude-reviewer", "tool_denials": {"Bash": 1}},
+            ])
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                duet._print_human_status(snapshot, "run")
+        self.assertEqual(snapshot["tool_denials"], 1)
+        self.assertEqual(snapshot["last_completed_turn"]["tool_denials"], 1)
+        self.assertNotIn(secret, json.dumps(snapshot))
+        self.assertIn("tool_denials:    1", human.getvalue())
+
+    def test_top_level_total_is_null_when_no_turn_recorded_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            snapshot = self._status(pathlib.Path(raw), [{"turn": 1, "agent": "a"}])
+            human = io.StringIO()
+            with contextlib.redirect_stdout(human):
+                duet._print_human_status(snapshot, "run")
+        self.assertIsNone(snapshot["tool_denials"])
+        self.assertNotIn("tool_denials", human.getvalue())
+
+
+class TestToolDenialLoop(unittest.TestCase):
+    """Denials reach history, transcript, and the partner without changing convergence."""
+
+    PROPOSAL = "LGTM rationale: checked the diff by reading it.\n<<<LGTM>>>"
+
+    def _run(self, root: pathlib.Path, replies: list, *, dry_run: bool = False):
+        calls: list[dict] = []
+
+        def fake_call_agent(agent, message, cfg_, first_turn_for_agent,
+                            *, run_dir=None, turn_label=None):
+            text, denials = replies[len(calls)]
+            calls.append({"agent": agent.name, "message": message})
+            agent.last_tool_denials = denials
+            return text
+
+        cfg = duet.DuetConfig(cwd=root, agents=_agents(), task="review",
+                              runs_dir=root / "runs", max_turns=len(replies),
+                              dry_run=dry_run, metrics_enabled=False)
+        out = io.StringIO()
+        with mock.patch.object(duet, "call_agent", fake_call_agent), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet.sys.stdin, "isatty", return_value=False), \
+                contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            state = duet.run_duet(cfg)
+        return state, calls, out.getvalue()
+
+    def test_denials_are_recorded_and_handed_to_partner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, calls, out = self._run(root, [
+                ("implemented the change", None),
+                (self.PROPOSAL, {"Bash": 2}),
+                (self.PROPOSAL, None),
+            ])
+            transcript = pathlib.Path(state["transcript_path"]).read_text()
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertNotIn("tool_denials", state["history"][0])
+        self.assertEqual(state["history"][1]["tool_denials"], {"Bash": 2})
+        note = "[duet] note: claude-reviewer was denied 2 tool call(s) this turn (Bash×2)."
+        self.assertIn(note, calls[2]["message"])
+        self.assertIn(note, transcript)
+        self.assertIn(duet.CONVERGED_RUN_NOTE, out)
+        self.assertIn("[duet] note: agents were denied 2 tool call(s) in this run.", out)
+        self.assertLess(out.index("[duet] done. reason=converged"),
+                        out.index(duet.CONVERGED_RUN_NOTE))
+
+    def test_known_empty_denials_are_recorded_without_a_note(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, calls, out = self._run(root, [("done", None), ("checked", {})])
+        self.assertEqual(state["history"][1]["tool_denials"], {})
+        self.assertNotIn("was denied", out)
+        self.assertNotIn(duet.CONVERGED_RUN_NOTE, out)
+
+    def test_dry_run_prints_no_end_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, _, out = self._run(
+                root, [(self.PROPOSAL, {"Bash": 1}), (self.PROPOSAL, None)],
+                dry_run=True)
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertNotIn(duet.CONVERGED_RUN_NOTE, out)
+        self.assertNotIn("in this run", out)
+
+    def test_forced_turn_records_denials(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            transcript = root / "transcript.md"
+            transcript.write_text("", encoding="utf-8")
+            agents = _agents()
+            cfg = duet.DuetConfig(cwd=root, agents=agents, task="review",
+                                  runs_dir=root, metrics_enabled=False)
+
+            def fake_call_agent(agent, *args, **kwargs):
+                agent.last_tool_denials = {"Read": 1}
+                return "forced reply"
+
+            history: list = []
+            with mock.patch.object(duet, "call_agent", fake_call_agent), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = duet._run_forced_turn(
+                    cfg, forced_turn=1, next_speaker=agents[0], forced_msg="fix",
+                    first_turn_for_agent=False, transcript_path=transcript,
+                    wt_path=None, wt_branch=None, history=history,
+                    seen_first_turn={a.name: True for a in agents},
+                    last_verify_state=None)
+            saved = transcript.read_text()
+        self.assertEqual(history[0]["tool_denials"], {"Read": 1})
+        self.assertIn("was denied 1 tool call(s) this turn (Read×1)", result.reply)
+        self.assertIn("was denied 1 tool call(s)", saved)
 
 
 if __name__ == "__main__":

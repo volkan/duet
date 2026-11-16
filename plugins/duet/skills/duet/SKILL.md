@@ -198,6 +198,14 @@ When `last_timeout` is non-null, report its turn and agent; it remains present
 when the review recipe continues past one non-final coder timeout so the
 partner can inspect its failure block and worktree handoff.
 
+A `finished_reason` of `converged` or `converged_after_force` means that the
+two agents agreed. It is not an independent review. Do not tell the user that
+the code is verified because the run converged. When `tool_denials` is a
+number above zero, report that number to the user. Claims that need the denied
+tools were not executed. `null` means that the backend did not report denials.
+Before you accept code from a run, review the final diff in a fresh context
+and run its checks.
+
 Never copy `state.json` wholesale into chat or automation. The status schema is
 the curated interface and excludes prompts, shell commands, credentials, and
 backend extra arguments.

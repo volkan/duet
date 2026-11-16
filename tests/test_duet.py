@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import io
+import json
 import pathlib
 import re
 import shlex
@@ -2355,6 +2356,137 @@ class TestStatusHelpers(unittest.TestCase):
         self.assertEqual(rc, 3)
         self.assertIn("status failed (RuntimeError): boom", stderr.getvalue())
         self.assertIn("Traceback (most recent call last)", stderr.getvalue())
+
+    def test_tool_denial_total_accepts_only_name_to_count_maps(self) -> None:
+        self.assertEqual(duet.tool_denial_total({"Bash": 2, "Read": 1}), 3)
+        self.assertEqual(duet.tool_denial_total({}), 0)
+        for value in (None, 3, "3", [1], {"Bash": True}, {"Bash": "2"},
+                      {"Bash": -1}, {"Bash": 1.0}, {1: 1}, {"Bash": 1, "Read": None}):
+            with self.subTest(value=value):
+                self.assertIsNone(duet.tool_denial_total(value))
+
+    def test_history_tool_denial_total_skips_unknown_turns(self) -> None:
+        history = [{"tool_denials": {"Bash": 2}}, {"turn": 2},
+                   {"tool_denials": {"Bash": "x"}}, "bad", {"tool_denials": {}}]
+        self.assertEqual(duet.history_tool_denial_total(history), 2)
+        self.assertIsNone(duet.history_tool_denial_total([{"turn": 1}]))
+        self.assertIsNone(duet.history_tool_denial_total("not a list"))
+
+
+# ---------- Claude tool denials ----------
+
+
+class TestClaudeToolDenials(unittest.TestCase):
+    SECRET = "TOKEN=do-not-keep"
+
+    def test_names_are_counted_and_tool_input_is_discarded(self) -> None:
+        payload = {"permission_denials": [
+            {"tool_name": "Bash", "tool_use_id": "x1",
+             "tool_input": {"command": f"curl -H '{self.SECRET}' example.test"}},
+            {"tool_name": "Bash", "tool_input": {"command": "node -e 1"}},
+            {"tool_name": "Read", "tool_input": {"file_path": f"/home/{self.SECRET}"}},
+        ]}
+        denials = duet.parse_claude_tool_denials(payload)
+        self.assertEqual(denials, {"Bash": 2, "Read": 1})
+        self.assertNotIn(self.SECRET, repr(denials))
+
+    def test_absent_or_non_list_field_is_unknown_and_empty_list_is_known(self) -> None:
+        self.assertEqual(duet.parse_claude_tool_denials({"permission_denials": []}), {})
+        for payload in ({}, {"permission_denials": None}, {"permission_denials": {}},
+                        {"permission_denials": "Bash"}, [], "text", None):
+            with self.subTest(payload=payload):
+                self.assertIsNone(duet.parse_claude_tool_denials(payload))
+
+    def test_malformed_and_unsafe_names_count_as_other(self) -> None:
+        entries = ["Bash", {}, {"tool_name": 7}, {"tool_name": ""},
+                   {"tool_name": "rm -rf /"}, {"tool_name": "Bash;id"},
+                   {"tool_name": "x" * 65}, {"tool_name": "mcp__srv__tool"}]
+        denials = duet.parse_claude_tool_denials({"permission_denials": entries})
+        self.assertEqual(denials, {duet.TOOL_DENIAL_OTHER: 7, "mcp__srv__tool": 1})
+
+    def test_distinct_names_are_capped(self) -> None:
+        entries = [{"tool_name": f"Tool{i}"} for i in range(12)]
+        denials = duet.parse_claude_tool_denials({"permission_denials": entries})
+        named = set(denials) - {duet.TOOL_DENIAL_OTHER}
+        self.assertEqual(len(named), duet.TOOL_DENIAL_MAX_NAMES)
+        self.assertEqual(denials[duet.TOOL_DENIAL_OTHER], 4)
+        self.assertEqual(sum(denials.values()), 12)
+
+    def test_call_claude_records_denials_for_the_loop(self) -> None:
+        output = json.dumps({"result": "ok", "session_id": "sid", "permission_denials": [
+            {"tool_name": "Bash", "tool_input": {"command": self.SECRET}}]})
+        agent = duet.Agent(name="claude-lead", backend="claude", role="reviewer")
+        with mock.patch.object(duet, "_run", return_value=(0, output, "")):
+            duet.call_claude(agent, "sys", "msg", _ROOT, "acceptEdits", 60, dry=False)
+        self.assertEqual(agent.last_tool_denials, {"Bash": 1})
+        self.assertNotIn(self.SECRET, repr(agent))
+
+        without = json.dumps({"result": "ok", "session_id": "sid"})
+        with mock.patch.object(duet, "_run", return_value=(0, without, "")):
+            duet.call_claude(agent, "sys", "msg", _ROOT, "acceptEdits", 60, dry=False)
+        self.assertIsNone(agent.last_tool_denials)
+
+    def test_call_agent_resets_stale_denials(self) -> None:
+        agent = duet.Agent(name="claude-lead", backend="claude", role="reviewer")
+        agent.last_tool_denials = {"Bash": 3}
+        cfg = duet.DuetConfig(cwd=_ROOT, runs_dir=_ROOT / "runs", task="x",
+                              agents=[agent, duet.Agent("codex-partner", "codex")],
+                              dry_run=True, metrics_enabled=False)
+        duet.call_agent(agent, "msg", cfg, first_turn_for_agent=True)
+        self.assertIsNone(agent.last_tool_denials)
+
+    def test_note_is_bounded_and_ordered(self) -> None:
+        note = duet.format_tool_denial_note("claude-lead", {"Read": 1, "Bash": 2})
+        self.assertEqual(
+            note,
+            "[duet] note: claude-lead was denied 3 tool call(s) this turn "
+            "(Bash×2, Read×1). Conclusions in this reply that depend on those "
+            "tools were not executed; run the needed checks before relying on them.",
+        )
+        self.assertIsNone(duet.format_tool_denial_note("claude-lead", {}))
+        self.assertIsNone(duet.format_tool_denial_note("claude-lead", None))
+
+    def test_note_is_only_appended_after_a_successful_call(self) -> None:
+        agent = duet.Agent(name="claude-lead", backend="claude", role="reviewer")
+        agent.last_tool_denials = {"Bash": 1}
+        reply, denials = duet._append_tool_denial_note("text", agent, True)
+        self.assertTrue(reply.startswith("text\n\n[duet] note: claude-lead"))
+        self.assertEqual(denials, {"Bash": 1})
+        self.assertEqual(duet._append_tool_denial_note("text", agent, False),
+                         ("text", None))
+        agent.last_tool_denials = {}
+        self.assertEqual(duet._append_tool_denial_note("text", agent, True),
+                         ("text", {}))
+
+
+# ---------- review evidence prompts ----------
+
+
+class TestReviewEvidencePrompts(unittest.TestCase):
+    def test_convergence_instruction_requires_named_checks(self) -> None:
+        text = duet.CONVERGENCE_INSTRUCTION
+        self.assertIn("A bare sentinel without that rationale is ignored.", text)
+        self.assertIn("name each check you ran with its command and result", text)
+        self.assertIn("treat it as unverified", text)
+        self.assertIn("correct, fast, or safe does not support convergence", text)
+
+    def test_reviewer_roles_share_the_evidence_instruction(self) -> None:
+        shared = duet.REVIEWER_EVIDENCE_INSTRUCTION
+        self.assertIn("inputs that should fail", shared)
+        self.assertIn("large inputs where cost can grow", shared)
+        self.assertIn("paste the command and its output", shared)
+        for role in ("reviewer", "triage-reviewer"):
+            self.assertIn(shared, duet.ROLE_PROMPTS[role])
+        for role in ("planner", "coder"):
+            self.assertNotIn(shared, duet.ROLE_PROMPTS[role])
+
+    def test_role_prompts_render_with_replace_only(self) -> None:
+        for role, template in duet.ROLE_PROMPTS.items():
+            with self.subTest(role=role):
+                self.assertNotIn("{", template)
+                prompt = duet.Agent("a", "claude", role).system_prompt(SENTINEL)
+                self.assertIn(SENTINEL, prompt)
+                self.assertNotIn("{SENTINEL}", prompt)
 
 
 # ---------- normalize_verify_cmd ----------

@@ -269,6 +269,11 @@ For a live turn, `active_turn.budget_seconds` reports the saved budget and
 the review recipe continues after one non-final coder timeout so the partner
 can inspect its failure block and worktree handoff.
 
+A `converged` result means that the two agents agreed. It is not an
+independent review. When `tool_denials` is a number above zero, report it.
+Claims that need the denied tools were not executed. Before you accept code
+from a run, review the final diff in a fresh context and run its checks.
+
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
 `artifacts.transcript` file and the stderr log that it names.
