@@ -54,8 +54,9 @@ The report includes:
   agent-supplied evidence. A passing run check does not verify every claim.
 - Execution limits, when Claude reported denied tool calls. Each line names the
   agent, its slot, and its total denied calls. Checks that needed those tools
-  did not run. Only successful loop and forced turns count, not the kickoff or
-  seed extraction. Execution limits cover only the current run's turns.
+  did not run. Successful loop and forced turns count, and so does the
+  `review` recipe kickoff (`review-kickoff`, no slot). Seed extraction does not
+  count. Execution limits cover only the current run's turns.
   Assessments inherited by `--continue` or `--resolve` keep their limits in the
   source run's `review.md`. The report never shows tool names or tool input.
 

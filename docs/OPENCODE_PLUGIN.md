@@ -220,8 +220,8 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 A `converged` or `converged_after_force` result means that the two agents
 agreed. It is not an independent review. When `tool_denials` is a number above
 zero, report it. Checks that needed the denied tools did not run, so dependent
-claims are unverified. The count covers only successful loop and forced turns,
-not the kickoff or seed extraction. `null` means that the backend did not
+claims are unverified. The count covers successful loop and forced turns and
+the `review` recipe kickoff, but not seed extraction. `null` means that the backend did not
 report denials. Tell the user that convergence is not an independent review.
 Recommend that they review the final diff in a fresh context and run its
 checks before they accept or merge the code.

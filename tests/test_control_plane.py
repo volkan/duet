@@ -28,7 +28,8 @@ class TestReviewRecipe(unittest.TestCase):
         return parser, args
 
     def test_review_defaults_are_canonical(self) -> None:
-        _, args = self._args("--recipe", "review")
+        parser, args = self._args("--recipe", "review")
+        cfg = duet._build_cfg_from_cli(args, parser, {})
         self.assertEqual(args.lead, "claude:reviewer")
         self.assertEqual(args.partner, "codex:coder")
         self.assertEqual(args.turns, 6)
@@ -36,10 +37,10 @@ class TestReviewRecipe(unittest.TestCase):
         self.assertTrue(args.worktree)
         self.assertTrue(args.require_worktree)
         self.assertEqual(args.lead_model, "sonnet")
-        self.assertEqual(
-            duet.shlex.split(args.task_from_cmd)[:5],
-            ["claude", "-p", "/review", "--model", "sonnet"],
-        )
+        self.assertIsNone(args.task_from_cmd)
+        self.assertEqual(cfg.task_from_cmd[:len("claude -p /review --model sonnet")],
+                         "claude -p /review --model sonnet")
+        self.assertEqual(cfg._kickoff_kind, duet.REVIEW_KICKOFF_KIND)
         self.assertEqual(
             pathlib.Path(args.runs_dir),
             pathlib.Path.cwd().resolve() / ".duet" / "runs",
@@ -64,14 +65,15 @@ class TestReviewRecipe(unittest.TestCase):
         )
 
     def test_non_claude_lead_keeps_sonnet_kickoff_default(self) -> None:
-        _, args = self._args(
+        parser, args = self._args(
             "--recipe", "review",
             "--lead", "gemini:reviewer",
         )
+        cfg = duet._build_cfg_from_cli(args, parser, {})
 
         self.assertIsNone(args.lead_model)
         self.assertEqual(
-            duet.shlex.split(args.task_from_cmd)[:5],
+            duet.shlex.split(cfg.task_from_cmd)[:5],
             ["claude", "-p", "/review", "--model", "sonnet"],
         )
 
@@ -1426,6 +1428,406 @@ class TestToolDenialLoop(unittest.TestCase):
         self.assertEqual(history[0]["tool_denials"], {"Read": 1})
         self.assertIn("was denied 1 tool call(s) this turn (Read×1)", result.reply)
         self.assertIn("was denied 1 tool call(s)", saved)
+
+
+def _envelope(result: str = "Review findings.", denials=None, **extra) -> str:
+    payload = {"type": "result", "subtype": "success", "is_error": False,
+               "result": result, "session_id": "kickoff-session-id", "num_turns": 3}
+    if denials is not None:
+        payload["permission_denials"] = denials
+    payload.update(extra)
+    return json.dumps(payload)
+
+
+def _denial(name: str, command: str = "ls") -> dict:
+    return {"tool_name": name, "tool_use_id": "toolu_1",
+            "tool_input": {"command": command}}
+
+
+class TestReviewKickoffCommand(unittest.TestCase):
+    def _cfg(self, *argv: str) -> duet.DuetConfig:
+        parser = duet._build_arg_parser()
+        args = parser.parse_args(["--recipe", "review", *argv])
+        duet._apply_recipe_args(args)
+        return duet._build_cfg_from_cli(args, parser, {})
+
+    def _tokens(self, *argv: str) -> list:
+        return duet.shlex.split(self._cfg(*argv).task_from_cmd)
+
+    def test_command_requests_json_denials_blocks_and_evidence(self) -> None:
+        cfg = self._cfg()
+        cmd = duet.shlex.split(cfg.task_from_cmd)
+        self.assertEqual(cfg._kickoff_kind, duet.REVIEW_KICKOFF_KIND)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "json")
+        denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
+        self.assertEqual(tuple(denied), duet.CLAUDE_DENIED_DELEGATION_TOOLS)
+        prompt = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertEqual(prompt, " ".join((
+            duet.NO_SUBAGENTS_INSTRUCTION, duet.REVIEW_EVIDENCE_CRITERIA,
+            duet.KICKOFF_MISSING_EVIDENCE_SENTENCE)))
+        self.assertIn("inputs that should fail", prompt)
+        self.assertIn("name the missing check in your findings", prompt)
+        self.assertNotIn("ask your partner", prompt)
+
+    def test_requested_permission_mode_is_never_an_edit_mode(self) -> None:
+        for mode, expected in (("plan", "plan"), ("default", "default"),
+                               ("acceptEdits", "default"),
+                               ("bypassPermissions", "default")):
+            with self.subTest(mode=mode):
+                cmd = self._tokens("--permission-mode", mode)
+                self.assertEqual(cmd[cmd.index("--permission-mode") + 1], expected)
+        cmd = self._tokens()
+        self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "default")
+
+    def test_permission_mode_from_a_config_file_follows_the_same_rule(self) -> None:
+        for mode, expected in (("plan", "plan"), ("bypassPermissions", "default")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw).resolve()
+                path = root / "duet.json"
+                path.write_text(json.dumps({
+                    "cwd": str(root), "permission_mode": mode,
+                    "agents": [{"name": "claude-reviewer", "backend": "claude",
+                                "role": "reviewer"},
+                               {"name": "codex-coder", "backend": "codex",
+                                "role": "coder"}],
+                }), encoding="utf-8")
+                parser = duet._build_arg_parser()
+                args = parser.parse_args(["--recipe", "review", "--config", str(path)])
+                duet._apply_recipe_args(args)
+                cfg = duet._build_cfg_from_yaml(args, parser, {})
+                cmd = duet.shlex.split(cfg.task_from_cmd)
+                self.assertEqual(cmd[cmd.index("--permission-mode") + 1], expected)
+                self.assertEqual(cfg._kickoff_kind, duet.REVIEW_KICKOFF_KIND)
+
+    def test_a_config_file_seed_clears_the_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            path = root / "duet.json"
+            path.write_text(json.dumps({
+                "cwd": str(root), "task": "from the file",
+                "agents": [{"name": "claude-reviewer", "backend": "claude"},
+                           {"name": "codex-coder", "backend": "codex"}],
+            }), encoding="utf-8")
+            parser = duet._build_arg_parser()
+            args = parser.parse_args(["--recipe", "review", "--config", str(path)])
+            duet._apply_recipe_args(args)
+            cfg = duet._build_cfg_from_yaml(args, parser, {})
+        self.assertEqual(cfg.task, "from the file")
+        self.assertIsNone(cfg.task_from_cmd)
+        self.assertIsNone(cfg._kickoff_kind)
+
+    def test_explicit_seeds_never_get_the_recipe_marker(self) -> None:
+        for argv in (("--task", "inspect"), ("--kickoff", "go"),
+                     ("--task-from-cmd", "printf seed")):
+            with self.subTest(argv=argv):
+                cfg = self._cfg(*argv)
+                self.assertIsNone(cfg._kickoff_kind)
+                if argv[0] == "--task-from-cmd":
+                    self.assertEqual(cfg.task_from_cmd, "printf seed")
+                else:
+                    self.assertIsNone(cfg.task_from_cmd)
+
+    def test_marker_never_reaches_state_or_continue(self) -> None:
+        cfg = self._cfg()
+        state = duet._build_run_state(
+            cfg, turns_used=0, history=[], finished_reason=None,
+            transcript_path=pathlib.Path("t.md"),
+            recap_path=pathlib.Path("r.md"))
+        self.assertNotIn(duet.REVIEW_KICKOFF_KIND, json.dumps(state))
+        self.assertNotIn("_kickoff_kind", state)
+        self.assertNotIn("task_from_cmd", state)
+
+
+class TestReviewKickoffParsing(unittest.TestCase):
+    def test_valid_envelope_returns_result_and_denial_counts(self) -> None:
+        text, denials = duet._parse_review_kickoff_output(_envelope(
+            "Findings here", [_denial("Bash"), _denial("Bash"), _denial("Read")]))
+        self.assertEqual(text, "Findings here")
+        self.assertEqual(denials, {"Bash": 2, "Read": 1})
+
+    def test_missing_denials_are_unknown_and_an_empty_list_is_zero(self) -> None:
+        self.assertIsNone(duet._parse_review_kickoff_output(_envelope())[1])
+        self.assertEqual(duet._parse_review_kickoff_output(_envelope(denials=[]))[1], {})
+
+    def test_bad_envelopes_are_kickoff_errors(self) -> None:
+        bad = {
+            "empty output": "",
+            "invalid json": "plain review text",
+            "list root": "[]",
+            "string root": '"text"',
+            "empty result": _envelope(""),
+            "blank result": _envelope("  \n"),
+            "non-string result": json.dumps({"result": 5}),
+            "missing result": json.dumps({"is_error": False}),
+            "is_error": _envelope("looks fine", is_error=True),
+            "deep nesting": "[" * 100000,
+        }
+        for name, out in bad.items():
+            with self.subTest(name=name):
+                with self.assertRaises(duet.AgentRunError) as raised:
+                    duet._parse_review_kickoff_output(out)
+                self.assertEqual(raised.exception.finished_reason,
+                                 duet.FINISHED_KICKOFF_ERROR)
+
+    def test_error_text_never_echoes_the_output(self) -> None:
+        secret = "private-envelope-secret"
+        for out in (secret, json.dumps([secret]), _envelope(secret, is_error=True)):
+            with self.subTest(out=out[:20]):
+                with self.assertRaises(duet.AgentRunError) as raised:
+                    duet._parse_review_kickoff_output(out)
+                self.assertNotIn(secret, str(raised.exception))
+
+    def test_result_limit_applies_to_the_result_not_the_envelope(self) -> None:
+        # "é" becomes a six-character é escape, so this envelope is far
+        # larger than TASK_MAX_CHARS while the result is exactly at the limit.
+        at_limit = _envelope("é" * duet.TASK_MAX_CHARS)
+        self.assertGreater(len(at_limit), duet.TASK_MAX_CHARS)
+        self.assertLessEqual(len(at_limit), duet.KICKOFF_ENVELOPE_MAX_CHARS)
+        text, _ = duet._parse_review_kickoff_output(at_limit)
+        self.assertEqual(len(text), duet.TASK_MAX_CHARS)
+        with self.assertRaises(duet.AgentRunError):
+            duet._parse_review_kickoff_output(
+                _envelope("é" * (duet.TASK_MAX_CHARS + 1)))
+
+    def test_shell_stage_accepts_a_large_envelope_but_caps_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            big = _envelope("é" * duet.TASK_MAX_CHARS)
+            with mock.patch.object(duet, "_run", return_value=(0, big, "")):
+                text, _ = duet.run_review_kickoff("cmd", root, 10, root)
+            self.assertEqual(len(text), duet.TASK_MAX_CHARS)
+            huge = "x" * (duet.KICKOFF_ENVELOPE_MAX_CHARS + 1)
+            with mock.patch.object(duet, "_run", return_value=(0, huge, "")), \
+                    self.assertRaises(duet.AgentRunError):
+                duet.run_review_kickoff("cmd", root, 10, root)
+            with mock.patch.object(duet, "_run", return_value=(0, big, "")), \
+                    self.assertRaises(duet.AgentRunError):
+                duet.run_task_from_cmd("cmd", root, 10, root)
+
+
+class TestReviewKickoffRun(unittest.TestCase):
+    PROPOSAL = "LGTM rationale: checked the diff by reading it.\n<<<LGTM>>>"
+    SECRET = "Bearer SUPER-SECRET-TOKEN"
+
+    def _cfg(self, root: pathlib.Path, *, recipe: bool = True, **kwargs):
+        cfg = duet.DuetConfig(
+            cwd=root, agents=_agents(), runs_dir=root / "runs",
+            task_from_cmd="claude -p /review --private-flag",
+            metrics_enabled=False, finding_reports=True, **kwargs)
+        if recipe:
+            cfg._kickoff_kind = duet.REVIEW_KICKOFF_KIND
+        return cfg
+
+    def _run(self, cfg, kickoff_out: str, replies=(), *, inputs=None, tty=False):
+        shell_calls: list = []
+        agent_calls: list = []
+        root = cfg.cwd
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] != "sh":
+                raise AssertionError(f"unexpected command {cmd}")
+            states = list((root / "runs").glob("*/state.json"))
+            self.assertEqual(len(states), 1)
+            saved = states[0].read_text(encoding="utf-8")
+            self.assertEqual(json.loads(saved)["phase"], "kickoff_running")
+            self.assertNotIn("--private-flag", saved)
+            shell_calls.append(cmd)
+            return 0, kickoff_out, ""
+
+        def fake_call_agent(agent, message, cfg_, first_turn_for_agent, *,
+                            run_dir=None, turn_label=None):
+            agent_calls.append({"agent": agent.name, "message": message,
+                                "label": turn_label})
+            agent.last_tool_denials = None
+            return replies[len(agent_calls) - 1]
+
+        out = io.StringIO()
+        with mock.patch.object(duet, "_run", fake_run), \
+                mock.patch.object(duet, "call_agent", fake_call_agent), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet.sys.stdin, "isatty", return_value=tty), \
+                mock.patch("builtins.input", side_effect=list(inputs or [])), \
+                contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            state = duet.run_duet(cfg)
+        return state, shell_calls, agent_calls, out.getvalue()
+
+    def test_seed_is_the_result_plus_the_denial_note(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, shell, calls, _ = self._run(
+                self._cfg(root, max_turns=2),
+                _envelope("Found a bug.", [_denial("Bash"), _denial("Bash")]),
+                [self.PROPOSAL, self.PROPOSAL])
+        note = ("[duet] note: review-kickoff was denied 2 tool call(s) this turn "
+                "(Bash×2).")
+        self.assertEqual(len(shell), 1)
+        self.assertTrue(state["task"].startswith("Found a bug.\n\n" + note))
+        self.assertIn(note, calls[0]["message"])
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+
+    def test_clean_envelope_seed_has_no_note(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state, _, _, _ = self._run(
+                self._cfg(pathlib.Path(raw).resolve(), max_turns=1),
+                _envelope("All clear.", []), ["done"])
+        self.assertEqual(state["task"], "All clear.")
+        self.assertEqual(state["history"][0]["tool_denials"], {})
+
+    def test_history_entry_records_denials_only_when_the_envelope_has_them(self) -> None:
+        cases = (({"Bash": 2}, [_denial("Bash")] * 2), ({}, []), (None, None))
+        for expected, denials in cases:
+            with self.subTest(expected=expected), \
+                    tempfile.TemporaryDirectory() as raw:
+                state, _, _, _ = self._run(
+                    self._cfg(pathlib.Path(raw).resolve(), max_turns=1),
+                    _envelope("seed", denials), ["done"])
+                entry = state["history"][0]
+                self.assertEqual(
+                    {k: entry[k] for k in ("turn", "agent", "kind")},
+                    {"turn": 0, "agent": "review-kickoff", "kind": "kickoff"})
+                self.assertEqual(entry["len_chars"], len("seed"))
+                if expected is None:
+                    self.assertNotIn("tool_denials", entry)
+                else:
+                    self.assertEqual(entry["tool_denials"], expected)
+
+    def test_bad_envelope_ends_the_run_with_kickoff_error(self) -> None:
+        for out in ("not json", "[]", _envelope(""), _envelope("x", is_error=True)):
+            with self.subTest(out=out[:20]), tempfile.TemporaryDirectory() as raw:
+                state, _, calls, _ = self._run(
+                    self._cfg(pathlib.Path(raw).resolve()), out)
+                self.assertEqual(state["finished_reason"], duet.FINISHED_KICKOFF_ERROR)
+                self.assertEqual(calls, [])
+                self.assertEqual(state["history"][0]["agent"], "duet")
+                self.assertNotIn("tool_denials", state["history"][0])
+
+    def test_tool_input_and_session_id_never_reach_any_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, _, calls, out = self._run(
+                self._cfg(root, max_turns=1),
+                _envelope("seed text", [_denial("Bash", f"curl -H '{self.SECRET}'")]),
+                ["done"])
+            run_dir = pathlib.Path(state["transcript_path"]).parent
+            snapshot = json.dumps(duet.build_run_status(str(run_dir)))
+            report = (run_dir / "review.md").read_text(encoding="utf-8")
+            files = "".join(f.read_text(encoding="utf-8")
+                            for f in run_dir.iterdir() if f.is_file())
+        for text in (json.dumps(state), snapshot, report, files, out,
+                     calls[0]["message"]):
+            self.assertNotIn("SUPER-SECRET", text)
+            self.assertNotIn("kickoff-session-id", text)
+
+    def test_custom_task_from_cmd_stays_literal_text(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            envelope = _envelope("looks like claude", [_denial("Bash")])
+            state, _, calls, _ = self._run(
+                self._cfg(pathlib.Path(raw).resolve(), recipe=False, max_turns=1),
+                envelope, ["done"])
+        self.assertEqual(state["task"], envelope)
+        self.assertNotIn("kickoff", [e.get("kind") for e in state["history"]])
+        self.assertNotIn("review-kickoff", json.dumps(state))
+        self.assertNotIn("was denied", calls[0]["message"])
+
+    def test_dry_run_never_runs_the_kickoff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            cfg = self._cfg(pathlib.Path(raw).resolve(), dry_run=True)
+            with mock.patch.object(duet, "_run",
+                                   side_effect=AssertionError("kickoff ran")) as run, \
+                    mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+            run.assert_not_called()
+        self.assertNotIn("review-kickoff", json.dumps(state))
+
+    def test_kickoff_denials_are_counted_exactly_once_everywhere(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            state, _, calls, out = self._run(
+                self._cfg(root, max_turns=2),
+                _envelope("seed", [_denial("Bash"), _denial("Read")]),
+                [self.PROPOSAL, self.PROPOSAL])
+            run_dir = pathlib.Path(state["transcript_path"]).parent
+            snapshot = duet.build_run_status(str(run_dir))
+            report = duet.build_finding_report(state)
+            markdown = (run_dir / "review.md").read_text(encoding="utf-8")
+        self.assertEqual(snapshot["tool_denials"], 2)
+        self.assertEqual(duet.history_tool_denial_total(state["history"]), 2)
+        self.assertEqual(report["execution_limits"], [
+            {"agent": "review-kickoff", "slot": None, "denied_tool_calls": 2}])
+        self.assertEqual(markdown.count("`review-kickoff` was denied 2 tool call(s)"), 1)
+        self.assertEqual(out.count("denied 2 tool call(s) in this run"), 1)
+        self.assertEqual(sum("review-kickoff was denied" in c["message"]
+                             for c in calls), 1)
+        self.assertEqual(report["structured_turns"]["missing"], 2)
+
+    def test_turn_numbers_ignore_the_kickoff_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state, _, calls, _ = self._run(
+                self._cfg(pathlib.Path(raw).resolve(), max_turns=2),
+                _envelope("seed"), ["first", "second"])
+        self.assertEqual([c["label"] for c in calls], ["01", "02"])
+        self.assertEqual([e["turn"] for e in state["history"]], [0, 1, 2])
+        self.assertEqual(state["turns_used"], 2)
+
+    def test_forced_turn_follows_the_last_loop_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state, _, calls, _ = self._run(
+                self._cfg(pathlib.Path(raw).resolve(), max_turns=2),
+                _envelope("seed"), ["first", "second", "forced reply"],
+                inputs=["please fix it", ""], tty=True)
+        self.assertEqual(calls[2]["label"], "03-forced")
+        self.assertEqual([e["turn"] for e in state["history"]], [0, 1, 2, 3])
+        self.assertTrue(state["history"][-1]["forced"])
+        self.assertEqual(state["turns_used"], 3)
+
+    def test_loop_turn_count_skips_setup_entries_only(self) -> None:
+        history = [{"kind": "kickoff"}, {"kind": "seed_extract"},
+                   {"kind": "final_review"}, {"turn": 1}, {"turn": 2, "forced": True},
+                   "not a dict"]
+        self.assertEqual(duet._loop_turn_count(history), 3)
+        self.assertEqual(duet._loop_turn_count([]), 0)
+
+    def test_stop_during_setup_reports_loop_turns_only(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._cfg(root)
+            with contextlib.redirect_stdout(io.StringIO()):
+                state = duet._requested_stop_state(
+                    cfg,
+                    history=[duet._review_kickoff_entry(1.0, 4, {"Bash": 1})],
+                    transcript_path=root / "transcript.md",
+                    recap_path=root / "recap.md",
+                    state_path=root / "state.json")
+        self.assertEqual(state["finished_reason"], duet.FINISHED_FORCE_STOP)
+        self.assertEqual(state["turns_used"], 0)
+
+
+class TestReviewEvidenceSplit(unittest.TestCase):
+    OLD = (
+        "Test changed behavior with inputs you choose yourself, not only the "
+        "partner's examples. Include inputs that should fail, removed or renamed "
+        "cases, and large inputs where cost can grow. If you cannot run a command, "
+        "name the missing check and ask your partner to run it and paste the "
+        "command and its output."
+    )
+
+    def test_loop_reviewer_text_is_byte_identical_to_the_old_constant(self) -> None:
+        self.assertEqual(duet.REVIEWER_EVIDENCE_INSTRUCTION, self.OLD)
+        for role in ("reviewer", "triage-reviewer"):
+            self.assertEqual(duet.ROLE_PROMPTS[role].count(self.OLD), 1)
+
+    def test_contexts_share_the_criteria_and_differ_in_the_missing_check_rule(self) -> None:
+        criteria = duet.REVIEW_EVIDENCE_CRITERIA
+        self.assertTrue(self.OLD.startswith(criteria))
+        self.assertNotIn("If you cannot run", criteria)
+        self.assertNotEqual(duet.LOOP_MISSING_EVIDENCE_SENTENCE,
+                            duet.KICKOFF_MISSING_EVIDENCE_SENTENCE)
+        for role in ("reviewer", "triage-reviewer"):
+            self.assertNotIn(duet.KICKOFF_MISSING_EVIDENCE_SENTENCE,
+                             duet.ROLE_PROMPTS[role])
 
 
 if __name__ == "__main__":

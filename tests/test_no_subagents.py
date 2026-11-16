@@ -483,11 +483,15 @@ class TestNoSubagents(unittest.TestCase):
         parser = duet._build_arg_parser()
         args = parser.parse_args(["--recipe", "review"])
         duet._apply_recipe_args(args)
-        cmd = shlex.split(args.task_from_cmd)
+        cmd = shlex.split(duet._build_cfg_from_cli(args, parser, {}).task_from_cmd)
         self.assertEqual(cmd[:5], ["claude", "-p", "/review", "--model", "sonnet"])
         denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
         self.assertTrue({"Agent", "Task", "TeamCreate", "SendMessage", "Skill"}.issubset(denied))
-        self.assertIn("Do not spawn or delegate", cmd[cmd.index("--append-system-prompt") + 1])
+        prompt = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("Do not spawn or delegate", prompt)
+        self.assertTrue(prompt.startswith(duet.NO_SUBAGENTS_INSTRUCTION))
+        self.assertIn(duet.REVIEW_EVIDENCE_CRITERIA, prompt)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "json")
 
     def test_recorded_policy_does_not_claim_historical_runs_disabled_subagents(self):
         agent = duet.Agent("peer", "codex")
