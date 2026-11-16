@@ -1526,15 +1526,16 @@ class TestSetupClone(unittest.TestCase):
                 duet.setup_clone(pathlib.Path(raw), "duet/r1", dest)
 
     def test_setup_clone_from_nested_cwd_preserves_source_checkout_head(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="duet source ") as raw:
+        # The slug keeps only the first 80 characters of the path, so a short
+        # parent keeps "nested dir" inside the slug whatever TMPDIR is.
+        with tempfile.TemporaryDirectory(prefix="duet source ",
+                                         dir=pathlib.Path("/tmp").resolve()) as raw:
             root = pathlib.Path(raw).resolve()
             src = self._repo(root)
             linked = duet.setup_worktree(src, "source-peer", root / "linked source")
             (linked / "app.py").write_text("greet = 'linked'\n")
             self._git("commit", "-am", "linked change", cwd=linked)
-            sources = ((src, "greet = 'hello'\n"), (linked, "greet = 'linked'\n"))
-            for index, (source, content) in enumerate(sources):
-                run_id = f"r{index}"
+            for source, content in ((src, "greet = 'hello'\n"), (linked, "greet = 'linked'\n")):
                 with self.subTest(source=source):
                     nested = source / "nested dir"
                     nested.mkdir()
@@ -1546,10 +1547,10 @@ class TestSetupClone(unittest.TestCase):
                             mock.patch.object(pathlib.Path, "home", return_value=root / "home"), \
                             contextlib.redirect_stdout(io.StringIO()):
                         self.assertEqual(
-                            duet._worktree_dest(cfg, "opencode", run_id, root / "runs"),
-                            duet._worktree_dest(dataclasses.replace(cfg, cwd=source), "opencode", run_id, root / "runs"),
+                            duet._worktree_dest(cfg, "opencode", "r1", root / "runs"),
+                            duet._worktree_dest(dataclasses.replace(cfg, cwd=source), "opencode", "r1", root / "runs"),
                         )
-                        clone, _ = duet._setup_run_worktree(cfg, run_id, root / "runs")
+                        clone, _ = duet._setup_run_worktree(cfg, "r1", root / "runs")
                     self.assertEqual(cfg.cwd, nested)
                     self.assertEqual(cfg.agents[1].cwd_override, clone)
                     self.assertEqual((clone / "app.py").read_text(), content)
