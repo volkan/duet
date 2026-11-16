@@ -172,7 +172,7 @@ class TestFindingProjection(unittest.TestCase):
             {"agent": "reviewer", "slot": "lead", "denied_tool_calls": 3}])
         rendered = duet.render_finding_report(report)
         self.assertIn("Execution limits: `reviewer` (lead) was denied 3 tool call(s). "
-                      "Claims that depend on those tools were not executed.", rendered)
+                      "Checks that needed them did not run.", rendered)
         self.assertNotIn("secret command", rendered)
 
     def test_no_execution_limits_without_recorded_denials(self):

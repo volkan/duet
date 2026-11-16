@@ -899,7 +899,9 @@ partner turn completes. Neither field exposes the saved error or raw history.
 `tool_denials` is the number of tool calls that the backend denied during the
 run. Each turn object has its own `tool_denials` count too. Today only Claude
 reports denials. The value is `null` when no turn recorded the field, for
-example with other backends, dry runs, or older Claude CLIs. A value above
+example with other backends, dry runs, or older Claude CLIs. The total counts
+only turns whose backend reports denials (today Claude), so `0` does not cover
+Codex or other backends. A value above
 zero means that some agent claims may not have been executed. Status never
 shows tool names, commands, or tool input. Invalid saved values become `null`.
 
@@ -1036,15 +1038,16 @@ while the partner can still reject the rationale and ask for another round.
 Convergence means that both agents agreed. It is not an independent review.
 Both agents can agree on code that they did not run. For example, Claude's
 default `acceptEdits` permission mode can deny the Bash tool in `claude -p`.
-The prompts ask each agent to name the checks it ran, with command and result.
-They also ask the agent to mark a claim that depends on a missing check as
-unverified. Duet cannot confirm that an agent followed these instructions.
+The prompts ask each agent to name the checks that either agent ran. Each
+check needs who ran it, its command, and its result. A claim that depends on a
+check with no command and result in the conversation is unverified.
+Duet cannot confirm that an agent followed these instructions.
 
 When Claude reports denied tool calls in a turn, Duet appends one note to that
 reply. The note goes to the transcript and to the partner's next message:
 
 ```text
-[duet] note: claude-reviewer was denied 2 tool call(s) this turn (Bash×2). Conclusions in this reply that depend on those tools were not executed; run the needed checks before relying on them.
+[duet] note: claude-reviewer was denied 2 tool call(s) this turn (Bash×2). Checks that needed them did not run; treat dependent claims as unverified.
 ```
 
 The note never blocks convergence. Duet detects convergence on the agent's own

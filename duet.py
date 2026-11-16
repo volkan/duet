@@ -217,11 +217,12 @@ CONVERGENCE_INSTRUCTION = (
     "its own line. A bare sentinel without that rationale is ignored. If your "
     "partner proposed convergence and you disagree with the rationale, do not "
     "emit the sentinel; explain the gap and ask for another round. In the "
-    "rationale, name each check you ran with its command and result, "
-    "separately from conclusions you reached only by reading. If a conclusion "
-    "depends on a check you could not run, say so and treat it as unverified. "
-    "An unverified claim that code is correct, fast, or safe does not support "
-    "convergence."
+    "rationale, name each check that you or your partner ran, who ran it, and "
+    "its command and result, separately from conclusions reached only by "
+    "reading. If a conclusion depends on a check that no one ran with its "
+    "command and result shown in this conversation, say so and treat it as "
+    "unverified. An unverified claim that code is correct, fast, or safe does "
+    "not support convergence."
 )
 
 REVIEWER_EVIDENCE_INSTRUCTION = (
@@ -2238,8 +2239,8 @@ def format_tool_denial_note(agent_name: str, denials: Optional[dict]) -> Optiona
     ordered = sorted(denials.items(), key=lambda item: (-item[1], item[0]))
     detail = ", ".join(f"{name}×{count}" for name, count in ordered)
     return (f"[duet] note: {agent_name} was denied {total} tool call(s) this "
-            f"turn ({detail}). Conclusions in this reply that depend on those "
-            "tools were not executed; run the needed checks before relying on them.")
+            f"turn ({detail}). Checks that needed them did not run; treat "
+            "dependent claims as unverified.")
 
 
 def _append_tool_denial_note(reply: str, agent: Agent,
@@ -4668,8 +4669,8 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         )
         append_text_atomic(recap_path, recap_block)
 
-    before_handoff_bytes = len(reply.encode("utf-8"))
     reply, tool_denials = _append_tool_denial_note(reply, speaker, call_succeeded)
+    before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
 
@@ -5249,8 +5250,8 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         else:
             reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
             convergence_hit = False
-    before_handoff_bytes = len(reply.encode("utf-8"))
     reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
+    before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and next_speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
     recap_block = ""
@@ -6690,8 +6691,8 @@ def render_finding_report(report: dict) -> str:
     for limit in report.get("execution_limits") or []:
         slot = f" ({limit['slot']})" if limit["slot"] else ""
         parts.append(f"Execution limits: `{limit['agent']}`{slot} was denied "
-                     f"{limit['denied_tool_calls']} tool call(s). Claims that depend "
-                     "on those tools were not executed.")
+                     f"{limit['denied_tool_calls']} tool call(s). Checks that "
+                     "needed them did not run.")
     parts.extend(_render_finding(finding) for finding in report["findings"])
     parts.extend(["## Executed harness checks",
                   "These recorded run checks are separate from agent-supplied evidence. "

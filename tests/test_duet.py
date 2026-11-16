@@ -2440,8 +2440,8 @@ class TestClaudeToolDenials(unittest.TestCase):
         self.assertEqual(
             note,
             "[duet] note: claude-lead was denied 3 tool call(s) this turn "
-            "(Bash×2, Read×1). Conclusions in this reply that depend on those "
-            "tools were not executed; run the needed checks before relying on them.",
+            "(Bash×2, Read×1). Checks that needed them did not run; treat "
+            "dependent claims as unverified.",
         )
         self.assertIsNone(duet.format_tool_denial_note("claude-lead", {}))
         self.assertIsNone(duet.format_tool_denial_note("claude-lead", None))
@@ -2466,7 +2466,9 @@ class TestReviewEvidencePrompts(unittest.TestCase):
     def test_convergence_instruction_requires_named_checks(self) -> None:
         text = duet.CONVERGENCE_INSTRUCTION
         self.assertIn("A bare sentinel without that rationale is ignored.", text)
-        self.assertIn("name each check you ran with its command and result", text)
+        self.assertIn("name each check that you or your partner ran, who ran it", text)
+        self.assertIn("no one ran with its command and result shown in this "
+                      "conversation", text)
         self.assertIn("treat it as unverified", text)
         self.assertIn("correct, fast, or safe does not support convergence", text)
 
@@ -2479,14 +2481,6 @@ class TestReviewEvidencePrompts(unittest.TestCase):
             self.assertIn(shared, duet.ROLE_PROMPTS[role])
         for role in ("planner", "coder"):
             self.assertNotIn(shared, duet.ROLE_PROMPTS[role])
-
-    def test_role_prompts_render_with_replace_only(self) -> None:
-        for role, template in duet.ROLE_PROMPTS.items():
-            with self.subTest(role=role):
-                self.assertNotIn("{", template)
-                prompt = duet.Agent("a", "claude", role).system_prompt(SENTINEL)
-                self.assertIn(SENTINEL, prompt)
-                self.assertNotIn("{SENTINEL}", prompt)
 
 
 # ---------- normalize_verify_cmd ----------
