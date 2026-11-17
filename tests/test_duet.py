@@ -309,6 +309,28 @@ class TestAgentFinishReasons(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertEqual(command[command.index("--model") + 1], "sonnet")
 
+    def test_claude_message_goes_on_stdin_not_in_argv(self) -> None:
+        message = "- a reply that starts with a list item"
+        for sid in (None, "claude-sid"):
+            with self.subTest(sid=sid):
+                calls = []
+
+                def fake_run(cmd, **kwargs):
+                    calls.append((cmd, kwargs))
+                    return 0, '{"result":"ok","session_id":"claude-sid"}', ""
+
+                agent = duet.Agent(name="claude-lead", backend="claude",
+                                   role="planner", session_id=sid)
+                with mock.patch.object(duet, "_run", fake_run):
+                    duet.call_claude(
+                        agent, "sys", message, _ROOT, "acceptEdits", 60, dry=False,
+                    )
+
+                command, kwargs = calls[-1]
+                self.assertNotIn(message, command)
+                self.assertEqual(kwargs["stdin"], message)
+                self.assertEqual("--resume" in command, sid is not None)
+
     def test_codex_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
             return 124, "", "[duet] TIMEOUT after 1s"
@@ -1504,7 +1526,10 @@ class TestSetupClone(unittest.TestCase):
                 duet.setup_clone(pathlib.Path(raw), "duet/r1", dest)
 
     def test_setup_clone_from_nested_cwd_preserves_source_checkout_head(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="duet source ") as raw:
+        # The slug keeps only the first 80 characters of the path, so a short
+        # parent keeps "nested dir" inside the slug whatever TMPDIR is.
+        with tempfile.TemporaryDirectory(prefix="duet source ",
+                                         dir=pathlib.Path("/tmp").resolve()) as raw:
             root = pathlib.Path(raw).resolve()
             src = self._repo(root)
             linked = duet.setup_worktree(src, "source-peer", root / "linked source")
@@ -1628,7 +1653,9 @@ class TestSetupClone(unittest.TestCase):
                         self.assertIsNone(continued._owned_worktree_path)
 
     def test_same_run_id_in_two_repositories_creates_distinct_clones(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
+        # The slug keeps only the first 80 characters of the repository path,
+        # so a short parent keeps the two roots distinct whatever TMPDIR is.
+        with tempfile.TemporaryDirectory(dir=pathlib.Path("/tmp").resolve()) as raw:
             root = pathlib.Path(raw).resolve()
             clones = []
             for name in ("first", "second"):

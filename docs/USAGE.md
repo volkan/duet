@@ -589,6 +589,27 @@ The `review` recipe remains the Claude + Codex workflow. Changing only its
 `--lead` and `--partner` flags still leaves its Claude `/review` kickoff in
 place; use `codex-review` or an explicit task as above to avoid that dependency.
 
+### Review recipe kickoff
+
+The `review` recipe builds its kickoff command from the final run settings.
+The command asks Claude for JSON output and adds the evidence rule that
+reviewers follow. If the kickoff cannot run a check, it must name the missing
+check in its findings so that the coder can run it. Duet requests permission
+mode `plan` when the run uses `plan`. In all other cases, including
+`acceptEdits` and `bypassPermissions`, it requests `default`. Duet only
+requests the mode. Your Claude Code settings and allow rules still decide
+which tools run.
+
+Duet reads the `result` text and the denied tool-call counts from the JSON.
+It discards the rest, including the session ID and tool input. An envelope that
+is not JSON, is not an object, has `is_error: true`, or has an empty `result`
+ends the run with `kickoff_error`. The `result` text has the same size limit as
+`--task`. The kickoff entry in `state.json` has `agent: "review-kickoff"`,
+`kind: "kickoff"`, and `tool_denials` when Claude reported them. Duet adds the
+denial note to the seed, so the first speaker sees it. A custom
+`--task-from-cmd` stays plain text, even when it prints Claude JSON. The kickoff
+entry does not change loop turn numbers or `turns_used`.
+
 ### Other pairings
 
 `--lead` and `--partner` may use the same backend when you want role separation.
@@ -640,7 +661,7 @@ worktree gated by `verify_cmd`.
 | flag | purpose |
 |---|---|
 | `--version` | print the canonical runtime/package version and exit |
-| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and `claude -p /review --model sonnet`. Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
+| `--recipe review` | canonical harness launch: current cwd, `.duet/runs`, recap, `claude:reviewer`, `codex:coder`, six turns, strict worktree, `--on-turn-timeout continue`, and a JSON `claude -p /review --model sonnet` kickoff (permission mode `plan` or `default`; see "Review recipe kickoff"). Explicit seed/model/topology flags override recipe values; a Claude `--lead-model` replaces `sonnet` for both the lead and kickoff |
 | `--recipe codex-review` | two Codex sessions: lead reviewer speaks first, partner coder works in a strict worktree, latest committed `HEAD` task, six turns, recap, finding reports, and timeout continuation. No separate kickoff agent; model flags are optional. A lone `--resume-codex` keeps the default task and reviewer-first order. Combining `--resume-codex` with a custom seed, or resuming a Claude lead, starts the partner |
 | `--resume-claude SESSION_ID` | resume an existing Claude conversation as the lead agent. If `--lead/--partner` put Claude elsewhere, duet moves Claude into the lead slot so it can extract the latest message as the seed |
 | `--resume-codex SESSION_ID` | resume Codex as the partner/coder, even if conflicting `--lead/--partner` flags put Codex elsewhere. With an explicit seed, Codex speaks first. Alone with a recipe, retain its default seed: `review` runs its Claude kickoff, while `codex-review` starts its lead reviewer before the resumed coder |
@@ -759,7 +780,8 @@ cited evidence, and objections. `duet --report RUN` rebuilds the report from
 saved state without running commands. Private claim text stays in the run
 directory, outside central metrics. Missing structured output remains visible.
 When a turn recorded denied tool calls, `review.md` names the agent and its
-total in an "Execution limits" line.
+total in an "Execution limits" line. The `review` recipe kickoff appears there
+as `review-kickoff`.
 
 `duet --continue RUN --resolve L1` preserves inherited IDs and focuses a new,
 two-turn run on an unresolved finding. The original run and stop reason remain
@@ -891,14 +913,16 @@ the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 During a live turn, `active_turn.budget_seconds` repeats that budget and
 `active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
 at zero. All three fields are `null` when saved state contains a missing or
-invalid budget; status never performs arithmetic on the raw state value.
+invalid budget; status never performs arithmetic on the raw state value. `turns_used` counts
+loop and forced turns only; kickoff and seed-extraction entries are not counted.
 `last_completed_turn.finished_reason` is that turn's sanitized outcome or
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
 partner turn completes. Neither field exposes the saved error or raw history.
 `tool_denials` is the number of tool calls that the backend denied in
-successful loop and forced turns. The `claude -p /review` kickoff and seed
-extraction are not counted. `last_completed_turn` and `last_timeout` each have
+successful loop and forced turns and in the `review` recipe kickoff. Seed
+extraction is not counted. During turn 1, `last_completed_turn` can be the
+kickoff entry. `last_completed_turn` and `last_timeout` each have
 their own `tool_denials` count; `active_turn` has none. In state that Duet
 writes, `last_timeout.tool_denials` is always `null`, because a failed or
 timed-out call records nothing. The total counts only
@@ -994,7 +1018,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 ## How session memory works
 
 - **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner`, retaining its prior context. The recipe determines speaking order as described under [Codex-only review](#codex-only-review). If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner). Model selection stays with the declared agent before normalization; see [`--lead-model` and `--partner-model`](#cli-flags).
-- **Claude**: each call uses `claude -p ... --model <model> --output-format json`. With the default Claude lead, an omitted model defaults to `sonnet`, including with `--resume-claude`. Pass `--lead-model <model>` to change that default. Explicit CLI or YAML model selections stay with their declared agents when slots move. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn sends only the partner's latest message, so Claude keeps the full thread in its session.
+- **Claude**: each call uses `claude -p ... --model <model> --output-format json` and sends the message on standard input. With the default Claude lead, an omitted model defaults to `sonnet`, including with `--resume-claude`. Pass `--lead-model <model>` to change that default. Explicit CLI or YAML model selections stay with their declared agents when slots move. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn sends only the partner's latest message, so Claude keeps the full thread in its session.
 - **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
@@ -1068,8 +1092,8 @@ Duet prints this line:
 
 After any non-dry run in which a turn recorded denials, Duet also prints the
 run total and says that the claims that need those tools are unverified. The
-total counts only successful loop and forced turns, not the kickoff or seed
-extraction. Dry runs print neither note.
+total counts successful loop and forced turns and the `review` recipe kickoff,
+but not seed extraction. Dry runs print neither note.
 
 With `--verify-cmd`, that valid proposal is only counted after the command
 exits 0. A non-zero exit, timeout, or command execution error suppresses the

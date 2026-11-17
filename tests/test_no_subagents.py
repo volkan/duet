@@ -9,6 +9,7 @@ import pathlib
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -469,6 +470,20 @@ class TestNoSubagents(unittest.TestCase):
         self.assertIn("private-err", err)
         self.assertNotIn("private-", terminal.getvalue())
 
+    def test_large_stdin_does_not_defeat_the_turn_timeout(self):
+        started = time.monotonic()
+        rc, _, err = duet._run(["sh", "-c", "sleep 30"], cwd=pathlib.Path.cwd(),
+                               stdin="x" * (1024 * 1024), timeout=2)
+        self.assertEqual(rc, 124)
+        self.assertIn("TIMEOUT after 2s", err)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_large_non_ascii_stdin_reaches_child_intact(self):
+        text = "é-ü\n" * 200_000
+        rc, out, _ = duet._run(["wc", "-c"], cwd=pathlib.Path.cwd(), stdin=text, timeout=30)
+        self.assertEqual(rc, 0)
+        self.assertEqual(int(out.strip()), len(text.encode("utf-8")))
+
     def test_environment_override_reaches_child_without_mutating_parent(self):
         with mock.patch.dict(os.environ, {"DUET_TEST_CHILD_POLICY": "parent"}):
             rc, out, _ = duet._run(
@@ -483,11 +498,15 @@ class TestNoSubagents(unittest.TestCase):
         parser = duet._build_arg_parser()
         args = parser.parse_args(["--recipe", "review"])
         duet._apply_recipe_args(args)
-        cmd = shlex.split(args.task_from_cmd)
+        cmd = shlex.split(duet._build_cfg_from_cli(args, parser, {}).task_from_cmd)
         self.assertEqual(cmd[:5], ["claude", "-p", "/review", "--model", "sonnet"])
         denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
         self.assertTrue({"Agent", "Task", "TeamCreate", "SendMessage", "Skill"}.issubset(denied))
-        self.assertIn("Do not spawn or delegate", cmd[cmd.index("--append-system-prompt") + 1])
+        prompt = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("Do not spawn or delegate", prompt)
+        self.assertTrue(prompt.startswith(duet.NO_SUBAGENTS_INSTRUCTION))
+        self.assertIn(duet.REVIEW_EVIDENCE_CRITERIA, prompt)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "json")
 
     def test_recorded_policy_does_not_claim_historical_runs_disabled_subagents(self):
         agent = duet.Agent("peer", "codex")

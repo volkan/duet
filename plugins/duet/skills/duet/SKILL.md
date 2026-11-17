@@ -94,7 +94,9 @@ The `review` recipe means: current cwd, `.duet/runs`, recap mode,
 isolation, a `claude -p /review --model sonnet` kickoff, Sonnet-defaulted
 Claude loop turns, and continuation past one non-final automatic-turn timeout.
 Explicit flags supplied by the user go after the recipe and override its
-values.
+values. Duet runs that kickoff with JSON output, requests
+`--permission-mode plan` for a `plan` run and `default` otherwise, and counts
+its tool denials.
 
 For a Codex-only review, launch:
 
@@ -198,12 +200,12 @@ When `last_timeout` is non-null, report its turn and agent; it remains present
 when the review recipe continues past one non-final coder timeout so the
 partner can inspect its failure block and worktree handoff.
 
-A `finished_reason` of `converged` or `converged_after_force` means that the
-two agents agreed. It is not an independent review. Do not tell the user that
-the code is verified because the run converged. When `tool_denials` is a
-number above zero, report that number to the user. Checks that needed the
-denied tools did not run, so dependent claims are unverified. The count covers
-only successful loop and forced turns, not the kickoff or seed extraction.
+A `finished_reason` of `converged` or `converged_after_force` means that the two
+agents agreed. It is not an independent review. Do not tell the user that the
+code is verified because the run converged. When `tool_denials` is a number
+above zero, report that number to the user. Checks that needed the denied tools
+did not run, so dependent claims are unverified. The count covers successful
+loop and forced turns and the `review` recipe kickoff, but not seed extraction.
 `null` means that the backend did not report denials. Tell the user that
 convergence is not an independent review. Recommend that they review the final
 diff in a fresh context and run its checks before they accept or merge the code.
@@ -358,7 +360,9 @@ normalization moves a slot, the model stays with its declared agent.
 
 Claude defaults to `sonnet`. With `--recipe review`, a Claude `--lead-model`
 overrides that default for the loop agent and the `claude -p /review` kickoff.
-For a custom `--task-from-cmd 'claude -p /review …'`, add the required
+Duet runs the recipe kickoff with JSON output, requests `--permission-mode plan`
+for a `plan` run and `default` otherwise, and counts its tool denials. For a
+custom `--task-from-cmd 'claude -p /review …'`, add the required
 `--model` value inside that command.
 
 The `review` and `codex-review` recipes pair a reviewer with a coder. The coder

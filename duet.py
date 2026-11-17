@@ -109,6 +109,11 @@ SAFE_CONTINUE_PERMISSION_MODES = {"default", DEFAULT_PERMISSION_MODE, "plan"}
 DEFAULT_TURNS = 2
 DEFAULT_TIMEOUT = 60 * 15
 TASK_MAX_CHARS = 512 * 1024
+# JSON can encode one character as a six-character \uXXXX escape.
+KICKOFF_ENVELOPE_MAX_CHARS = 8 * TASK_MAX_CHARS
+REVIEW_KICKOFF_KIND = "recipe_review_json"
+REVIEW_KICKOFF_AGENT = "review-kickoff"
+_NON_LOOP_HISTORY_KINDS = frozenset({"kickoff", "seed_extract", "final_review"})
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
@@ -225,12 +230,22 @@ CONVERGENCE_INSTRUCTION = (
     "not support convergence."
 )
 
-REVIEWER_EVIDENCE_INSTRUCTION = (
+REVIEW_EVIDENCE_CRITERIA = (
     "Test changed behavior with inputs you choose yourself, not only the "
     "partner's examples. Include inputs that should fail, removed or renamed "
-    "cases, and large inputs where cost can grow. If you cannot run a command, "
-    "name the missing check and ask your partner to run it and paste the "
-    "command and its output."
+    "cases, and large inputs where cost can grow."
+)
+# Each review context says what to do about a check it cannot run.
+LOOP_MISSING_EVIDENCE_SENTENCE = (
+    "If you cannot run a command, name the missing check and ask your partner "
+    "to run it and paste the command and its output."
+)
+KICKOFF_MISSING_EVIDENCE_SENTENCE = (
+    "If you cannot run a command, name the missing check in your findings so "
+    "the coder can run it."
+)
+REVIEWER_EVIDENCE_INSTRUCTION = (
+    REVIEW_EVIDENCE_CRITERIA + " " + LOOP_MISSING_EVIDENCE_SENTENCE
 )
 
 ROLE_PROMPTS = {
@@ -528,6 +543,9 @@ class DuetConfig:
     worktree_path: Optional[pathlib.Path] = None  # reuse an existing worktree (for resume)
     worktree_root: Optional[pathlib.Path] = None  # parent dir for new worktrees;
                                                   # default = <run_dir>/wt (durable, gitignored)
+    # Marks the recipe-built review kickoff so its JSON output is parsed. Never
+    # persisted: a custom --task-from-cmd stays opaque text.
+    _kickoff_kind: Optional[str] = dataclasses.field(default=None, repr=False)
     _worktree_kind: Optional[str] = dataclasses.field(default=None, repr=False)
     _owned_worktree_path: Optional[pathlib.Path] = dataclasses.field(default=None, repr=False)
     add_dirs: list[pathlib.Path] = dataclasses.field(default_factory=list)
@@ -1223,6 +1241,26 @@ def _live_stream_target(enabled: bool = True):
     return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
 
 
+def _feed_stdin(proc: subprocess.Popen, text: Optional[str]) -> None:
+    """Write `text` to the child and close its stdin.
+
+    Runs on its own thread: a child that stalls before reading would block a
+    large write, and the caller must already be waiting with its timeout.
+    """
+    if proc.stdin is None:
+        return
+    try:
+        if text is not None:
+            proc.stdin.write(text)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
@@ -1316,14 +1354,9 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                                 daemon=True)
         t_hb.start()
 
+        t_in = threading.Thread(target=_feed_stdin, args=(proc, stdin), daemon=True)
+        t_in.start()
         try:
-            if stdin is not None and proc.stdin is not None:
-                try:
-                    proc.stdin.write(stdin)
-                except BrokenPipeError:
-                    pass
-            if proc.stdin is not None:
-                proc.stdin.close()
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             _signal_proc_tree(proc, signal.SIGTERM)
@@ -1332,11 +1365,11 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             except subprocess.TimeoutExpired:
                 _signal_proc_tree(proc, signal.SIGKILL)
                 proc.wait()
-            t_out.join(timeout=2); t_err.join(timeout=2)
+            t_out.join(timeout=2); t_err.join(timeout=2); t_in.join(timeout=2)
             return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
         finally:
             _unregister_proc(proc)
-        t_out.join(timeout=5); t_err.join(timeout=5)
+        t_out.join(timeout=5); t_err.join(timeout=5); t_in.join(timeout=2)
         return proc.returncode, "".join(out_chunks), "".join(err_chunks)
     finally:
         if stderr_file is not None:
@@ -2300,7 +2333,7 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
             "agent output to review.\n"
             f"{DEFAULT_SENTINEL}"
         ), new_sid
-    cmd = ["claude", "-p", message,
+    cmd = ["claude", "-p",
            "--output-format", "json",
            "--append-system-prompt", system_prompt,
            "--permission-mode", perm_mode,
@@ -2320,7 +2353,8 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd,
         backend="claude",
         cwd=eff_cwd,
-        stdin=None,
+        # A positional prompt that starts with "-" is parsed as an option.
+        stdin=message,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -4427,6 +4461,15 @@ def _launch_failure_state(
     return state
 
 
+def _loop_turn_count(history: list) -> int:
+    """Loop and forced turns only; setup entries never shift turn numbers."""
+    return sum(
+        1 for item in history
+        if not (isinstance(item, dict)
+                and item.get("kind") in _NON_LOOP_HISTORY_KINDS)
+    )
+
+
 def _requested_stop_state(
     cfg: DuetConfig,
     *,
@@ -4440,7 +4483,7 @@ def _requested_stop_state(
     """Persist an intentional stop that interrupted a setup subprocess."""
     state = _build_run_state(
         cfg,
-        turns_used=len(history),
+        turns_used=_loop_turn_count(history),
         history=history,
         finished_reason=FINISHED_FORCE_STOP,
         transcript_path=transcript_path,
@@ -4462,6 +4505,34 @@ def _apply_kickoff_output(cfg: DuetConfig, output: str) -> None:
         cfg.kickoff = (cfg.kickoff or "") + suffix
     else:
         cfg.task = output
+
+
+def _is_recipe_review_kickoff(cfg: DuetConfig) -> bool:
+    return (cfg._kickoff_kind == REVIEW_KICKOFF_KIND
+            and cfg.task_from_cmd_target == "task")
+
+
+def _execute_kickoff(cfg: DuetConfig,
+                     run_dir: pathlib.Path) -> tuple[str, Optional[dict]]:
+    """Run the kickoff; only the recipe kickoff reports tool denials."""
+    if _is_recipe_review_kickoff(cfg):
+        return run_review_kickoff(
+            cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir)
+    return run_task_from_cmd(
+        cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir), None
+
+
+def _review_kickoff_entry(elapsed: float, len_chars: int,
+                          denials: Optional[dict]) -> dict:
+    entry = {
+        "turn": 0,
+        "agent": REVIEW_KICKOFF_AGENT,
+        "kind": "kickoff",
+        "elapsed_s": elapsed,
+        "len_chars": len_chars,
+    }
+    _record_tool_denials(entry, denials)
+    return entry
 
 
 def _run_kickoff_command(
@@ -4498,9 +4569,8 @@ def _run_kickoff_command(
     _write_run_state(state_path, running)
     started = time.monotonic()
     try:
-        output = _metrics_timed(
-            cfg, "kickoff_elapsed_s", lambda: run_task_from_cmd(
-                cfg.task_from_cmd, cfg.cwd, cfg.per_turn_timeout, run_dir)
+        output, denials = _metrics_timed(
+            cfg, "kickoff_elapsed_s", lambda: _execute_kickoff(cfg, run_dir)
         )
     except Exception as exc:
         if stop.requested and stop.reason == "SIGTERM":
@@ -4543,6 +4613,12 @@ def _run_kickoff_command(
             wt_path=wt_path,
             wt_branch=wt_branch,
         )
+    recipe_kickoff = _is_recipe_review_kickoff(cfg)
+    if recipe_kickoff:
+        history.append(_review_kickoff_entry(
+            time.monotonic() - started, len(output), denials))
+        note = format_tool_denial_note(REVIEW_KICKOFF_AGENT, denials)
+        output = f"{output}\n\n{note}" if note else output
     _apply_kickoff_output(cfg, output)
     ready = _build_run_state(
         cfg,
@@ -5175,7 +5251,7 @@ def run_duet(cfg: DuetConfig) -> dict:
         last_verify_state = forced_verify_state
 
     state = _build_run_state(
-        cfg, turns_used=len(history), history=history,
+        cfg, turns_used=_loop_turn_count(history), history=history,
         finished_reason=finished_reason,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
@@ -5334,7 +5410,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
     while True:
         waiting = _build_run_state(
             cfg,
-            turns_used=len(history),
+            turns_used=_loop_turn_count(history),
             history=history,
             finished_reason=None,
             transcript_path=transcript_path,
@@ -5371,7 +5447,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
             f"{line}\n"
         )
         result = _run_forced_turn(
-            cfg, forced_turn=len(history) + 1, next_speaker=next_speaker,
+            cfg, forced_turn=_loop_turn_count(history) + 1, next_speaker=next_speaker,
             forced_msg=forced_msg, first_turn_for_agent=first_turn_for_agent,
             transcript_path=transcript_path, wt_path=wt_path, wt_branch=wt_branch,
             history=history, seen_first_turn=seen_first_turn,
@@ -5386,7 +5462,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         # stays None mid-loop (duet is alive at the prompt); run_duet writes the
         # final state with the real reason once ask_force returns.
         forced_state = _build_run_state(
-            cfg, turns_used=len(history), history=history,
+            cfg, turns_used=_loop_turn_count(history), history=history,
             finished_reason=forced_reason,
             transcript_path=transcript_path,
             recap_path=transcript_path.parent / "recap.md",
@@ -5713,9 +5789,24 @@ def resolve_at_text(value: Optional[str], option_name: str,
     return _check_task_size(text, parser)
 
 
-def run_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
-                      run_dir: pathlib.Path) -> str:
-    """Run a kickoff command after allocation and return its stdout seed."""
+def _kickoff_stdout_detail(out: str) -> Optional[str]:
+    """Bounded failure text from kickoff stdout, never raw JSON.
+
+    A JSON envelope contributes only its string `result` (Claude's error text);
+    its other fields (session id, tool input) are not echoed.
+    """
+    try:
+        payload = json.loads(out)
+    except (ValueError, RecursionError):
+        return _stream_tail(out)
+    result = payload.get("result") if isinstance(payload, dict) else None
+    return _stream_tail(result) if isinstance(result, str) and result.strip() else None
+
+
+def _run_kickoff_shell(cmd_str: str, cwd: pathlib.Path, timeout: int,
+                       run_dir: pathlib.Path, *, label: str,
+                       max_chars: int, stdout_detail: bool = False) -> str:
+    """Run a kickoff command after allocation and return its stdout."""
     global LIVE_PREFIX
     old_prefix = LIVE_PREFIX
     LIVE_PREFIX = LIVE_PREFIX_TASK
@@ -5732,22 +5823,65 @@ def run_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
     finally:
         LIVE_PREFIX = old_prefix
     if rc != 0:
-        raise AgentRunError(
-            FINISHED_KICKOFF_ERROR,
-            f"--task-from-cmd exited {rc}\nstderr:\n{err}",
-        )
+        message = f"{label} exited {rc}\nstderr:\n{err}"
+        detail = (_kickoff_stdout_detail(out)
+                  if stdout_detail and not err.strip() and out.strip() else None)
+        if detail:
+            message += f"\nstdout (tail):\n{detail}"
+        raise AgentRunError(FINISHED_KICKOFF_ERROR, message)
     if out == "":
         raise AgentRunError(
             FINISHED_KICKOFF_ERROR,
-            f"--task-from-cmd produced empty stdout\nstderr:\n{err}",
+            f"{label} produced empty stdout\nstderr:\n{err}",
         )
-    if len(out) > TASK_MAX_CHARS:
+    if len(out) > max_chars:
         raise AgentRunError(
             FINISHED_KICKOFF_ERROR,
-            f"--task-from-cmd output too large ({len(out)} chars > "
-            f"{TASK_MAX_CHARS})",
+            f"{label} output too large ({len(out)} chars > {max_chars})",
         )
     return out
+
+
+def run_task_from_cmd(cmd_str: str, cwd: pathlib.Path, timeout: int,
+                      run_dir: pathlib.Path) -> str:
+    """Run a --task-from-cmd command and return its stdout seed."""
+    return _run_kickoff_shell(cmd_str, cwd, timeout, run_dir,
+                              label="--task-from-cmd", max_chars=TASK_MAX_CHARS)
+
+
+def _parse_review_kickoff_output(stdout: str) -> tuple[str, Optional[dict]]:
+    """Seed text and bounded denial counts from `claude -p --output-format json`.
+
+    Everything else in the envelope (session id, tool inputs, usage) is dropped.
+    """
+    def fail(reason: str) -> AgentRunError:
+        return AgentRunError(FINISHED_KICKOFF_ERROR, f"review kickoff {reason}")
+
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, RecursionError) as exc:
+        raise fail(f"output is not valid JSON ({type(exc).__name__})") from None
+    if not isinstance(payload, dict):
+        raise fail("output is not a JSON object")
+    result = payload.get("result")
+    if payload.get("is_error") is True:
+        cause = _stream_tail(result) if isinstance(result, str) else "(no result)"
+        raise fail(f"reported is_error\nresult (tail):\n{cause}")
+    if not isinstance(result, str) or not result.strip():
+        raise fail("result is missing or empty")
+    if len(result) > TASK_MAX_CHARS:
+        raise fail(f"result too large ({len(result)} chars > {TASK_MAX_CHARS})")
+    return result, parse_claude_tool_denials(payload)
+
+
+def run_review_kickoff(cmd_str: str, cwd: pathlib.Path, timeout: int,
+                       run_dir: pathlib.Path) -> tuple[str, Optional[dict]]:
+    """Run the recipe-built review kickoff; return its seed and denial counts."""
+    out = _run_kickoff_shell(cmd_str, cwd, timeout, run_dir,
+                             label="review kickoff",
+                             max_chars=KICKOFF_ENVELOPE_MAX_CHARS,
+                             stdout_detail=True)
+    return _parse_review_kickoff_output(out)
 
 
 def resolve_seed_inputs(*, task: Optional[str], kickoff: Optional[str],
@@ -8453,17 +8587,42 @@ def _apply_recipe_args(args: argparse.Namespace) -> None:
             args.task = DEFAULT_CODEX_REVIEW_TASK
             args._recipe_default_task = True
             return
-        command = "claude -p /review"
-        kickoff_model = (
-            args.lead_model
-            if lead_backend == "claude" and args.lead_model
-            else DEFAULT_CLAUDE_MODEL
-        )
-        command += f" --model {shlex.quote(kickoff_model)}"
-        command += " --disallowedTools " + shlex.quote(
-            ",".join(CLAUDE_DENIED_DELEGATION_TOOLS))
-        command += " --append-system-prompt " + shlex.quote(NO_SUBAGENTS_INSTRUCTION)
-        args.task_from_cmd = command
+        # The command is built from the resolved config; see
+        # _attach_review_kickoff.
+        args._recipe_review_kickoff = True
+
+
+def _restricted_permission_mode(run_mode: str) -> str:
+    """Permission mode that the review kickoff requests: never an edit mode."""
+    return "plan" if run_mode == "plan" else "default"
+
+
+def _build_review_kickoff_command(cfg: DuetConfig) -> str:
+    lead = cfg.agents[0]
+    model = (
+        lead.model if lead.backend == "claude" and lead.model
+        else DEFAULT_CLAUDE_MODEL
+    )
+    return shlex.join([
+        "claude", "-p", "/review",
+        "--model", model,
+        "--output-format", "json",
+        "--permission-mode", _restricted_permission_mode(cfg.permission_mode),
+        "--disallowedTools", ",".join(CLAUDE_DENIED_DELEGATION_TOOLS),
+        "--append-system-prompt",
+        " ".join((NO_SUBAGENTS_INSTRUCTION, REVIEW_EVIDENCE_CRITERIA,
+                  KICKOFF_MISSING_EVIDENCE_SENTENCE)),
+    ])
+
+
+def _attach_review_kickoff(cfg: DuetConfig, args: argparse.Namespace) -> None:
+    """Give a seedless review recipe its JSON kickoff, built from final cfg."""
+    if not getattr(args, "_recipe_review_kickoff", False):
+        return
+    if cfg.task is not None or cfg.kickoff is not None or cfg.task_from_cmd is not None:
+        return
+    cfg.task_from_cmd = _build_review_kickoff_command(cfg)
+    cfg._kickoff_kind = REVIEW_KICKOFF_KIND
 
 
 def _recipe_start_speaker(args: argparse.Namespace) -> int:
@@ -8602,6 +8761,7 @@ def _build_cfg_from_yaml(args: argparse.Namespace, ap: argparse.ArgumentParser,
     )
     _apply_metrics_options(cfg, args, raw)
     _apply_finding_options(cfg, args, ap, raw)
+    _attach_review_kickoff(cfg, args)
     return cfg
 
 
@@ -8682,6 +8842,7 @@ def _build_cfg_from_cli(args: argparse.Namespace, ap: argparse.ArgumentParser,
     )
     _apply_metrics_options(cfg, args)
     _apply_finding_options(cfg, args, ap)
+    _attach_review_kickoff(cfg, args)
     return cfg
 
 

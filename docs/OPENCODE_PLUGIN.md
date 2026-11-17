@@ -50,9 +50,11 @@ and [custom command reference](https://opencode.ai/docs/commands/).
    ```
 
    The default recipe runs `claude -p /review --model sonnet` first, then uses
-   `codex:coder` in a worktree. Claude loop turns use Sonnet too. If you pass a
-   custom partner or config, install whichever backend that recipe needs
-   instead. (duet can also drive OpenCode itself as a backend — `--partner
+   `codex:coder` in a worktree. Claude loop turns use Sonnet too. Duet runs the
+   kickoff with JSON output, requests `--permission-mode plan` for a `plan` run
+   and `default` otherwise, and counts its tool denials. If you pass a custom
+   partner or config, install whichever backend that recipe needs instead.
+   (duet can also drive OpenCode itself as a backend — `--partner
    opencode:coder` — so OpenCode can be one of the two looped agents, not just
    the host.)
 
@@ -220,10 +222,10 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 A `converged` or `converged_after_force` result means that the two agents
 agreed. It is not an independent review. When `tool_denials` is a number above
 zero, report it. Checks that needed the denied tools did not run, so dependent
-claims are unverified. The count covers only successful loop and forced turns,
-not the kickoff or seed extraction. `null` means that the backend did not
-report denials. Tell the user that convergence is not an independent review.
-Recommend that they review the final diff in a fresh context and run its
+claims are unverified. The count covers successful loop and forced turns and the
+`review` recipe kickoff, but not seed extraction. `null` means that the backend
+did not report denials. Tell the user that convergence is not an independent
+review. Recommend that they review the final diff in a fresh context and run its
 checks before they accept or merge the code.
 
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
