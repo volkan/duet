@@ -74,7 +74,7 @@ from typing import Callable, Iterable, Optional
 
 # ---------- defaults ----------
 
-__version__ = "0.2.24"
+__version__ = "0.2.25"
 
 DEFAULT_SENTINEL = "<<<LGTM>>>"
 DEFAULT_SANDBOX = "workspace-write"
