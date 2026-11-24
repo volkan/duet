@@ -2500,6 +2500,13 @@ class TestReviewEvidencePrompts(unittest.TestCase):
         self.assertIn("treat it as unverified", text)
         self.assertIn("correct, fast, or safe does not support convergence", text)
 
+    def test_convergence_instruction_explains_candidate_binding(self) -> None:
+        text = duet.CONVERGENCE_INSTRUCTION
+        self.assertIn("An approval covers the candidate files as they are at the "
+                      "end of your turn.", text)
+        self.assertIn("If you change a file after your partner approved, your partner "
+                      "must approve the changed files before the loop stops.", text)
+
     def test_reviewer_roles_share_the_evidence_instruction(self) -> None:
         shared = duet.REVIEWER_EVIDENCE_INSTRUCTION
         self.assertIn("inputs that should fail", shared)

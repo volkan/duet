@@ -230,7 +230,10 @@ CONVERGENCE_INSTRUCTION = (
     "reading. If a conclusion depends on a check that no one ran with its "
     "command and result shown in this conversation, say so and treat it as "
     "unverified. An unverified claim that code is correct, fast, or safe does "
-    "not support convergence."
+    "not support convergence. An approval covers the candidate files as they "
+    "are at the end of your turn. If you change a file after your partner "
+    "approved, your partner must approve the changed files before the loop "
+    "stops."
 )
 
 REVIEW_EVIDENCE_CRITERIA = (
