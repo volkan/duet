@@ -1928,7 +1928,8 @@ def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relat
     identity = _revision_stat(info)
     scan.identities[relative] = identity
     if stat.S_ISDIR(info.st_mode):
-        if scan.digest is not None:
+        # Git-selected leaves already identify their directories through their paths.
+        if scan.digest is not None and not listed_by_git:
             _revision_frame(scan.digest, relative)
             _revision_frame(scan.digest, b"directory")
         _scan_revision_directory(scan, name, parent_fd=parent_fd, relative=relative,

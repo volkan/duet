@@ -1635,6 +1635,28 @@ class TestRevisionBoundConvergence(unittest.TestCase):
 
                 self.assertEqual(state["finished_reason"], "revision_changed")
 
+    def test_verifier_can_recreate_directory_for_ignored_output(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        package = self.root / "pkg"
+        package.mkdir()
+        obsolete = package / "obsolete.py"
+        obsolete.write_text("obsolete\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("pkg/verifier.cache\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore", "pkg/obsolete.py"], cwd=self.root, check=True)
+        obsolete.unlink()
+        package.rmdir()
+
+        state = self._run(
+            [self.PROPOSAL] * 2, max_turns=2,
+            verify_cmd="mkdir -p pkg && printf 'verify\\n' >> pkg/verifier.cache",
+        )
+
+        self.assertEqual((package / "verifier.cache").read_text(encoding="utf-8"), "verify\n" * 2)
+        first, second = state["history"]
+        self.assertTrue(first["verify"]["ok"] and second["verify"]["ok"])
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+
     def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
         state = self._run(
             [self.PROPOSAL] * 3, max_turns=3,
