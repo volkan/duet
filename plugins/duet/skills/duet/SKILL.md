@@ -373,7 +373,23 @@ them not to edit files. Use `--sandbox read-only` for Codex or
 `--permission-mode plan` for Claude. Do not change the user's roles or edit
 scope.
 
-Examples:
+### Codex peer models
+
+Check the Codex CLI's `/model` picker for the current account. Either peer can
+use any model ID accepted by its Codex backend.
+
+| Family | Example model IDs |
+|---|---|
+| GPT-6.2 | `gpt-6.2-astra`, `gpt-6.2-sol` |
+| GPT-6.1 | `gpt-6.1-sol`, `gpt-6.1-terra` |
+| GPT-6 | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` |
+| GPT-5.6 | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` |
+
+### Examples
+
+```text
+Use Codex-only Duet review with --lead-model gpt-6.2-astra and --partner-model gpt-6.2-sol.
+```
 
 ```text
 Use Codex-only Duet review with --lead-model gpt-6-astra and --partner-model gpt-5.6-sol.
