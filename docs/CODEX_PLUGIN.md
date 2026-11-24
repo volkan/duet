@@ -205,6 +205,13 @@ worktree. For opinions only, request reviewer roles and no file edits. Use
 `--sandbox read-only` for Codex or `--permission-mode plan` for Claude. Keep
 the user's requested task, roles, and edit scope.
 
+Use the Codex CLI's `/model` picker to check the models available to your account.
+The [shared skill](../plugins/duet/skills/duet/SKILL.md#codex-peer-models) lists example IDs for both slots.
+
+```text
+Use Codex-only Duet review with --lead-model gpt-6.2-astra and --partner-model gpt-6.2-sol.
+```
+
 ```text
 Use Codex-only Duet review with --lead-model gpt-6-astra and --partner-model gpt-5.6-sol.
 ```
