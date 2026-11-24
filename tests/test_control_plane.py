@@ -1477,6 +1477,40 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertEqual(first["approval_revision"], second["approval_revision"])
         self.assertNotEqual(first["agent"], second["agent"])
 
+    def test_replacing_tracked_file_with_directory_respects_git_ignore(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        thing = self.root / "thing"
+        thing.write_text("tracked file\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("thing/cache.log\n", encoding="utf-8")
+        subprocess.run(["git", "add", "thing", ".gitignore"], cwd=self.root, check=True)
+        thing.unlink()
+        thing.mkdir()
+        cache = thing / "cache.log"
+        cache.write_text("initial cache\n", encoding="utf-8")
+        cfg = duet.DuetConfig(
+            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            metrics_enabled=False,
+        )
+
+        def revision():
+            digest = duet._approval_revision(cfg, cfg.runs_dir, None)
+            self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
+            return digest
+
+        with self.subTest(selected_child=False):
+            before = revision()
+            cache.write_text("new cache\n", encoding="utf-8")
+            self.assertEqual(revision(), before)
+
+        selected = thing / "keep.py"
+        selected.write_text("selected file\n", encoding="utf-8")
+        with self.subTest(selected_child=True):
+            before = revision()
+            cache.write_text("updated cache\n", encoding="utf-8")
+            self.assertEqual(revision(), before)
+            selected.write_text("edited selected file\n", encoding="utf-8")
+            self.assertNotEqual(revision(), before)
+
     def test_edit_to_an_already_read_file_invalidates_the_approval(self) -> None:
         (self.root / "second.py").write_text("second file\n", encoding="utf-8")
         edit_pending = False

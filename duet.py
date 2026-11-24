@@ -1870,12 +1870,8 @@ def _revision_selection_tree(listing: bytes) -> dict:
         if any(part in (b"", b".", b"..") for part in parts):
             raise OSError("Git named a path outside the candidate")
         selected = selection
-        for part in parts[:-1]:
+        for part in parts:
             selected = selected.setdefault(part, {})
-            if selected is None:
-                break
-        else:
-            selected[parts[-1]] = None
     return selection
 
 
@@ -1981,7 +1977,7 @@ def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Opt
     try:
         info = _revision_stat(os.fstat(fd))
         scan.identities[relative] = info
-        if not relative or (selection is None and _has_nested_git_marker(fd)):
+        if not relative or (not selection and _has_nested_git_marker(fd)):
             cwd = scan.root / os.fsdecode(relative)
             selection, git_dir = _scan_revision_git_paths(cwd, info, nested=bool(relative))
             if git_dir is not None and cwd in git_dir.parents:
