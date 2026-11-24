@@ -1850,6 +1850,8 @@ def _revision_git_selection(
     worktree, _, git_dir = output.partition(b"\n")
     if worktree != b"true" or not git_dir:
         raise OSError("candidate is outside the Git worktree")
+    if not require_root and _candidate_root_ignored(cmd, options):
+        return None, None
     listing = subprocess.run(
         [*cmd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         check=True, **options,
@@ -1859,6 +1861,16 @@ def _revision_git_selection(
         raise OSError("Git could not read the candidate paths or ignore rules")
     return (_revision_selection_tree(listing.stdout),
             pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
+
+
+def _candidate_root_ignored(cmd: list, options: dict) -> bool:
+    # Git lists nothing inside an ignored directory, so the candidate is hashed by walking it.
+    # --no-index is required: the index form reports a force-added file's directory as not ignored.
+    check = subprocess.run([*cmd, "check-ignore", "-q", "--no-index", "--", "."], **options)
+    if check.returncode not in (0, 1):
+        reason = check.stderr.decode("utf-8", "backslashreplace").splitlines()
+        raise OSError(f"git check-ignore failed: {reason[0] if reason else check.returncode}")
+    return check.returncode == 0
 
 
 def _revision_selection_tree(listing: bytes) -> dict:

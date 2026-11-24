@@ -1511,6 +1511,50 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             selected.write_text("edited selected file\n", encoding="utf-8")
             self.assertNotEqual(revision(), before)
 
+    def _revision_digest(self, cwd: pathlib.Path) -> str:
+        cfg = duet.DuetConfig(
+            cwd=cwd, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            metrics_enabled=False,
+        )
+        digest = duet._approval_revision(cfg, cfg.runs_dir, None)
+        self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
+        return digest
+
+    def test_candidate_inside_ignored_directory_detects_edits(self) -> None:
+        def repository(name: str, ignore: str) -> pathlib.Path:
+            repo = self.root / name
+            (repo / "sub").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(ignore, encoding="utf-8")
+            return repo
+
+        with self.subTest(tracked=False):
+            candidate = repository("plain", "sub/\n") / "sub"
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            before = self._revision_digest(candidate)
+            (candidate / "a.py").write_text("second\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), before)
+
+        with self.subTest(tracked=True):
+            repo = repository("forced", "sub/\n")
+            candidate = repo / "sub"
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-f", "sub/a.py"], cwd=repo, check=True)
+            before = self._revision_digest(candidate)
+            (candidate / "b.py").write_text("untracked\n", encoding="utf-8")
+            added = self._revision_digest(candidate)
+            self.assertNotEqual(added, before)
+            (candidate / "b.py").write_text("edited\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), added)
+
+        with self.subTest(everything_ignored=True):
+            candidate = repository("star", "*\n") / "work" / "proj"
+            candidate.mkdir(parents=True)
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            before = self._revision_digest(candidate)
+            (candidate / "a.py").write_text("second\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), before)
+
     def test_edit_to_an_already_read_file_invalidates_the_approval(self) -> None:
         (self.root / "second.py").write_text("second file\n", encoding="utf-8")
         edit_pending = False
