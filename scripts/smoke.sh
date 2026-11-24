@@ -1984,6 +1984,14 @@ expect "stop terminal run -> exit 2"      2 "$DUET" --stop "$FINISHED_SYNTH/2026
 [[ -n "$RUN" ]] && grep -q '"duet_process_start"' "$RUN/state.json" \
     || { echo "FAIL: duet_process_start missing from dry-run state.json"; FAIL=$((FAIL+1)); }
 
+REVISION_CHANGED_RUN="$TMPD/revision-changed"
+mkdir -p "$REVISION_CHANGED_RUN"
+cat > "$REVISION_CHANGED_RUN/state.json" <<'JSON'
+{"phase":"finished","turns_used":2,"agents":[],"history":[],"finished_reason":"revision_changed"}
+JSON
+expect_stdout "revision changed is a terminal status" 0 '"finished_reason": "revision_changed"' \
+  "$DUET" --status "$REVISION_CHANGED_RUN" --json
+
 # Synthetic mid-run state.json with a stale (or unrelated) duet_pid → exit 2.
 # We use PID 1 (init) which is alive but whose cmdline does not contain
 # 'duet.py', so _is_duet_process() should reject it.

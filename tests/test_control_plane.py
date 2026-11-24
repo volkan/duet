@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -1428,6 +1429,524 @@ class TestToolDenialLoop(unittest.TestCase):
         self.assertEqual(history[0]["tool_denials"], {"Read": 1})
         self.assertIn("was denied 1 tool call(s) this turn (Read×1)", result.reply)
         self.assertIn("was denied 1 tool call(s)", saved)
+
+
+class TestRevisionBoundConvergence(unittest.TestCase):
+    PROPOSAL = "LGTM rationale: checked the candidate by reading it.\n<<<LGTM>>>"
+
+    def setUp(self) -> None:
+        fixture = tempfile.TemporaryDirectory()
+        self.addCleanup(fixture.cleanup)
+        self.root = pathlib.Path(fixture.name).resolve()
+        self.candidate = self.root / "candidate.py"
+        self.candidate.write_text("first\n", encoding="utf-8")
+
+    def _run(self, replies, *, max_turns, edits=None, inputs=None, verify_cmd=None):
+        cfg = duet.DuetConfig(
+            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            max_turns=max_turns, metrics_enabled=False, verify_cmd=verify_cmd,
+        )
+        scripted_replies = iter(replies)
+
+        def reply_to_turn(_agent, _message, _cfg, first_turn_for_agent, *,
+                          run_dir=None, turn_label=None):
+            turn = int(turn_label.split("-", 1)[0])
+            if edits and turn in edits:
+                path, content = edits[turn]
+                path.write_text(content, encoding="utf-8")
+            return next(scripted_replies)
+
+        with mock.patch.object(duet, "call_agent", reply_to_turn), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet.sys.stdin, "isatty", return_value=inputs is not None), \
+                mock.patch("builtins.input", side_effect=inputs), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return duet.run_duet(cfg)
+
+    def test_untracked_change_requires_fresh_approvals(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+        edits = {2: (self.candidate, "second\n"), 3: (self.root / "ignored.txt", "ignored\n")}
+
+        state = self._run([self.PROPOSAL] * 3, max_turns=3, edits=edits)
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(state["turns_used"], 3)
+        before, first, second = state["history"]
+        self.assertNotEqual(before["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertNotEqual(first["agent"], second["agent"])
+
+    def test_replacing_tracked_file_with_directory_respects_git_ignore(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        thing = self.root / "thing"
+        thing.write_text("tracked file\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("thing/cache.log\n", encoding="utf-8")
+        subprocess.run(["git", "add", "thing", ".gitignore"], cwd=self.root, check=True)
+        thing.unlink()
+        deleted_revision = self._revision_digest(self.root)
+        thing.mkdir()
+        cache = thing / "cache.log"
+        with self.subTest(selected_child=False):
+            cache.write_text("new cache\n", encoding="utf-8")
+            self.assertEqual(self._revision_digest(self.root), deleted_revision)
+
+        selected = thing / "keep.py"
+        selected.write_text("selected file\n", encoding="utf-8")
+        with self.subTest(selected_child=True):
+            before = self._revision_digest(self.root)
+            self.assertNotEqual(before, deleted_revision)
+            cache.write_text("updated cache\n", encoding="utf-8")
+            self.assertEqual(self._revision_digest(self.root), before)
+            selected.write_text("edited selected file\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(self.root), before)
+
+    def _revision_digest(self, cwd: pathlib.Path) -> str:
+        cfg = duet.DuetConfig(
+            cwd=cwd, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            metrics_enabled=False,
+        )
+        digest = duet._approval_revision(cfg, cfg.runs_dir, None).digest
+        self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
+        return digest
+
+    def test_candidate_inside_ignored_directory_detects_edits(self) -> None:
+        def repository(name: str, ignore: str) -> pathlib.Path:
+            repo = self.root / name
+            (repo / "sub").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(ignore, encoding="utf-8")
+            return repo
+
+        with self.subTest(tracked=False):
+            candidate = repository("plain", "sub/\n") / "sub"
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            before = self._revision_digest(candidate)
+            (candidate / "a.py").write_text("second\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), before)
+
+        with self.subTest(tracked=True):
+            repo = repository("forced", "sub/\n")
+            candidate = repo / "sub"
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-f", "sub/a.py"], cwd=repo, check=True)
+            before = self._revision_digest(candidate)
+            (candidate / "b.py").write_text("untracked\n", encoding="utf-8")
+            added = self._revision_digest(candidate)
+            self.assertNotEqual(added, before)
+            (candidate / "b.py").write_text("edited\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), added)
+
+        with self.subTest(everything_ignored=True):
+            candidate = repository("star", "*\n") / "work" / "proj"
+            candidate.mkdir(parents=True)
+            (candidate / "a.py").write_text("first\n", encoding="utf-8")
+            before = self._revision_digest(candidate)
+            (candidate / "a.py").write_text("second\n", encoding="utf-8")
+            self.assertNotEqual(self._revision_digest(candidate), before)
+
+    def test_repository_top_level_ignores_git_ignored_files(self) -> None:
+        rules = {
+            "allowlist": "*\n!*/\n!*.py\n!.gitignore\n",
+            "star": "*\n",
+        }
+        for label, ignore in rules.items():
+            with self.subTest(label):
+                repo = self.root / label
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+                (repo / ".gitignore").write_text(ignore, encoding="utf-8")
+                (repo / "a.py").write_text("first\n", encoding="utf-8")
+                (repo / "notes.txt").write_text("first\n", encoding="utf-8")
+                subprocess.run(["git", "add", "-f", "a.py"], cwd=repo, check=True)
+                before = self._revision_digest(repo)
+
+                (repo / "notes.txt").write_text("second\n", encoding="utf-8")
+                self.assertEqual(self._revision_digest(repo), before)
+                (repo / "a.py").write_text("second\n", encoding="utf-8")
+                self.assertNotEqual(self._revision_digest(repo), before)
+
+    def test_approvals_follow_the_candidate_index_under_inherited_git_settings(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("candidate.py\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-f", "candidate.py"], cwd=self.root, check=True)
+        with tempfile.TemporaryDirectory() as launcher:
+            subprocess.run(["git", "init", "-q"], cwd=launcher, check=True)
+            foreign = pathlib.Path(launcher) / ".git"
+            for key, location in (("GIT_DIR", foreign), ("GIT_INDEX_FILE", foreign / "index")):
+                with self.subTest(key=key), mock.patch.dict(os.environ, {key: str(location)}):
+                    self.candidate.write_text("first\n", encoding="utf-8")
+                    state = self._run([self.PROPOSAL] * 2, max_turns=2,
+                                      edits={2: (self.candidate, "second\n")})
+                    self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+                    first, second = state["history"]
+                    self.assertNotEqual(first["approval_revision"], second["approval_revision"])
+
+    def test_candidate_below_a_directory_with_a_newline_in_its_name(self) -> None:
+        repo = self.root / "newline"
+        candidate = repo / "a\nb"
+        try:
+            candidate.mkdir(parents=True)
+        except OSError:
+            self.skipTest("the filesystem refuses a newline in a directory name")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (candidate / "a.py").write_text("first\n", encoding="utf-8")
+        before = self._revision_digest(candidate)
+
+        (candidate / "a.py").write_text("second\n", encoding="utf-8")
+        self.assertNotEqual(self._revision_digest(candidate), before)
+
+    def _transcript(self, state: dict) -> str:
+        return pathlib.Path(state["transcript_path"]).read_text(encoding="utf-8")
+
+    def test_unhashable_entry_note_names_path_and_reason(self) -> None:
+        os.mkfifo(self.root / "pipe")
+
+        state = self._run([self.PROPOSAL] * 2, max_turns=2)
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertNotIn("approval_revision", state["history"][0])
+        self.assertIn("pipe: unsupported candidate file type", self._transcript(state))
+
+    def test_unreadable_directory_note_names_path_and_remedy(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root can read any directory")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        locked = self.root / "locked"
+        locked.mkdir()
+        (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+
+        with self.subTest(ignored=False):
+            state = self._run([self.PROPOSAL] * 2, max_turns=2)
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+            transcript = self._transcript(state)
+            self.assertIn("locked/", transcript)
+            self.assertIn("Permission denied", transcript)
+            self.assertIn("ignore the directory in Git", transcript)
+
+        with self.subTest(ignored=True):
+            (self.root / ".gitignore").write_text("locked/\n", encoding="utf-8")
+            self._revision_digest(self.root)
+
+    def test_problem_text_survives_non_utf8_paths_and_is_bounded(self) -> None:
+        text = duet._revision_problem(OSError("unsupported candidate file type"), b"caf\xe9\xff")
+        text.encode("utf-8")
+        self.assertIn("unsupported candidate file type", text)
+        timeout = duet._revision_problem(subprocess.TimeoutExpired(["git"], 10), b"sub")
+        self.assertEqual(timeout, "sub: git timed out after 10 s")
+        long_reason = duet._revision_problem(RuntimeError("x" * 5000), b"dir")
+        self.assertLessEqual(len(long_reason), duet.ERROR_SUMMARY_MAX_CHARS)
+
+    def test_edit_to_an_already_read_file_invalidates_the_approval(self) -> None:
+        (self.root / "second.py").write_text("second file\n", encoding="utf-8")
+        edit_pending = False
+        real_read = duet._revision_file
+
+        def replies():
+            nonlocal edit_pending
+            yield self.PROPOSAL
+            edit_pending = True
+            yield self.PROPOSAL
+
+        def read_file(parent_fd, name, expected):
+            nonlocal edit_pending
+            if edit_pending and name == b"second.py":
+                edit_pending = False
+                self.candidate.write_text("changed during the snapshot\n", encoding="utf-8")
+            return real_read(parent_fd, name, expected)
+
+        with mock.patch.object(duet, "_revision_file", side_effect=read_file):
+            state = self._run(replies(), max_turns=2)
+
+        self.assertEqual(self.candidate.read_text(encoding="utf-8"), "changed during the snapshot\n")
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertIn("approval_revision", state["history"][0])
+        self.assertNotIn("approval_revision", state["history"][1])
+        self.assertIn("candidate.py: changed while Duet read the candidate",
+                      self._transcript(state))
+
+    def test_submodule_ignores_cache_writes_and_detects_tracked_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = pathlib.Path(raw).resolve()
+            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+            (source / ".gitignore").write_text("cache.log\n", encoding="utf-8")
+            (source / "app.py").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", ".gitignore", "app.py"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "-qm", "seed"], cwd=source, check=True,
+            )
+            subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+            subprocess.run(
+                ["git", "-c", "protocol.file.allow=always",
+                 "submodule", "add", "--quiet", "--", str(source), "nested"],
+                cwd=self.root, check=True,
+            )
+            cache = self.root / "nested" / "cache.log"
+            cache.write_text("before\n", encoding="utf-8")
+            tracked = self.root / "nested" / "app.py"
+
+            state = self._run(
+                [self.PROPOSAL] * 3, max_turns=3, edits={2: (tracked, "second\n")},
+                verify_cmd="printf 'verify\\n' >> nested/cache.log",
+            )
+
+        self.assertEqual(cache.read_text(encoding="utf-8"), "before\n" + "verify\n" * 3)
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        before, first, second = state["history"]
+        self.assertNotEqual(before["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+
+    def test_conflicted_gitlink_includes_files_tracked_by_either_index(self) -> None:
+        def git(cwd, *args, data=None):
+            return subprocess.check_output(["git", *args], cwd=cwd, input=data).strip()
+
+        nested = self.root / "nested"
+        nested.mkdir()
+        git(self.root, "init", "-q")
+        git(nested, "init", "-q")
+        (nested / ".gitignore").write_text("outer.txt\n", encoding="utf-8")
+        inner = nested / "inner.txt"
+        inner.write_text("inner\n", encoding="utf-8")
+        git(nested, "add", ".gitignore", "inner.txt")
+        git(nested, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-qm", "nested fixture")
+        gitlink = git(nested, "rev-parse", "HEAD")
+        outer = nested / "outer.txt"
+        outer.write_bytes(b"outer\n")
+        blob = git(self.root, "hash-object", "-w", "--stdin", data=outer.read_bytes())
+        git(self.root, "update-index", "--index-info", data=(
+            b"160000 " + gitlink + b" 2\tnested\n100644 " + blob + b" 3\tnested/outer.txt\n"))
+
+        before = self._revision_digest(self.root)
+        outer.write_text("outer edit\n", encoding="utf-8")
+        after_outer = self._revision_digest(self.root)
+        self.assertNotEqual(before, after_outer)
+        inner.write_text("inner edit\n", encoding="utf-8")
+        self.assertNotEqual(after_outer, self._revision_digest(self.root))
+
+    def test_non_repository_git_diagnostics_allow_filesystem_fallback(self) -> None:
+        cfg = duet.DuetConfig(
+            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            metrics_enabled=False,
+        )
+        command = ["git", "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"]
+        warning = (
+            b"git: warning: confstr() failed with code 5: "
+            b"couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\n"
+        )
+        no_repo = b"fatal: not a git repository (or any of the parent directories): .git\n"
+        mount_boundary = (
+            b"fatal: not a git repository (or any parent up to mount point /)\n"
+            b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n"
+        )
+        with mock.patch.object(duet.subprocess, "run") as probe:
+            for stderr in (warning + no_repo, mount_boundary):
+                with self.subTest(stderr=stderr):
+                    probe.return_value = subprocess.CompletedProcess(command, 128, b"", stderr)
+                    revision = duet._approval_revision(cfg, cfg.runs_dir, None)
+                    self.assertRegex(revision.digest or "", r"^[0-9a-f]{64}$")
+
+            fatal = b"fatal: detected dubious ownership in repository\n"
+            probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + fatal)
+            failed = duet._approval_revision(cfg, cfg.runs_dir, None)
+            self.assertIsNone(failed.digest)
+            self.assertIn("detected dubious ownership", failed.problem)
+
+    def test_first_forced_approval_is_pending_after_candidate_changes(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 3, max_turns=1, edits={2: (self.candidate, "second\n")},
+            inputs=["review the update", "confirm the reviewed update", ""],
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED_AFTER_FORCE)
+        self.assertEqual(state["turns_used"], 3)
+        automatic, first, second = state["history"]
+        self.assertTrue(first["forced"] and second["forced"])
+        self.assertNotEqual(automatic["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertNotEqual(first["agent"], second["agent"])
+
+    def test_forced_approval_can_confirm_last_automatic_turn(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 2, max_turns=1, inputs=["review the candidate", ""],
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED_AFTER_FORCE)
+        automatic, forced = state["history"]
+        self.assertTrue(forced["forced"])
+        self.assertEqual(automatic["approval_revision"], forced["approval_revision"])
+        self.assertNotEqual(automatic["agent"], forced["agent"])
+
+    def test_final_decision_rechecks_after_recording_the_second_approval(self) -> None:
+        write_state = duet._write_run_state
+
+        def save_during_handoff(path, state):
+            write_state(path, state)
+            if state["finished_reason"] is None and len(state["history"]) == 2:
+                self.candidate.write_text("saved after approval\n", encoding="utf-8")
+
+        for forced in (False, True):
+            with self.subTest(forced=forced), mock.patch.object(duet, "_write_run_state", save_during_handoff):
+                self.candidate.write_text("approved\n", encoding="utf-8")
+                state = self._run([self.PROPOSAL] * 2, max_turns=1 if forced else 2,
+                                  inputs=["finish the review"] if forced else None)
+                first, second = state["history"]
+                self.assertEqual(first["approval_revision"], second["approval_revision"])
+                self.assertEqual(state["finished_reason"], duet.FINISHED_REVISION_CHANGED)
+                saved = pathlib.Path(state["transcript_path"]).with_name("state.json")
+                self.assertEqual(json.loads(saved.read_text())["finished_reason"], state["finished_reason"])
+
+    def test_accepting_after_idle_edit_reports_revision_changed(self) -> None:
+        for eof in (False, True):
+            with self.subTest(eof=eof):
+                self.candidate.write_text("first\n", encoding="utf-8")
+
+                def edit_while_waiting(_prompt):
+                    self.candidate.write_text("second\n", encoding="utf-8")
+                    if eof:
+                        raise EOFError
+                    return ""
+
+                state = self._run([self.PROPOSAL] * 2, max_turns=2, inputs=edit_while_waiting)
+
+                self.assertEqual(state["finished_reason"], "revision_changed")
+
+    def test_verifier_can_recreate_directory_for_ignored_output(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        package = self.root / "pkg"
+        package.mkdir()
+        obsolete = package / "obsolete.py"
+        obsolete.write_text("obsolete\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text("pkg/verifier.cache\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore", "pkg/obsolete.py"], cwd=self.root, check=True)
+        obsolete.unlink()
+        package.rmdir()
+
+        state = self._run(
+            [self.PROPOSAL] * 2, max_turns=2,
+            verify_cmd="mkdir -p pkg && printf 'verify\\n' >> pkg/verifier.cache",
+        )
+
+        self.assertEqual((package / "verifier.cache").read_text(encoding="utf-8"), "verify\n" * 2)
+        first, second = state["history"]
+        self.assertTrue(first["verify"]["ok"] and second["verify"]["ok"])
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+
+    def test_verifier_cannot_remove_gitlink_directory(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "update-index", "--add", "--cacheinfo", "160000", "a" * 40, "sub"],
+            cwd=self.root, check=True,
+        )
+        (self.root / "sub").mkdir()
+
+        state = self._run([self.PROPOSAL] * 2, max_turns=2, verify_cmd="rm -rf sub")
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        first, second = state["history"]
+        self.assertNotIn("approval_revision", first)
+        self.assertRegex(second["approval_revision"], r"^[0-9a-f]{64}$")
+
+    def test_verifier_output_note_names_changed_paths(self) -> None:
+        report = self.root / "report.xml"
+        with self.subTest(ignored=False):
+            state = self._run([self.PROPOSAL] * 3, max_turns=3,
+                              verify_cmd="echo $$ > report.xml")
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+            self.assertFalse(any("approval_revision" in turn for turn in state["history"]))
+            transcript = self._transcript(state)
+            self.assertIn("report.xml (added)", transcript)
+            self.assertIn("report.xml (changed)", transcript)
+            self.assertIn("ignore", transcript)
+
+        with self.subTest(ignored=True):
+            report.unlink()
+            subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+            (self.root / ".gitignore").write_text("report.xml\n", encoding="utf-8")
+
+            state = self._run([self.PROPOSAL] * 3, max_turns=3,
+                              verify_cmd="echo $$ > report.xml")
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+            self.assertEqual(state["turns_used"], 2)
+
+    def test_changed_path_list_is_limited_and_marks_each_change(self) -> None:
+        before = {b"keep": b"1", b"edit": b"1", b"gone": b"1"}
+        after = {b"keep": b"1", b"edit": b"2", b"new": b"1"}
+        self.assertEqual(duet._changed_candidate_paths(before, after),
+                         "edit (changed), gone (removed), new (added)")
+        many = {b"f%d" % n: b"1" for n in range(8)}
+        listed = duet._changed_candidate_paths({}, many)
+        self.assertEqual(listed.count(" (added)"), 5)
+        self.assertTrue(listed.endswith("+3 more"))
+
+    def test_changed_path_list_omits_directories_that_hold_other_changes(self) -> None:
+        directory = b"directory"
+        before = {b"a.py": b"1"}
+        after = {b"a.py": b"2", b"build": directory, b"build/x": directory,
+                 b"build/x/out.txt": b"1", b"sub": directory}
+        self.assertEqual(duet._changed_candidate_paths(before, after),
+                         "a.py (changed), build/x/out.txt (added), sub (added)")
+        self.assertEqual(duet._changed_candidate_paths(after, before),
+                         "a.py (changed), build/x/out.txt (removed), sub (removed)")
+
+    def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 3, max_turns=3,
+            verify_cmd="printf 'second\\n' > candidate.py",
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(state["turns_used"], 3)
+        changed, first, second = state["history"]
+        self.assertTrue(changed["verify"]["ok"])
+        self.assertNotIn("approval_revision", changed)
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertIn("candidate.py (changed)", self._transcript(state))
+
+
+class TestRunsIgnoreFile(unittest.TestCase):
+    def _allocate(self, *, runs_dir, cwd, worktree_path=None) -> duet.DuetConfig:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        cwd.mkdir(parents=True, exist_ok=True)
+        cfg = duet.DuetConfig(
+            cwd=cwd, agents=_agents(), task="review", runs_dir=runs_dir,
+            worktree_path=worktree_path, metrics_enabled=False,
+        )
+        with mock.patch.object(duet, "_register_run_in_home_index"):
+            duet._allocate_run_dir(cfg)
+        return cfg
+
+    def test_overlap_with_the_candidate_skips_the_ignore_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cases = {
+                "runs_dir is the cwd": dict(runs_dir=root / "a", cwd=root / "a"),
+                "cwd is inside runs_dir": dict(runs_dir=root / "b", cwd=root / "b" / "proj"),
+                "worktree is inside runs_dir": dict(
+                    runs_dir=root / "c", cwd=root / "other",
+                    worktree_path=root / "c" / "wt"),
+            }
+            for label, kwargs in cases.items():
+                with self.subTest(label):
+                    cfg = self._allocate(**kwargs)
+                    self.assertFalse((cfg.runs_dir / ".gitignore").exists())
+                    self.assertIsNone(cfg._generated_runs_ignore)
+
+    def test_runs_dir_inside_the_candidate_gets_the_ignore_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._allocate(runs_dir=root / "proj" / "runs", cwd=root / "proj")
+            ignore = cfg.runs_dir / ".gitignore"
+            self.assertTrue(ignore.read_text(encoding="utf-8").endswith("*\n"))
+            self.assertEqual(cfg._generated_runs_ignore, ignore.resolve())
 
 
 def _envelope(result: str = "Review findings.", denials=None, **extra) -> str:

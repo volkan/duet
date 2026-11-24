@@ -106,7 +106,7 @@ class Scenario:
     require_reviewer_rejection: bool = False
     require_empty_diff: bool = False
     require_fenced_nonconvergence: bool = False
-    force_feedback: Optional[str] = None
+    force_feedback: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass
@@ -485,9 +485,17 @@ def scenarios() -> list[Scenario]:
             hidden_validator=validate_docstring,
             max_turns=1,
             expected_reasons=("converged_after_force",),
+            coder_prompt=GENERIC_CODER_PROMPT + """
+
+Scenario rule: complete the change on your first turn, then report the results
+without an approval sentinel. On your next turn, read the review and verify the
+same candidate without editing it. If the checks pass, approve it.
+""",
             force_feedback=(
-                "Please review the completed worktree diff now. If the change "
-                "is correct, confirm with a real LGTM rationale and the sentinel."
+                "Review the completed worktree diff. If the change is correct, "
+                "give an LGTM rationale and the sentinel.",
+                "Check the review and confirm the same candidate without editing it. "
+                "If you approve, give an LGTM rationale and the sentinel.",
             ),
             task=(
                 "Add a one-line docstring to greet(name) in app.py explaining "
@@ -679,7 +687,7 @@ def run_duet_with_force_pty(
     duet_path: pathlib.Path,
     config_path: pathlib.Path,
     log_path: pathlib.Path,
-    feedback: str,
+    feedback: tuple[str, ...],
     timeout: int,
 ) -> int:
     cmd = [sys.executable, str(duet_path), "--config", str(config_path),
@@ -701,7 +709,7 @@ def run_duet_with_force_pty(
     deadline = time.time() + timeout
     prompt_count = 0
     sent_inputs = 0
-    inputs = [feedback + "\n", "\n"]
+    inputs = [msg + "\n" for msg in (*feedback, "")]
     buffer = b""
     try:
         with log_path.open("wb") as log:
@@ -792,6 +800,23 @@ def visible_tests_pass(worktree: pathlib.Path) -> tuple[bool, str]:
     return p.returncode == 0, detail
 
 
+def convergence_pair_failure(state: dict, agent_turns: list[Turn]) -> Optional[str]:
+    pair = agent_turns[-2:]
+    if len(pair) < 2 or not all(t.convergence for t in pair):
+        return "final two agent turns did not both pass convergence_proposed()"
+    if pair[0].speaker == pair[1].speaker:
+        return "final approval pair came from the same peer"
+    recent = state.get("history", [])[-2:]
+    if [entry.get("agent") for entry in recent] != [t.speaker for t in pair]:
+        return "final approval pair does not match state history"
+    revision = recent[0].get("approval_revision")
+    if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{64}", revision):
+        return "final approval pair lacks a candidate revision"
+    if revision != recent[1].get("approval_revision"):
+        return "final approvals are for different candidate revisions"
+    return None
+
+
 def score_run(
     scenario: Scenario,
     repo: pathlib.Path,
@@ -832,16 +857,16 @@ def score_run(
     parser_hits = sum(1 for t in agent_turns if t.convergence)
     metrics["parser_converged_turns"] = parser_hits
 
-    if reason == "converged":
-        if len(agent_turns) < 2 or not all(t.convergence for t in agent_turns[-2:]):
-            failures.append("final two agent turns did not both pass convergence_proposed()")
+    if reason in {"converged", "converged_after_force"}:
+        failure = convergence_pair_failure(state, agent_turns)
+        if failure:
+            failures.append(failure)
     if reason == "converged_after_force":
-        forced = [t for t in agent_turns if t.kind == "forced"]
-        metrics["forced_turns"] = len(forced)
-        if len(forced) != 1:
-            failures.append(f"expected exactly one forced agent turn, got {len(forced)}")
-        elif not forced[0].convergence:
-            failures.append("forced agent turn did not pass convergence_proposed()")
+        forced_count = sum(t.kind == "forced" for t in agent_turns)
+        metrics["forced_turns"] = forced_count
+        expected_forced = len(scenario.force_feedback)
+        if forced_count != expected_forced:
+            failures.append(f"expected {expected_forced} forced agent turns, got {forced_count}")
 
     if scenario.require_reviewer_rejection:
         final_pair_start = max(0, len(agent_turns) - 2)
@@ -936,9 +961,8 @@ def copy_failure(run_dir: pathlib.Path, dest: pathlib.Path) -> None:
     shutil.copytree(run_dir, dest, symlinks=True)
 
 
-def scenario_timeout(per_turn_timeout: int, turns: int, forced: bool) -> int:
-    extra_turns = 2 if forced else 1
-    return max(120, per_turn_timeout * (turns + extra_turns) + 60)
+def scenario_timeout(per_turn_timeout: int, turns: int, forced_turns: int) -> int:
+    return max(120, per_turn_timeout * (turns + max(1, forced_turns)) + 60)
 
 
 def parse_csv(value: Optional[str]) -> Optional[set[str]]:
@@ -1092,10 +1116,10 @@ def main() -> int:
             timeout = scenario_timeout(
                 effective_per_turn_timeout(scenario, args.timeout),
                 scenario.max_turns,
-                forced=scenario.force_feedback is not None,
+                forced_turns=len(scenario.force_feedback),
             )
             try:
-                if scenario.force_feedback is not None:
+                if scenario.force_feedback:
                     rc = run_duet_with_force_pty(
                         duet_path,
                         config_path,

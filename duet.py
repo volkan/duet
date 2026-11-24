@@ -16,8 +16,8 @@ Workflow this is built for:
   3. duet pulls Claude's latest message from that session, feeds it to Codex.
      Codex replies. duet feeds Codex's reply back to Claude (with --resume so
      Claude remembers the whole prior conversation). Ping-pong until both
-     agents propose convergence with an LGTM rationale and <<<LGTM>>> in
-     back-to-back turns, --turns is hit, or you Ctrl-C.
+     agents approve the same candidate revision, each with an LGTM rationale
+     and <<<LGTM>>> in back-to-back turns, --turns is hit, or you Ctrl-C.
 
 Each agent keeps its own session across turns:
   - Claude: `claude -p --resume <session_id> --output-format json` — we capture
@@ -61,6 +61,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,7 @@ ON_TURN_TIMEOUT_CHOICES = ("stop", "continue")
 REASONING_TIMEOUT_DEFAULTS = {"high": 1200, "xhigh": 1800, "max": 1800}
 FINISHED_CONVERGED = "converged"
 FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
+FINISHED_REVISION_CHANGED = "revision_changed"
 FINISHED_FORCED_CONTINUATION = "forced_continuation"
 FINISHED_MAX_TURNS = "max_turns"
 FINISHED_FORCE_STOP = "force_stop"
@@ -139,6 +141,7 @@ FINISHED_SETUP_ERROR = "setup_error"
 FINISHED_REASONS = {
     FINISHED_CONVERGED,
     FINISHED_CONVERGED_AFTER_FORCE,
+    FINISHED_REVISION_CHANGED,
     FINISHED_FORCED_CONTINUATION,
     FINISHED_MAX_TURNS,
     FINISHED_FORCE_STOP,
@@ -227,7 +230,10 @@ CONVERGENCE_INSTRUCTION = (
     "reading. If a conclusion depends on a check that no one ran with its "
     "command and result shown in this conversation, say so and treat it as "
     "unverified. An unverified claim that code is correct, fast, or safe does "
-    "not support convergence."
+    "not support convergence. An approval covers the candidate files as they "
+    "are at the end of your turn. If you change a file after your partner "
+    "approved, your partner must approve the changed files before the loop "
+    "stops."
 )
 
 REVIEW_EVIDENCE_CRITERIA = (
@@ -531,6 +537,8 @@ class DuetConfig:
                                               # instead of ending the run; a second
                                               # consecutive timeout still stops
     runs_dir: pathlib.Path = pathlib.Path("runs")
+    _generated_runs_ignore: Optional[pathlib.Path] = dataclasses.field(
+        default=None, init=False, repr=False)
     sandbox: str = DEFAULT_SANDBOX            # codex
     permission_mode: str = DEFAULT_PERMISSION_MODE  # claude/gemini
     dry_run: bool = False
@@ -1788,6 +1796,308 @@ def effective_verify_cwd(cfg: DuetConfig,
                          worktree_path: Optional[pathlib.Path]) -> pathlib.Path:
     """Return the directory where the convergence verify command should run."""
     return worktree_path or cfg.cwd
+
+
+def _candidate_has_git_marker(cwd: pathlib.Path, *, filesystem_boundary: bool = False) -> bool:
+    device = cwd.stat().st_dev
+    for parent in (cwd, *cwd.parents):
+        if filesystem_boundary and parent.lstat().st_dev != device:
+            break
+        try:
+            (parent / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _git_discovery_found_no_repo(cwd: pathlib.Path, stderr: bytes) -> bool:
+    lines = stderr.splitlines()
+    not_repository = b"fatal: not a git repository (or any of the parent directories): .git"
+    if not_repository in lines:
+        return not _candidate_has_git_marker(cwd)
+    boundary = b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)."
+    if boundary in lines and any(re.fullmatch(
+            rb"fatal: not a git repository \(or any parent up to mount point /.*\)", line)
+            for line in lines):
+        return not _candidate_has_git_marker(cwd, filesystem_boundary=True)
+    return False
+
+
+@dataclasses.dataclass
+class _RevisionSelection:
+    children: dict[bytes, _RevisionSelection] = dataclasses.field(default_factory=dict)
+    directory_entry: bool = False
+
+
+def _revision_git_selection(
+    cwd: pathlib.Path, identity: tuple, selection: Optional[_RevisionSelection], *, nested: bool,
+) -> tuple[Optional[_RevisionSelection], Optional[pathlib.Path]]:
+    # Git's pathname must still refer to the directory opened without following links.
+    if cwd.resolve(strict=True) != cwd or _revision_stat(cwd.lstat()) != identity:
+        raise OSError("candidate Git directory changed before enumeration")
+    git = shutil.which("git")
+    if git is None:
+        if _candidate_has_git_marker(cwd):
+            raise OSError("Git is required to enumerate the candidate")
+        return None, None
+    # Enumeration must not invoke fsmonitor, write index locks, or fetch objects.
+    cmd = [git, "-C", str(cwd), "-c", "core.fsmonitor=false"]
+    # Hooks can export another checkout's index and worktree even when Git runs with -C.
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        env.pop(key, None)
+    options = dict(stdin=subprocess.DEVNULL, env={
+        **env, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    }, capture_output=True, timeout=10)
+    repo = subprocess.run(
+        [*cmd, "rev-parse", "--show-cdup", "--is-inside-work-tree", "--absolute-git-dir"],
+        **options,
+    )
+    if repo.returncode == 128 and not nested and _git_discovery_found_no_repo(cwd, repo.stderr):
+        return None, None
+    repo.check_returncode()
+    cdup, _, output = repo.stdout.partition(b"\n")
+    if nested and cdup:
+        raise OSError("cannot confirm nested Git worktree root")
+    worktree, _, git_dir = output.partition(b"\n")
+    if worktree != b"true" or not git_dir:
+        raise OSError("candidate is outside the Git worktree")
+    # The repository top level is never an ignored directory, even under a root `*` rule.
+    if cdup and _candidate_root_ignored(cmd, options):
+        return None, None
+    listing = subprocess.run(
+        [*cmd, "ls-files", "-z", "-t", "--stage", "--cached", "--others", "--exclude-standard"],
+        check=True, **options,
+    )
+    read_warnings = (b"warning: unable to access", b"warning: could not open directory")
+    unread = next((line for line in listing.stderr.splitlines()
+                   if line.startswith(read_warnings)), None)
+    if unread is not None:
+        warning = " ".join(unread.decode("utf-8", "backslashreplace").split())[:200]
+        raise OSError(f"Git could not read the candidate ({warning}). "
+                      "Make it readable, or ignore the directory in Git.")
+    return (_revision_selection_tree(listing.stdout, selection),
+            pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
+
+
+def _candidate_root_ignored(cmd: list, options: dict) -> bool:
+    # Git lists nothing inside an ignored directory, so the candidate is hashed by walking it.
+    # --no-index is required: the index form reports a force-added file's directory as not ignored.
+    check = subprocess.run([*cmd, "check-ignore", "-q", "--no-index", "--", "."], **options)
+    if check.returncode not in (0, 1):
+        reason = check.stderr.decode("utf-8", "backslashreplace").splitlines()
+        raise OSError(f"git check-ignore failed: {reason[0] if reason else check.returncode}")
+    return check.returncode == 0
+
+
+def _revision_selection_tree(listing: bytes, selection: Optional[_RevisionSelection]) -> _RevisionSelection:
+    # A merge can list a gitlink in one stage and paths below it in another.
+    # Add the nested checkout's files to the paths already selected by its parent.
+    if selection is None:
+        selection = _RevisionSelection()
+    for record in listing.split(b"\0"):
+        if not record:
+            continue
+        if record.startswith(b"? "):
+            path = record[2:]
+            directory_entry = path.endswith(b"/")
+        else:
+            header, _, path = record.partition(b"\t")
+            directory_entry = header[2:].startswith(b"160000 ")
+        parts = path.rstrip(b"/").split(b"/")
+        if any(part in (b"", b".", b"..") for part in parts):
+            raise OSError("Git named a path outside the candidate")
+        selected = selection
+        for part in parts:
+            selected = selected.children.setdefault(part, _RevisionSelection())
+        if directory_entry:
+            selected.directory_entry = True
+    return selection
+
+
+def _revision_exclusions(cfg: DuetConfig, cwd: pathlib.Path, run_dir: pathlib.Path) -> set[bytes]:
+    outputs = [run_dir.parent.resolve() / run_dir.name, cfg.run_info_file,
+               cfg._generated_runs_ignore]
+    metric_id = cfg._metrics_context.get("id")
+    if metric_id is not None:
+        root = _metrics_root().resolve()
+        outputs.extend((root / "runs" / f"{metric_id}.json",
+                        root / "locks" / f"{metric_id}.lock"))
+    return {os.fsencode(path.relative_to(cwd))
+            for path in outputs if path is not None and cwd in path.parents}
+
+
+def _revision_stat(file_stat: os.stat_result) -> tuple:
+    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_mode, file_stat.st_size,
+            file_stat.st_mtime_ns, file_stat.st_ctime_ns)
+
+
+def _revision_frame(digest, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _revision_file(parent_fd: int, name: bytes, expected: os.stat_result) -> bytes:
+    digest = hashlib.sha256()
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+    with os.fdopen(fd, "rb") as file:
+        if _revision_stat(os.fstat(fd)) != _revision_stat(expected):
+            raise OSError("candidate file changed before reading")
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+@dataclasses.dataclass
+class _RevisionScan:
+    root: pathlib.Path
+    digest: Optional[object] = None
+    identities: dict = dataclasses.field(default_factory=dict)
+    contents: dict = dataclasses.field(default_factory=dict)
+    current: bytes = b""
+
+
+def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
+                         selection: Optional[_RevisionSelection], excluded: set[bytes],
+                         listed_by_git: bool) -> None:
+    scan.current = relative
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if listed_by_git:
+            scan.identities[relative] = None
+            return  # The Git index can still name a deleted working-tree path.
+        raise
+    identity = _revision_stat(info)
+    scan.identities[relative] = identity
+    if stat.S_ISDIR(info.st_mode):
+        if scan.digest is not None and (selection is None or selection.directory_entry):
+            scan.contents[relative] = b"directory"
+            _revision_frame(scan.digest, relative)
+            _revision_frame(scan.digest, b"directory")
+        _scan_revision_directory(scan, name, parent_fd=parent_fd, relative=relative,
+                                 selection=selection, excluded=excluded)
+    elif scan.digest is not None:
+        _hash_revision_leaf(scan, parent_fd, name, relative, info)
+    scan.current = relative
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if _revision_stat(current) != identity:
+        raise OSError("candidate entry changed during reading")
+
+
+def _hash_revision_leaf(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
+                        info: os.stat_result) -> None:
+    leaf = hashlib.sha256()
+    if stat.S_ISREG(info.st_mode):
+        _revision_frame(leaf, b"file" + bytes((info.st_mode & 0o111,)))
+        _revision_frame(leaf, _revision_file(parent_fd, name, info))
+    elif stat.S_ISLNK(info.st_mode):
+        _revision_frame(leaf, b"symlink")
+        _revision_frame(leaf, os.readlink(name, dir_fd=parent_fd))
+    else:
+        raise OSError("unsupported candidate file type")
+    scan.contents[relative] = leaf.digest()
+    _revision_frame(scan.digest, relative)
+    _revision_frame(scan.digest, scan.contents[relative])
+
+
+def _has_nested_git_marker(fd: int) -> bool:
+    try:
+        os.stat(b".git", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Optional[int],
+                             relative: bytes, selection: Optional[_RevisionSelection],
+                             excluded: set[bytes]) -> None:
+    scan.current = relative
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        info = _revision_stat(os.fstat(fd))
+        directory_entry = selection is None or selection.directory_entry
+        scan.identities[relative] = (*info, directory_entry)
+        if not relative or (directory_entry and _has_nested_git_marker(fd)):
+            cwd = scan.root / os.fsdecode(relative)
+            selection, git_dir = _revision_git_selection(cwd, info, selection, nested=bool(relative))
+            if git_dir is not None and cwd in git_dir.parents:
+                excluded = excluded | {os.fsencode(git_dir.relative_to(scan.root))}
+        if selection is None:
+            with os.scandir(fd) as directory:
+                entries = {os.fsencode(entry.name): None for entry in directory}
+        else:
+            entries = selection.children
+        for child in sorted(entries):
+            path = relative + b"/" + child if relative else child
+            if child == b".git" or path in excluded:
+                continue
+            _scan_revision_entry(scan, fd, child, path, entries[child], excluded,
+                                 listed_by_git=selection is not None)
+        scan.current = relative
+        if _revision_stat(os.fstat(fd)) != info:
+            raise OSError("candidate directory changed during reading")
+    finally:
+        os.close(fd)
+
+
+@dataclasses.dataclass
+class _RevisionResult:
+    digest: Optional[str] = None
+    problem: Optional[str] = None
+    contents: dict = dataclasses.field(default_factory=dict)
+
+
+def _revision_problem(exc: BaseException, current: bytes) -> str:
+    """One bounded line naming the path and cause. Paths are decoded leniently so the
+    note can always be encoded as UTF-8."""
+    path = current.decode("utf-8", "backslashreplace") or "."
+    if isinstance(exc, subprocess.TimeoutExpired):
+        reason = f"git timed out after {exc.timeout:g} s"
+    elif isinstance(exc, subprocess.CalledProcessError):
+        lines = (exc.stderr or b"").decode("utf-8", "backslashreplace").splitlines()
+        reason = next((line for line in lines if line.startswith(("fatal:", "error:"))),
+                      lines[0] if lines else f"git exited with status {exc.returncode}")
+    elif isinstance(exc, OSError) and exc.errno is not None:
+        reason = exc.strerror or str(exc)
+    else:
+        reason = str(exc)
+    return f"{path}: {' '.join(reason.split())}"[:ERROR_SUMMARY_MAX_CHARS]
+
+
+def _first_changed_path(before: dict, after: dict) -> bytes:
+    changed = sorted(path for path in before.keys() | after.keys()
+                     if before.get(path) != after.get(path))
+    leaves = [path for path in changed
+              if not any(identity and stat.S_ISDIR(identity[2])
+                         for identity in (before.get(path), after.get(path)))]
+    return (leaves or changed or [b""])[0]
+
+
+def _approval_revision(cfg: DuetConfig, run_dir: pathlib.Path,
+                        wt_path: Optional[pathlib.Path]) -> _RevisionResult:
+    scan = None
+    try:
+        cwd = effective_verify_cwd(cfg, wt_path).resolve(strict=True)
+        digest = hashlib.sha256(b"duet candidate revision\0")
+        before = _RevisionScan(cwd, digest)
+        after = _RevisionScan(cwd)
+        excluded = _revision_exclusions(cfg, cwd, run_dir)
+        # Recheck every path after the content scan to catch changes to earlier files.
+        for scan in (before, after):
+            _scan_revision_directory(scan, os.fsencode(cwd), parent_fd=None, relative=b"",
+                                     selection=None, excluded=excluded)
+        if before.identities == after.identities:
+            return _RevisionResult(digest.hexdigest(), None, before.contents)
+        problem = _revision_problem(
+            OSError("changed while Duet read the candidate"),
+            _first_changed_path(before.identities, after.identities))
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        problem = _revision_problem(exc, scan.current if scan is not None else b"")
+    return _RevisionResult(None, problem)
 
 
 def _tail_text(text: str, max_chars: int = VERIFY_OUTPUT_TAIL_CHARS) -> str:
@@ -4011,7 +4321,7 @@ _METRIC_PHASES = {"kickoff_pending", "kickoff_running", "turn_running",
                  "between_turns", "awaiting_force", "finished"}
 _METRIC_REASONS = {"converged", "converged_after_force", "max_turns", "timeout",
                    "agent_error", "kickoff_error", "setup_error", "force_stop",
-                   "forced_continuation", "dry_run"}
+                   "forced_continuation", "dry_run", FINISHED_REVISION_CHANGED}
 
 
 def _metrics_root() -> pathlib.Path:
@@ -4667,6 +4977,72 @@ def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
             and not stop.requested)
 
 
+def _changed_candidate_paths(before: dict, after: dict, limit: int = 5) -> str:
+    kinds = {path: ("added" if path not in before else
+                    "removed" if path not in after else "changed")
+             for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+    holding = {path.rsplit(b"/", depth)[0] for path in kinds
+               for depth in range(1, path.count(b"/") + 1)}
+    for path in holding & kinds.keys():
+        if kinds[path] != "changed":
+            del kinds[path]
+    shown = [f"{path.decode('utf-8', 'backslashreplace')[:100]} ({kinds[path]})"
+             for path in sorted(kinds)[:limit]]
+    if len(kinds) > limit:
+        shown.append(f"+{len(kinds) - limit} more")
+    return ", ".join(shown)
+
+
+def _unconfirmed_revision_note(before: _RevisionResult, after: _RevisionResult) -> str:
+    head = "[duet] convergence proposal ignored: "
+    if after.digest is None:
+        return (head + "could not confirm the candidate revision after verification. "
+                f"Cause: {after.problem}")
+    return (head + "the verification command changed the candidate: "
+            f"{_changed_candidate_paths(before.contents, after.contents)}. "
+            "The verifier must leave the candidate unchanged. "
+            "In Git, ignore its outputs. Outside Git, write them outside the candidate.")
+
+
+def _check_convergence_proposal(
+    cfg: DuetConfig, reply: str, call_succeeded: bool, run_dir: pathlib.Path,
+    turn_label: str, wt_path: Optional[pathlib.Path],
+) -> tuple[str, bool, Optional[dict], Optional[str]]:
+    if not call_succeeded or not convergence_proposed(reply, cfg.sentinel):
+        return reply, False, None, None
+    if cfg.dry_run:
+        return reply, True, None, None
+
+    candidate = _approval_revision(cfg, run_dir, wt_path)
+    revision = candidate.digest
+    verify_state = None
+    if revision is None:
+        reply += ("\n\n[duet] convergence proposal ignored: unable to hash the "
+                  f"candidate revision. Cause: {candidate.problem}")
+    if cfg.verify_cmd:
+        result = run_verify_command(cfg, run_dir, turn_label, wt_path)
+        verify_state = verify_result_state(result)
+        if not result.ok:
+            reply += "\n\n" + format_verify_failure_block(result)
+            return reply, False, verify_state, None
+        reply += "\n\n" + format_verify_success_block(result)
+        if revision is not None:
+            confirmed = _approval_revision(cfg, run_dir, wt_path)
+            if confirmed.digest != revision:
+                reply += "\n\n" + _unconfirmed_revision_note(candidate, confirmed)
+                revision = None
+    return reply, revision is not None, verify_state, revision
+
+
+def _has_approval_pair(history: list) -> bool:
+    if len(history) < 2:
+        return False
+    previous, current = history[-2:]
+    revision = current.get("approval_revision")
+    return (revision is not None and revision == previous.get("approval_revision")
+            and current["agent"] != previous["agent"])
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
@@ -4737,17 +5113,10 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         seen_first_turn[speaker.name] = True
     elapsed = time.monotonic() - measured_start
     raw_reply = reply
-    convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
-    verify_state: Optional[dict] = None
-    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-        verify_result = run_verify_command(cfg, run_dir, f"{turn:02d}", wt_path)
-        verify_state = verify_result_state(verify_result)
+    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
+        cfg, raw_reply, call_succeeded, run_dir, f"{turn:02d}", wt_path)
+    if verify_state is not None:
         last_verify_state = verify_state
-        if verify_result.ok:
-            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-        else:
-            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-            convergence_hit = False
 
     recap_block: Optional[str] = None
     if cfg.recap:
@@ -4787,6 +5156,8 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
             run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
     if verify_state is not None:
         history_entry["verify"] = verify_state
+    if revision is not None:
+        history_entry["approval_revision"] = revision
     history.append(history_entry)
     # A timeout the loop may continue past must not be persisted as the run's
     # finished_reason — that would flip the phase to "finished" and make
@@ -4804,12 +5175,19 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                        last_verify_state, recap_block)
 
 
+def _runs_ignore_overlaps_candidate(cfg: DuetConfig) -> bool:
+    root = cfg.runs_dir.resolve()
+    return any(path.expanduser().resolve().is_relative_to(root)
+               for path in (cfg.cwd, cfg.worktree_path) if path is not None)
+
+
 def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
     """Create the runs dir and a unique timestamped run dir under it.
 
     Falls back to ~/.duet/runs/<cwd-slug> when the configured runs dir is
-    unwritable (mutating cfg.runs_dir), writes the auto-.gitignore once, and
-    registers the run in the home index. Returns (run_dir, run_id).
+    unwritable (mutating cfg.runs_dir), writes the auto-.gitignore once unless
+    the candidate lies inside the runs dir, and registers the run in the home
+    index. Returns (run_dir, run_id).
     """
     try:
         cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -4822,11 +5200,15 @@ def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
         cfg.runs_dir = fallback
     # Auto-ignore everything duet writes (transcripts, state, worktrees) from
     # the host repo's POV. Idempotent — only written once per runs_dir.
+    # Skipped when the candidate lies inside runs_dir: a `*` ignore file there
+    # would hide the candidate itself from Git and from the revision scan.
     gi = cfg.runs_dir / ".gitignore"
-    if not gi.exists():
+    cfg._generated_runs_ignore = None
+    if not gi.exists() and not _runs_ignore_overlaps_candidate(cfg):
         write_text_atomic(gi, "# auto-created by duet — ignores all run artifacts\n"
                               "# (transcripts, state.json, worktrees) so they don't\n"
                               "# pollute the host repo. Safe to delete or edit.\n*\n")
+        cfg._generated_runs_ignore = gi.resolve()
     base_run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     for n in range(100):
         run_id = base_run_id if n == 0 else f"{base_run_id}-{n:02d}"
@@ -5186,7 +5568,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     # next speaker from the previous run's last completed turn.
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
-    previous_convergence_proposal = False
+    previous_preview_proposal = False
     previous_turn_timed_out = False
     last_verify_state: Optional[dict] = None
 
@@ -5221,7 +5603,7 @@ def run_duet(cfg: DuetConfig) -> dict:
                       f"the partner (--on-turn-timeout continue)",
                       file=sys.stderr)
                 last_msg = result.reply
-                previous_convergence_proposal = False
+                previous_preview_proposal = False
                 previous_turn_timed_out = True
                 speaker_idx = 1 - speaker_idx
                 continue
@@ -5231,12 +5613,13 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = FINISHED_FORCE_STOP
             break
         previous_turn_timed_out = False
-        if result.convergence_hit and previous_convergence_proposal:
+        last_msg = result.reply
+        speaker_idx = 1 - speaker_idx
+        if _has_approval_pair(history) or (
+                cfg.dry_run and result.convergence_hit and previous_preview_proposal):
             finished_reason = FINISHED_CONVERGED
             break
-        last_msg = result.reply
-        previous_convergence_proposal = result.convergence_hit
-        speaker_idx = 1 - speaker_idx
+        previous_preview_proposal = result.convergence_hit
     else:
         finished_reason = FINISHED_MAX_TURNS
 
@@ -5250,6 +5633,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
 
+    finished_reason = _confirm_final_revision(cfg, finished_reason, history, transcript_path, wt_path, stop)
     state = _build_run_state(
         cfg, turns_used=_loop_turn_count(history), history=history,
         finished_reason=finished_reason,
@@ -5335,17 +5719,10 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         seen_first_turn[next_speaker.name] = True
     elapsed = time.monotonic() - measured_start
     raw_reply = reply
-    convergence_hit = convergence_proposed(reply, cfg.sentinel)
-    verify_state: Optional[dict] = None
-    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-        verify_result = run_verify_command(cfg, run_dir, label, wt_path)
-        verify_state = verify_result_state(verify_result)
+    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
+        cfg, raw_reply, call_succeeded, run_dir, label, wt_path)
+    if verify_state is not None:
         last_verify_state = verify_state
-        if verify_result.ok:
-            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-        else:
-            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-            convergence_hit = False
     reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
     before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and next_speaker.cwd_override == wt_path:
@@ -5381,6 +5758,8 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         next_speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
     _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
+    if revision is not None:
+        history_entry["approval_revision"] = revision
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
@@ -5393,6 +5772,27 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         print(reply)
     return _TurnResult(reply, convergence_hit, failure_reason,
                        last_verify_state, recap_block)
+
+
+def _confirm_final_revision(cfg: DuetConfig, reason: str, history: list,
+                            transcript_path: pathlib.Path, wt_path: Optional[pathlib.Path],
+                            stop: StopFlag) -> str:
+    if cfg.dry_run or reason not in (FINISHED_CONVERGED, FINISHED_CONVERGED_AFTER_FORCE):
+        return reason
+    current = _approval_revision(cfg, transcript_path.parent, wt_path)
+    if stop.requested:
+        return FINISHED_FORCE_STOP
+    if (current.digest is not None and history
+            and current.digest == history[-1].get("approval_revision")):
+        return reason
+    if current.digest is None:
+        note = ("[duet] could not confirm the final candidate revision. "
+                f"Cause: {current.problem}")
+    else:
+        note = "[duet] candidate revision changed after approval."
+    append_text_atomic(transcript_path, f"\n{note}\n")
+    print(note)
+    return FINISHED_REVISION_CHANGED
 
 
 def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
@@ -5428,10 +5828,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         try:
             line = input("force> ").strip()
         except EOFError:
-            return (
-                FINISHED_FORCE_STOP if stop is not None and stop.requested else reason,
-                last_verify_state,
-            )
+            line = ""
         if stop is not None and stop.requested:
             return FINISHED_FORCE_STOP, last_verify_state
         if not line:
@@ -5475,7 +5872,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
-        if result.convergence_hit:
+        if _has_approval_pair(history) or (cfg.dry_run and result.convergence_hit):
             return FINISHED_CONVERGED_AFTER_FORCE, last_verify_state
 
 # ---------- config / cli parsing ----------
@@ -6493,6 +6890,7 @@ def print_run_status_safe(arg: str, json_output: bool = False) -> int:
 _LIST_STATUS_FINISHED = {
     FINISHED_CONVERGED:             ("✅", "converged"),
     FINISHED_CONVERGED_AFTER_FORCE: ("✅", "converged"),
+    FINISHED_REVISION_CHANGED:      ("⚠", "revision_changed"),
     FINISHED_MAX_TURNS:             ("⏰", "max_turns"),
     FINISHED_FORCE_STOP:            ("🔴", "force_stop"),
     FINISHED_TIMEOUT:               ("⏱", "timeout"),
@@ -8412,8 +8810,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--turns", type=int, default=None,
                     help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=None,
-                    help="convergence sentinel; requires an LGTM rationale and "
-                         "back-to-back proposals from both agents")
+                    help="convergence sentinel; needs an LGTM rationale and "
+                         "back-to-back approvals of one candidate revision by both agents")
     ap.add_argument("--timeout", type=int, default=None,
                     help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT}; "
                          "without this flag the default scales with the "
@@ -8427,9 +8825,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "always stop on timeout). The review recipe defaults to "
                          "'continue'.")
     ap.add_argument("--verify-cmd", metavar="CMD", default=None,
-                    help="shell command that must exit 0 before a convergence "
-                         "proposal can count. Runs only for valid LGTM+rationale "
-                         "proposals; YAML key: `verify_cmd:`.")
+                    help="shell command that must exit 0 and leave the candidate "
+                         "unchanged before a convergence proposal counts. Runs only "
+                         "for valid LGTM+rationale proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--run-info-file", metavar="FILE", default=None,
                     help="atomically write the new run's schema-v1 launch JSON; "

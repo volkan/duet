@@ -92,7 +92,7 @@ assessments as inherited events, and tells the agents which claims to revisit.
 The original artifacts and stop reason remain intact. Normal `--continue`
 also inherits the ledger when reports are enabled.
 
-The existing two-turn convergence rule and timeout/stop controls are unchanged.
+A focused continuation follows the [normal convergence and stop rules](USAGE.md#stop-conditions-and-force-prompt).
 A focused continuation can still finish unresolved or fail. It does not promise
 agreement, automatically grant extra turns, or declare an unresolved finding
 correct. An incomplete ledger at the reporting limit cannot be continued with
