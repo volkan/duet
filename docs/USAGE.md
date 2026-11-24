@@ -1038,7 +1038,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | `--turns` reached | `reason=max_turns` |
 | a forced turn completes two back-to-back approvals of the same candidate revision | `reason=converged_after_force` |
 | press Enter or send EOF after a forced turn without a matching approval pair | `reason=forced_continuation` |
-| press Enter or send EOF after convergence and Duet cannot confirm the approved candidate revision | `reason=revision_changed` |
+| the final candidate differs from the approved revision, or Duet cannot read it to confirm convergence | `reason=revision_changed` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
 | `duet --stop RUN` | validates and signals only that run's supervisor; finishes the current turn, then exits with `reason=force_stop` |
@@ -1067,12 +1067,16 @@ A convergence proposal needs `<<<LGTM>>>` on its own line and an
 Duet accepts convergence after different agents approve the same candidate
 revision in consecutive turns. An ordinary reply or failed verification
 breaks the pair. A valid approval on a changed revision starts a new pair.
+Duet checks the revision again after the final handoff and any force prompt.
+This check also runs in noninteractive sessions.
 
 The candidate comes from the selected worktree, or from `--cwd` when there
 is no worktree. Duet computes a SHA-256 fingerprint over file paths, file
 contents, executable bits, symbolic link targets, and directories. In Git, the
 fingerprint covers tracked and non-ignored untracked files in that directory,
-and each directory that Git lists as a path, such as a submodule directory.
+submodule directories, and untracked embedded repositories. The scan uses the
+candidate checkout's index even when another Git command launched Duet.
+If a directory replaces a deleted regular file, only its Git-visible children count.
 Outside Git, or when Git ignores the candidate directory itself, it covers the
 whole directory contents. Duet excludes Git metadata and its own run files.
 

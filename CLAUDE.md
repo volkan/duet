@@ -248,9 +248,9 @@ A failed check or ordinary reply clears the pending approval. If the
 fingerprint changes or is unavailable, keep the command result and record
 that Duet ignored the approval. Store accepted
 fingerprints in `state.json` as `history[].approval_revision`. Keep public
-status schema 1. Forced turns use the same pair rule. When the user accepts
-at `force>` after convergence, recheck the candidate. Report `revision_changed`
-if the fingerprint differs or is unavailable. Start `--continue` with a fresh pair. Dry runs
+status schema 1. Forced turns use the same pair rule. Before recording either
+converged result, recheck the candidate after the final handoff and any `force>` input.
+Report `revision_changed` if the fingerprint differs or is unavailable. Start `--continue` with a fresh pair. Dry runs
 simulate convergence. See [stop conditions](docs/USAGE.md#stop-conditions-and-force-prompt).
 
 `_approval_revision` returns a `_RevisionResult`: the digest, a one-line
@@ -259,15 +259,16 @@ names the relative path and the cause (`_revision_problem`). It decodes paths
 with `backslashreplace`, never `os.fsdecode`, because a lone surrogate would
 make the UTF-8 encode of the reply raise. It is capped at
 `ERROR_SUMMARY_MAX_CHARS`. The notes (`_check_convergence_proposal`,
-`_unconfirmed_revision_note`, `_finish_force_prompt`) go only into the reply,
+`_unconfirmed_revision_note`, `_confirm_final_revision`) go only into the reply,
 the transcript, and the next prompt, never into state, status, or metrics.
 After verification, `_changed_candidate_paths` lists up to five changed paths
 from the per-path digests. The rule stays that the verifier must leave the
 candidate unchanged; there is no flag to relax it.
 
-The scan frames every walked directory and every directory that Git names as a
-leaf (a gitlink). It adds no frame for a directory that Git names only as the
-parent of listed paths. When the candidate directory itself is Git-ignored,
+The scan uses the candidate checkout's index. In Git it frames directory entries
+for gitlinks (index mode `160000`) and untracked embedded repositories.
+A directory replacing a deleted regular file contributes only its selected children.
+In a filesystem walk, each directory contributes a frame. When the candidate directory itself is Git-ignored,
 `_candidate_root_ignored` (`git check-ignore -q --no-index -- .`) makes Duet
 walk it like a non-Git directory. Do not use the index form: it reports the
 directory of a force-added tracked file as not ignored. The repository top level

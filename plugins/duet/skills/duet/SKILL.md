@@ -202,8 +202,8 @@ partner can inspect its failure block and worktree handoff.
 
 Report `converged` and `converged_after_force` as pair agreement. In CLI
 versions that track candidate revisions, both agents approved the same
-revision. Report `revision_changed` when Duet could no longer confirm the
-approved revision.
+revision. Duet checks that revision again after the final handoff. Report
+`revision_changed` if the final check finds a change or cannot read the candidate.
 Recommend a fresh review of the final diff and execution of its checks before
 acceptance or merge.
 

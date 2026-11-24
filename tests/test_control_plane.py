@@ -1485,32 +1485,22 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         (self.root / ".gitignore").write_text("thing/cache.log\n", encoding="utf-8")
         subprocess.run(["git", "add", "thing", ".gitignore"], cwd=self.root, check=True)
         thing.unlink()
+        deleted_revision = self._revision_digest(self.root)
         thing.mkdir()
         cache = thing / "cache.log"
-        cache.write_text("initial cache\n", encoding="utf-8")
-        cfg = duet.DuetConfig(
-            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
-            metrics_enabled=False,
-        )
-
-        def revision():
-            digest = duet._approval_revision(cfg, cfg.runs_dir, None).digest
-            self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
-            return digest
-
         with self.subTest(selected_child=False):
-            before = revision()
             cache.write_text("new cache\n", encoding="utf-8")
-            self.assertEqual(revision(), before)
+            self.assertEqual(self._revision_digest(self.root), deleted_revision)
 
         selected = thing / "keep.py"
         selected.write_text("selected file\n", encoding="utf-8")
         with self.subTest(selected_child=True):
-            before = revision()
+            before = self._revision_digest(self.root)
+            self.assertNotEqual(before, deleted_revision)
             cache.write_text("updated cache\n", encoding="utf-8")
-            self.assertEqual(revision(), before)
+            self.assertEqual(self._revision_digest(self.root), before)
             selected.write_text("edited selected file\n", encoding="utf-8")
-            self.assertNotEqual(revision(), before)
+            self.assertNotEqual(self._revision_digest(self.root), before)
 
     def _revision_digest(self, cwd: pathlib.Path) -> str:
         cfg = duet.DuetConfig(
@@ -1576,6 +1566,22 @@ class TestRevisionBoundConvergence(unittest.TestCase):
                 self.assertEqual(self._revision_digest(repo), before)
                 (repo / "a.py").write_text("second\n", encoding="utf-8")
                 self.assertNotEqual(self._revision_digest(repo), before)
+
+    def test_approvals_follow_the_candidate_index_under_inherited_git_settings(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("candidate.py\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-f", "candidate.py"], cwd=self.root, check=True)
+        with tempfile.TemporaryDirectory() as launcher:
+            subprocess.run(["git", "init", "-q"], cwd=launcher, check=True)
+            foreign = pathlib.Path(launcher) / ".git"
+            for key, location in (("GIT_DIR", foreign), ("GIT_INDEX_FILE", foreign / "index")):
+                with self.subTest(key=key), mock.patch.dict(os.environ, {key: str(location)}):
+                    self.candidate.write_text("first\n", encoding="utf-8")
+                    state = self._run([self.PROPOSAL] * 2, max_turns=2,
+                                      edits={2: (self.candidate, "second\n")})
+                    self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+                    first, second = state["history"]
+                    self.assertNotEqual(first["approval_revision"], second["approval_revision"])
 
     def test_candidate_below_a_directory_with_a_newline_in_its_name(self) -> None:
         repo = self.root / "newline"
@@ -1747,6 +1753,25 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertTrue(forced["forced"])
         self.assertEqual(automatic["approval_revision"], forced["approval_revision"])
         self.assertNotEqual(automatic["agent"], forced["agent"])
+
+    def test_final_decision_rechecks_after_recording_the_second_approval(self) -> None:
+        write_state = duet._write_run_state
+
+        def save_during_handoff(path, state):
+            write_state(path, state)
+            if state["finished_reason"] is None and len(state["history"]) == 2:
+                self.candidate.write_text("saved after approval\n", encoding="utf-8")
+
+        for forced in (False, True):
+            with self.subTest(forced=forced), mock.patch.object(duet, "_write_run_state", save_during_handoff):
+                self.candidate.write_text("approved\n", encoding="utf-8")
+                state = self._run([self.PROPOSAL] * 2, max_turns=1 if forced else 2,
+                                  inputs=["finish the review"] if forced else None)
+                first, second = state["history"]
+                self.assertEqual(first["approval_revision"], second["approval_revision"])
+                self.assertEqual(state["finished_reason"], duet.FINISHED_REVISION_CHANGED)
+                saved = pathlib.Path(state["transcript_path"]).with_name("state.json")
+                self.assertEqual(json.loads(saved.read_text())["finished_reason"], state["finished_reason"])
 
     def test_accepting_after_idle_edit_reports_revision_changed(self) -> None:
         for eof in (False, True):

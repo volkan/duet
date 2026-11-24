@@ -1824,9 +1824,15 @@ def _git_discovery_found_no_repo(cwd: pathlib.Path, stderr: bytes) -> bool:
     return False
 
 
+@dataclasses.dataclass
+class _RevisionSelection:
+    children: dict[bytes, _RevisionSelection] = dataclasses.field(default_factory=dict)
+    directory_entry: bool = False
+
+
 def _revision_git_selection(
     cwd: pathlib.Path, *, require_root: bool = False,
-) -> tuple[Optional[dict], Optional[pathlib.Path]]:
+) -> tuple[Optional[_RevisionSelection], Optional[pathlib.Path]]:
     git = shutil.which("git")
     if git is None:
         if _candidate_has_git_marker(cwd):
@@ -1834,8 +1840,13 @@ def _revision_git_selection(
         return None, None
     # Enumeration must not invoke fsmonitor, write index locks, or fetch objects.
     cmd = [git, "-C", str(cwd), "-c", "core.fsmonitor=false"]
+    # Hooks can export another checkout's index and worktree even when Git runs with -C.
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE",
+                "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        env.pop(key, None)
     options = dict(stdin=subprocess.DEVNULL, env={
-        **os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
+        **env, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
         "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
     }, capture_output=True, timeout=10)
     repo = subprocess.run(
@@ -1855,7 +1866,7 @@ def _revision_git_selection(
     if cdup and _candidate_root_ignored(cmd, options):
         return None, None
     listing = subprocess.run(
-        [*cmd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        [*cmd, "ls-files", "-z", "-t", "--stage", "--cached", "--others", "--exclude-standard"],
         check=True, **options,
     )
     read_warnings = (b"warning: unable to access", b"warning: could not open directory")
@@ -1879,17 +1890,25 @@ def _candidate_root_ignored(cmd: list, options: dict) -> bool:
     return check.returncode == 0
 
 
-def _revision_selection_tree(listing: bytes) -> dict:
-    selection: dict = {}
-    for path in listing.split(b"\0"):
-        if not path:
+def _revision_selection_tree(listing: bytes) -> _RevisionSelection:
+    selection = _RevisionSelection()
+    for record in listing.split(b"\0"):
+        if not record:
             continue
+        if record.startswith(b"? "):
+            path = record[2:]
+            directory_entry = path.endswith(b"/")
+        else:
+            header, _, path = record.partition(b"\t")
+            directory_entry = header[2:].startswith(b"160000 ")
         parts = path.rstrip(b"/").split(b"/")
         if any(part in (b"", b".", b"..") for part in parts):
             raise OSError("Git named a path outside the candidate")
         selected = selection
         for part in parts:
-            selected = selected.setdefault(part, {})
+            selected = selected.children.setdefault(part, _RevisionSelection())
+        if directory_entry:
+            selected.directory_entry = True
     return selection
 
 
@@ -1936,7 +1955,7 @@ class _RevisionScan:
 
 
 def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
-                         selection: Optional[dict], excluded: set[bytes],
+                         selection: Optional[_RevisionSelection], excluded: set[bytes],
                          listed_by_git: bool) -> None:
     scan.current = relative
     try:
@@ -1949,8 +1968,7 @@ def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relat
     identity = _revision_stat(info)
     scan.identities[relative] = identity
     if stat.S_ISDIR(info.st_mode):
-        # A directory Git names only as the parent of listed paths is identified by those paths.
-        if scan.digest is not None and not selection:
+        if scan.digest is not None and (selection is None or selection.directory_entry):
             scan.contents[relative] = b"directory"
             _revision_frame(scan.digest, relative)
             _revision_frame(scan.digest, b"directory")
@@ -1990,7 +2008,7 @@ def _has_nested_git_marker(fd: int) -> bool:
 
 def _scan_revision_git_paths(
     cwd: pathlib.Path, identity: tuple, *, nested: bool,
-) -> tuple[Optional[dict], Optional[pathlib.Path]]:
+) -> tuple[Optional[_RevisionSelection], Optional[pathlib.Path]]:
     # Git's pathname must still refer to the directory opened without following links.
     if cwd.resolve(strict=True) != cwd or _revision_stat(cwd.lstat()) != identity:
         raise OSError("candidate Git directory changed before enumeration")
@@ -1998,14 +2016,15 @@ def _scan_revision_git_paths(
 
 
 def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Optional[int],
-                             relative: bytes, selection: Optional[dict],
+                             relative: bytes, selection: Optional[_RevisionSelection],
                              excluded: set[bytes]) -> None:
     scan.current = relative
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         info = _revision_stat(os.fstat(fd))
-        scan.identities[relative] = info
-        if not relative or (not selection and _has_nested_git_marker(fd)):
+        directory_entry = selection is None or selection.directory_entry
+        scan.identities[relative] = (*info, directory_entry)
+        if not relative or (directory_entry and _has_nested_git_marker(fd)):
             cwd = scan.root / os.fsdecode(relative)
             selection, git_dir = _scan_revision_git_paths(cwd, info, nested=bool(relative))
             if git_dir is not None and cwd in git_dir.parents:
@@ -2014,7 +2033,7 @@ def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Opt
             with os.scandir(fd) as directory:
                 entries = {os.fsencode(entry.name): None for entry in directory}
         else:
-            entries = selection
+            entries = selection.children
         for child in sorted(entries):
             path = relative + b"/" + child if relative else child
             if child == b".git" or path in excluded:
@@ -5617,6 +5636,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
 
+    finished_reason = _confirm_final_revision(cfg, finished_reason, history, transcript_path, wt_path, stop)
     state = _build_run_state(
         cfg, turns_used=_loop_turn_count(history), history=history,
         finished_reason=finished_reason,
@@ -5757,19 +5777,22 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
                        last_verify_state, recap_block)
 
 
-def _finish_force_prompt(cfg: DuetConfig, reason: str, history: list,
-                         transcript_path: pathlib.Path, wt_path: Optional[pathlib.Path]) -> str:
-    if cfg.dry_run or reason != FINISHED_CONVERGED:
+def _confirm_final_revision(cfg: DuetConfig, reason: str, history: list,
+                            transcript_path: pathlib.Path, wt_path: Optional[pathlib.Path],
+                            stop: StopFlag) -> str:
+    if cfg.dry_run or reason not in (FINISHED_CONVERGED, FINISHED_CONVERGED_AFTER_FORCE):
         return reason
     current = _approval_revision(cfg, transcript_path.parent, wt_path)
+    if stop.requested:
+        return FINISHED_FORCE_STOP
     if (current.digest is not None and history
             and current.digest == history[-1].get("approval_revision")):
         return reason
     if current.digest is None:
-        note = ("[duet] candidate revision could not be verified at the force prompt. "
+        note = ("[duet] could not confirm the final candidate revision. "
                 f"Cause: {current.problem}")
     else:
-        note = "[duet] candidate revision changed at the force prompt."
+        note = "[duet] candidate revision changed after approval."
     append_text_atomic(transcript_path, f"\n{note}\n")
     print(note)
     return FINISHED_REVISION_CHANGED
@@ -5812,9 +5835,6 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         if stop is not None and stop.requested:
             return FINISHED_FORCE_STOP, last_verify_state
         if not line:
-            reason = _finish_force_prompt(cfg, reason, history, transcript_path, wt_path)
-            if stop is not None and stop.requested:
-                reason = FINISHED_FORCE_STOP
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
         first_turn_for_agent = not seen_first_turn[next_speaker.name]

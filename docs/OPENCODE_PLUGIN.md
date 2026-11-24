@@ -221,8 +221,8 @@ duet --status /path/to/project/.duet/runs/<run_id> --json
 
 Report `converged` or `converged_after_force` as pair agreement. See
 [the CLI convergence rule](USAGE.md#stop-conditions-and-force-prompt) for
-the candidate revision and force-prompt rules. A `revision_changed` result
-means Duet could no longer confirm the approved revision. For an independent review,
+the candidate revision and force-prompt rules. Duet returns `revision_changed`
+if its final check finds a change or cannot read the candidate. For an independent review,
 inspect the final diff in a fresh context and run its checks before acceptance.
 
 Report any positive `tool_denials` count and mark dependent claims as
