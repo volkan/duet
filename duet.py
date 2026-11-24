@@ -1863,7 +1863,7 @@ def _revision_git_selection(
     if unread is not None:
         warning = " ".join(unread.decode("utf-8", "backslashreplace").split())[:200]
         raise OSError(f"Git could not read the candidate ({warning}). "
-                      "Make it readable or add it to .gitignore.")
+                      "Make it readable, or ignore the directory in Git.")
     return (_revision_selection_tree(listing.stdout),
             pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
 
@@ -2038,9 +2038,10 @@ class _RevisionResult:
 def _revision_problem(exc: BaseException, current: bytes) -> str:
     """One bounded line naming the path and cause. Paths are decoded leniently so the
     note can always be encoded as UTF-8."""
+    path = current.decode("utf-8", "backslashreplace") or "."
     if isinstance(exc, subprocess.TimeoutExpired):
-        return f"git timed out after {exc.timeout:g} s"[:ERROR_SUMMARY_MAX_CHARS]
-    if isinstance(exc, subprocess.CalledProcessError):
+        reason = f"git timed out after {exc.timeout:g} s"
+    elif isinstance(exc, subprocess.CalledProcessError):
         lines = (exc.stderr or b"").decode("utf-8", "backslashreplace").splitlines()
         reason = next((line for line in lines if line.startswith(("fatal:", "error:"))),
                       lines[0] if lines else f"git exited with status {exc.returncode}")
@@ -2048,7 +2049,6 @@ def _revision_problem(exc: BaseException, current: bytes) -> str:
         reason = exc.strerror or str(exc)
     else:
         reason = str(exc)
-    path = current.decode("utf-8", "backslashreplace") or "."
     return f"{path}: {' '.join(reason.split())}"[:ERROR_SUMMARY_MAX_CHARS]
 
 
@@ -4965,6 +4965,11 @@ def _changed_candidate_paths(before: dict, after: dict, limit: int = 5) -> str:
     kinds = {path: ("added" if path not in before else
                     "removed" if path not in after else "changed")
              for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+    holding = {path.rsplit(b"/", depth)[0] for path in kinds
+               for depth in range(1, path.count(b"/") + 1)}
+    for path in holding & kinds.keys():
+        if kinds[path] != "changed":
+            del kinds[path]
     shown = [f"{path.decode('utf-8', 'backslashreplace')[:100]} ({kinds[path]})"
              for path in sorted(kinds)[:limit]]
     if len(kinds) > limit:

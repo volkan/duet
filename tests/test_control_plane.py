@@ -1606,7 +1606,7 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             transcript = self._transcript(state)
             self.assertIn("locked/", transcript)
             self.assertIn("Permission denied", transcript)
-            self.assertIn("add it to .gitignore", transcript)
+            self.assertIn("ignore the directory in Git", transcript)
 
         with self.subTest(ignored=True):
             (self.root / ".gitignore").write_text("locked/\n", encoding="utf-8")
@@ -1616,6 +1616,8 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         text = duet._revision_problem(OSError("unsupported candidate file type"), b"caf\xe9\xff")
         text.encode("utf-8")
         self.assertIn("unsupported candidate file type", text)
+        timeout = duet._revision_problem(subprocess.TimeoutExpired(["git"], 10), b"sub")
+        self.assertEqual(timeout, "sub: git timed out after 10 s")
         long_reason = duet._revision_problem(RuntimeError("x" * 5000), b"dir")
         self.assertLessEqual(len(long_reason), duet.ERROR_SUMMARY_MAX_CHARS)
 
@@ -1817,6 +1819,16 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         listed = duet._changed_candidate_paths({}, many)
         self.assertEqual(listed.count(" (added)"), 5)
         self.assertTrue(listed.endswith("+3 more"))
+
+    def test_changed_path_list_omits_directories_that_hold_other_changes(self) -> None:
+        directory = b"directory"
+        before = {b"a.py": b"1"}
+        after = {b"a.py": b"2", b"build": directory, b"build/x": directory,
+                 b"build/x/out.txt": b"1", b"sub": directory}
+        self.assertEqual(duet._changed_candidate_paths(before, after),
+                         "a.py (changed), build/x/out.txt (added), sub (added)")
+        self.assertEqual(duet._changed_candidate_paths(after, before),
+                         "a.py (changed), build/x/out.txt (removed), sub (removed)")
 
     def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
         state = self._run(

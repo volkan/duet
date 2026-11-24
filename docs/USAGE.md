@@ -1079,8 +1079,9 @@ whole directory contents. Duet excludes Git metadata and its own run files.
 If Duet cannot hash part of the candidate, it ignores the approval. It adds
 a note that names the path and the cause. Examples are a directory that Git
 cannot open and a file type that Duet cannot hash, such as a FIFO. Make the
-path readable, remove it, or add it to `.gitignore`. The note goes to the
-transcript and the next agent prompt. `state.json` does not store it.
+path readable or remove it. In Git, you can also ignore the directory. The
+note goes to the transcript and the next agent prompt. `state.json` does not
+store it.
 
 A forced turn can pair with the last automatic turn's valid approval if
 both apply to the same revision. If the candidate changes, the two agents

@@ -272,7 +272,7 @@ parent of listed paths. When the candidate directory itself is Git-ignored,
 it like a non-Git directory. Do not use the index form: it reports the directory
 of a force-added tracked file as not ignored. An unreadable directory stays
 fail-closed. The note carries Git's warning and the remedy (make it readable or
-add it to `.gitignore`). `_allocate_run_dir` writes no generated runs `.gitignore`
+ignore the directory in Git). `_allocate_run_dir` writes no generated runs `.gitignore`
 when the candidate lies inside the runs directory, because its `*` would hide
 the candidate. `CONVERGENCE_INSTRUCTION` tells agents that an approval covers
 the files as they are at the end of the turn.
