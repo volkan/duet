@@ -1831,8 +1831,11 @@ class _RevisionSelection:
 
 
 def _revision_git_selection(
-    cwd: pathlib.Path, *, require_root: bool = False,
+    cwd: pathlib.Path, identity: tuple, selection: Optional[_RevisionSelection], *, nested: bool,
 ) -> tuple[Optional[_RevisionSelection], Optional[pathlib.Path]]:
+    # Git's pathname must still refer to the directory opened without following links.
+    if cwd.resolve(strict=True) != cwd or _revision_stat(cwd.lstat()) != identity:
+        raise OSError("candidate Git directory changed before enumeration")
     git = shutil.which("git")
     if git is None:
         if _candidate_has_git_marker(cwd):
@@ -1853,11 +1856,11 @@ def _revision_git_selection(
         [*cmd, "rev-parse", "--show-cdup", "--is-inside-work-tree", "--absolute-git-dir"],
         **options,
     )
-    if repo.returncode == 128 and not require_root and _git_discovery_found_no_repo(cwd, repo.stderr):
+    if repo.returncode == 128 and not nested and _git_discovery_found_no_repo(cwd, repo.stderr):
         return None, None
     repo.check_returncode()
     cdup, _, output = repo.stdout.partition(b"\n")
-    if require_root and cdup:
+    if nested and cdup:
         raise OSError("cannot confirm nested Git worktree root")
     worktree, _, git_dir = output.partition(b"\n")
     if worktree != b"true" or not git_dir:
@@ -1876,7 +1879,7 @@ def _revision_git_selection(
         warning = " ".join(unread.decode("utf-8", "backslashreplace").split())[:200]
         raise OSError(f"Git could not read the candidate ({warning}). "
                       "Make it readable, or ignore the directory in Git.")
-    return (_revision_selection_tree(listing.stdout),
+    return (_revision_selection_tree(listing.stdout, selection),
             pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
 
 
@@ -1890,8 +1893,11 @@ def _candidate_root_ignored(cmd: list, options: dict) -> bool:
     return check.returncode == 0
 
 
-def _revision_selection_tree(listing: bytes) -> _RevisionSelection:
-    selection = _RevisionSelection()
+def _revision_selection_tree(listing: bytes, selection: Optional[_RevisionSelection]) -> _RevisionSelection:
+    # A merge can list a gitlink in one stage and paths below it in another.
+    # Add the nested checkout's files to the paths already selected by its parent.
+    if selection is None:
+        selection = _RevisionSelection()
     for record in listing.split(b"\0"):
         if not record:
             continue
@@ -2006,15 +2012,6 @@ def _has_nested_git_marker(fd: int) -> bool:
     return True
 
 
-def _scan_revision_git_paths(
-    cwd: pathlib.Path, identity: tuple, *, nested: bool,
-) -> tuple[Optional[_RevisionSelection], Optional[pathlib.Path]]:
-    # Git's pathname must still refer to the directory opened without following links.
-    if cwd.resolve(strict=True) != cwd or _revision_stat(cwd.lstat()) != identity:
-        raise OSError("candidate Git directory changed before enumeration")
-    return _revision_git_selection(cwd, require_root=nested)
-
-
 def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Optional[int],
                              relative: bytes, selection: Optional[_RevisionSelection],
                              excluded: set[bytes]) -> None:
@@ -2026,7 +2023,7 @@ def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Opt
         scan.identities[relative] = (*info, directory_entry)
         if not relative or (directory_entry and _has_nested_git_marker(fd)):
             cwd = scan.root / os.fsdecode(relative)
-            selection, git_dir = _scan_revision_git_paths(cwd, info, nested=bool(relative))
+            selection, git_dir = _revision_git_selection(cwd, info, selection, nested=bool(relative))
             if git_dir is not None and cwd in git_dir.parents:
                 excluded = excluded | {os.fsencode(git_dir.relative_to(scan.root))}
         if selection is None:

@@ -267,6 +267,7 @@ candidate unchanged; there is no flag to relax it.
 
 The scan uses the candidate checkout's index. In Git it frames directory entries
 for gitlinks (index mode `160000`) and untracked embedded repositories.
+If a merge conflict also lists tracked descendants of a gitlink, include the paths from both indexes.
 A directory replacing a deleted regular file contributes only its selected children.
 In a filesystem walk, each directory contributes a frame. When the candidate directory itself is Git-ignored,
 `_candidate_root_ignored` (`git check-ignore -q --no-index -- .`) makes Duet

@@ -1701,6 +1701,34 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertNotEqual(before["approval_revision"], first["approval_revision"])
         self.assertEqual(first["approval_revision"], second["approval_revision"])
 
+    def test_conflicted_gitlink_includes_files_tracked_by_either_index(self) -> None:
+        def git(cwd, *args, data=None):
+            return subprocess.check_output(["git", *args], cwd=cwd, input=data).strip()
+
+        nested = self.root / "nested"
+        nested.mkdir()
+        git(self.root, "init", "-q")
+        git(nested, "init", "-q")
+        (nested / ".gitignore").write_text("outer.txt\n", encoding="utf-8")
+        inner = nested / "inner.txt"
+        inner.write_text("inner\n", encoding="utf-8")
+        git(nested, "add", ".gitignore", "inner.txt")
+        git(nested, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-qm", "nested fixture")
+        gitlink = git(nested, "rev-parse", "HEAD")
+        outer = nested / "outer.txt"
+        outer.write_bytes(b"outer\n")
+        blob = git(self.root, "hash-object", "-w", "--stdin", data=outer.read_bytes())
+        git(self.root, "update-index", "--index-info", data=(
+            b"160000 " + gitlink + b" 2\tnested\n100644 " + blob + b" 3\tnested/outer.txt\n"))
+
+        before = self._revision_digest(self.root)
+        outer.write_text("outer edit\n", encoding="utf-8")
+        after_outer = self._revision_digest(self.root)
+        self.assertNotEqual(before, after_outer)
+        inner.write_text("inner edit\n", encoding="utf-8")
+        self.assertNotEqual(after_outer, self._revision_digest(self.root))
+
     def test_non_repository_git_diagnostics_allow_filesystem_fallback(self) -> None:
         cfg = duet.DuetConfig(
             cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
