@@ -1577,6 +1577,20 @@ class TestRevisionBoundConvergence(unittest.TestCase):
                 (repo / "a.py").write_text("second\n", encoding="utf-8")
                 self.assertNotEqual(self._revision_digest(repo), before)
 
+    def test_candidate_below_a_directory_with_a_newline_in_its_name(self) -> None:
+        repo = self.root / "newline"
+        candidate = repo / "a\nb"
+        try:
+            candidate.mkdir(parents=True)
+        except OSError:
+            self.skipTest("the filesystem refuses a newline in a directory name")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        (candidate / "a.py").write_text("first\n", encoding="utf-8")
+        before = self._revision_digest(candidate)
+
+        (candidate / "a.py").write_text("second\n", encoding="utf-8")
+        self.assertNotEqual(self._revision_digest(candidate), before)
+
     def _transcript(self, state: dict) -> str:
         return pathlib.Path(state["transcript_path"]).read_text(encoding="utf-8")
 
