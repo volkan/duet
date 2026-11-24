@@ -253,6 +253,30 @@ at `force>` after convergence, recheck the candidate. Report `revision_changed`
 if the fingerprint differs or is unavailable. Start `--continue` with a fresh pair. Dry runs
 simulate convergence. See [stop conditions](docs/USAGE.md#stop-conditions-and-force-prompt).
 
+`_approval_revision` returns a `_RevisionResult`: the digest, a one-line
+problem when hashing failed, and per-path content digests. The problem text
+names the relative path and the cause (`_revision_problem`). It decodes paths
+with `backslashreplace`, never `os.fsdecode`, because a lone surrogate would
+make the UTF-8 encode of the reply raise. It is capped at
+`ERROR_SUMMARY_MAX_CHARS`. The notes (`_check_convergence_proposal`,
+`_unconfirmed_revision_note`, `_finish_force_prompt`) go only into the reply,
+the transcript, and the next prompt, never into state, status, or metrics.
+After verification, `_changed_candidate_paths` lists up to five changed paths
+from the per-path digests. The rule stays that the verifier must leave the
+candidate unchanged; there is no flag to relax it.
+
+The scan frames every walked directory and every directory that Git names as a
+leaf (a gitlink). It adds no frame for a directory that Git names only as the
+parent of listed paths. When the candidate directory itself is Git-ignored,
+`_candidate_root_ignored` (`git check-ignore -q --no-index -- .`) makes Duet walk
+it like a non-Git directory. Do not use the index form: it reports the directory
+of a force-added tracked file as not ignored. An unreadable directory stays
+fail-closed. The note carries Git's warning and the remedy (make it readable or
+add it to `.gitignore`). `_allocate_run_dir` writes no generated runs `.gitignore`
+when the candidate lies inside the runs directory, because its `*` would hide
+the candidate. `CONVERGENCE_INSTRUCTION` tells agents that an approval covers
+the files as they are at the end of the turn.
+
 Convergence is pair agreement, not an independent review. `CONVERGENCE_INSTRUCTION` asks for named checks that either agent ran, with who ran it, command, and result, and `REVIEW_EVIDENCE_CRITERIA` is the one shared evidence text for loop reviewers, triage reviewers, and the recipe kickoff; change it in one place. Each context adds its own missing-check sentence, and `REVIEWER_EVIDENCE_INSTRUCTION` is the loop-reviewer composition. After a non-dry `converged`/`converged_after_force` finish, `_print_run_end_notes` prints the "not an independent review" note; after any non-dry finish it also prints a nonzero run denial total. The tool-denial note (`_append_tool_denial_note`) is appended after `convergence_proposed` runs on the raw reply, at the same point as the worktree hand-off; it never changes convergence or the verify gate.
 
 ### Subprocess plumbing (`_run`)

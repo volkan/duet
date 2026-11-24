@@ -50,9 +50,11 @@ dry_run: false                # CLI --dry-run always enables preview, even when 
 #   repeated --add-dir, and can be further scoped with extra_args such as
 #   --deny-tool / --allow-url.
 
-# Optional: shell command that must exit 0 before a valid LGTM+rationale
-# convergence proposal can count. Runs in the worktree when worktree mode has
-# an effective worktree path; otherwise runs in cwd.
+# Optional: shell command that must exit 0 and leave the candidate files
+# unchanged before a valid LGTM+rationale convergence proposal can count. In
+# Git, ignore the files it writes; outside Git, write them outside the
+# candidate. Runs in the worktree when worktree mode has an effective worktree
+# path; otherwise runs in cwd.
 # verify_cmd: "make test"
 
 # Codex-only fast mode: pin codex coder turns to low reasoning effort and

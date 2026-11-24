@@ -276,7 +276,9 @@ duet --task "Fix the issue" \
 ```
 
 Replace `make test` with your project's check command. A failed check feeds
-back into the next turn.
+back into the next turn. The check must leave the candidate files unchanged.
+In Git, ignore the files it writes. Outside Git, write them outside the
+candidate.
 
 Hand a Codex planning session to the loop, with Codex implementing and Claude
 reviewing:
@@ -1009,7 +1011,7 @@ $ duet --list
   3 run(s). Per-run health: duet --status <run-id>
 ```
 
-Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · ⏱ timeout · ⚠ agent_error / crashed / stuck · 🟢 running (in-flight or between turns) · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
+Status emoji map: ✅ converged · ⏰ max_turns · 🔴 force_stop · ⏱ timeout · ⚠ agent_error / revision_changed / crashed / stuck · 🟢 running (in-flight or between turns) · ❓ unknown. Same vocabulary as `--status`, packed for the table column. The "activity" column is the most-recent mtime across `state.json`, `turn-*.pid`, and `turn-*.stderr.log`.
 
 `duet --cwd /other/project …` records its run under `/other/project/.duet/runs/<id>/`, but it also drops a symlink at `~/.duet/runs/<cwd-slug>/<run_id>/` so the run is visible to `duet --list` (and `duet --status <run_id>`) from any cwd. Runs surfaced via both the cwd-relative path and the home-index symlink show as one row (deduped on resolved real path); the cwd-relative path wins for display because that's usually the more informative one. Runs created before this index existed get backfilled the first time `--list` walks their dir — idempotent and silent.
 
@@ -1068,10 +1070,17 @@ breaks the pair. A valid approval on a changed revision starts a new pair.
 
 The candidate comes from the selected worktree, or from `--cwd` when there
 is no worktree. Duet computes a SHA-256 fingerprint over file paths, file
-contents, executable bits, and symbolic link targets. In Git, the fingerprint
-covers tracked and non-ignored untracked files in that directory. Outside
-Git, it covers the directory contents. Duet excludes Git metadata and its own
-run files.
+contents, executable bits, symbolic link targets, and directories. In Git, the
+fingerprint covers tracked and non-ignored untracked files in that directory,
+and each directory that Git lists as a path, such as a submodule directory.
+Outside Git, or when Git ignores the candidate directory itself, it covers the
+whole directory contents. Duet excludes Git metadata and its own run files.
+
+If Duet cannot hash part of the candidate, it ignores the approval. It adds
+a note that names the path and the cause. Examples are a directory that Git
+cannot open and a file type that Duet cannot hash, such as a FIFO. Make the
+path readable, remove it, or add it to `.gitignore`. The note goes to the
+transcript and the next agent prompt. `state.json` does not store it.
 
 A forced turn can pair with the last automatic turn's valid approval if
 both apply to the same revision. If the candidate changes, the two agents
@@ -1113,9 +1122,12 @@ convergence proposal. The approval counts when the command exits 0 and the
 candidate fingerprint is the same before and after it runs. A nonzero exit,
 timeout, or execution error breaks the pair. Duet adds a capped verification
 failure block to the transcript and the next agent prompt.
-If the candidate changes or Duet cannot compute its fingerprint, Duet adds
-a separate note that it ignored the approval. A successful command still
-records exit code 0 and a `[duet verify passed]` block.
+If the command changes the candidate, Duet ignores the approval. The note
+lists up to five added, removed, or changed paths, then `+N more`. The command
+must leave the candidate unchanged. In Git, ignore the files it writes.
+Outside Git, write them outside the candidate. If Duet cannot compute the
+fingerprint, the note names the path and the cause instead. A successful
+command still records exit code 0 and a `[duet verify passed]` block.
 Repeated rejected approvals can reach the `--turns` limit. `--dry-run`
 simulates convergence and shows the configured command without executing it.
 

@@ -16,8 +16,8 @@ Workflow this is built for:
   3. duet pulls Claude's latest message from that session, feeds it to Codex.
      Codex replies. duet feeds Codex's reply back to Claude (with --resume so
      Claude remembers the whole prior conversation). Ping-pong until both
-     agents propose convergence with an LGTM rationale and <<<LGTM>>> in
-     back-to-back turns, --turns is hit, or you Ctrl-C.
+     agents approve the same candidate revision, each with an LGTM rationale
+     and <<<LGTM>>> in back-to-back turns, --turns is hit, or you Ctrl-C.
 
 Each agent keeps its own session across turns:
   - Claude: `claude -p --resume <session_id> --output-format json` — we capture
@@ -8789,8 +8789,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--turns", type=int, default=None,
                     help=f"max turns (default {DEFAULT_TURNS})")
     ap.add_argument("--sentinel", default=None,
-                    help="convergence sentinel; requires an LGTM rationale and "
-                         "back-to-back proposals from both agents")
+                    help="convergence sentinel; needs an LGTM rationale and "
+                         "back-to-back approvals of one candidate revision by both agents")
     ap.add_argument("--timeout", type=int, default=None,
                     help=f"per-turn timeout seconds (default {DEFAULT_TIMEOUT}; "
                          "without this flag the default scales with the "
@@ -8804,9 +8804,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                          "always stop on timeout). The review recipe defaults to "
                          "'continue'.")
     ap.add_argument("--verify-cmd", metavar="CMD", default=None,
-                    help="shell command that must exit 0 before a convergence "
-                         "proposal can count. Runs only for valid LGTM+rationale "
-                         "proposals; YAML key: `verify_cmd:`.")
+                    help="shell command that must exit 0 and leave the candidate "
+                         "unchanged before a convergence proposal counts. Runs only "
+                         "for valid LGTM+rationale proposals; YAML key: `verify_cmd:`.")
     ap.add_argument("--runs-dir", default=None, help="where to save transcripts")
     ap.add_argument("--run-info-file", metavar="FILE", default=None,
                     help="atomically write the new run's schema-v1 launch JSON; "

@@ -21,9 +21,10 @@
 # Why it converges instead of just printing the sentinel: duet only counts a
 # turn as proposing convergence when the reply has BOTH "LGTM rationale: …"
 # (≥20 chars of follow-up text, outside fenced code) AND "<<<LGTM>>>" on its
-# own line. The loop stops only when two back-to-back turns each propose
-# convergence — so a bare sentinel without rationale, or a single agent
-# accepting alone, doesn't end the run. This example exercises the full path.
+# own line. The loop stops only when two back-to-back turns each approve the
+# same candidate revision — so a bare sentinel without rationale, a single
+# agent accepting alone, or a file change after the first approval doesn't
+# end the run. This example exercises the full path.
 
 cwd: .
 max_turns: 2                   # turns 1+2 = back-to-back convergence
