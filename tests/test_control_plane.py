@@ -1556,6 +1556,27 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             (candidate / "a.py").write_text("second\n", encoding="utf-8")
             self.assertNotEqual(self._revision_digest(candidate), before)
 
+    def test_repository_top_level_ignores_git_ignored_files(self) -> None:
+        rules = {
+            "allowlist": "*\n!*/\n!*.py\n!.gitignore\n",
+            "star": "*\n",
+        }
+        for label, ignore in rules.items():
+            with self.subTest(label):
+                repo = self.root / label
+                repo.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+                (repo / ".gitignore").write_text(ignore, encoding="utf-8")
+                (repo / "a.py").write_text("first\n", encoding="utf-8")
+                (repo / "notes.txt").write_text("first\n", encoding="utf-8")
+                subprocess.run(["git", "add", "-f", "a.py"], cwd=repo, check=True)
+                before = self._revision_digest(repo)
+
+                (repo / "notes.txt").write_text("second\n", encoding="utf-8")
+                self.assertEqual(self._revision_digest(repo), before)
+                (repo / "a.py").write_text("second\n", encoding="utf-8")
+                self.assertNotEqual(self._revision_digest(repo), before)
+
     def _transcript(self, state: dict) -> str:
         return pathlib.Path(state["transcript_path"]).read_text(encoding="utf-8")
 

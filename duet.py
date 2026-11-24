@@ -1838,22 +1838,20 @@ def _revision_git_selection(
         **os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
         "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
     }, capture_output=True, timeout=10)
-    prefix = ["--show-prefix"] if require_root else []
     repo = subprocess.run(
-        [*cmd, "rev-parse", *prefix, "--is-inside-work-tree", "--absolute-git-dir"], **options,
+        [*cmd, "rev-parse", "--show-prefix", "--is-inside-work-tree", "--absolute-git-dir"],
+        **options,
     )
     if repo.returncode == 128 and not require_root and _git_discovery_found_no_repo(cwd, repo.stderr):
         return None, None
     repo.check_returncode()
-    output = repo.stdout
-    if require_root:
-        if not output.startswith(b"\n"):
-            raise OSError("cannot confirm nested Git worktree root")
-        output = output[1:]
+    prefix, _, output = repo.stdout.partition(b"\n")
+    if require_root and prefix:
+        raise OSError("cannot confirm nested Git worktree root")
     worktree, _, git_dir = output.partition(b"\n")
     if worktree != b"true" or not git_dir:
         raise OSError("candidate is outside the Git worktree")
-    if not require_root and _candidate_root_ignored(cmd, options):
+    if prefix and _candidate_root_ignored(cmd, options):
         return None, None
     listing = subprocess.run(
         [*cmd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -1872,6 +1870,7 @@ def _revision_git_selection(
 
 def _candidate_root_ignored(cmd: list, options: dict) -> bool:
     # Git lists nothing inside an ignored directory, so the candidate is hashed by walking it.
+    # Callers skip the repository top level: a root `*` rule never ignores the root itself.
     # --no-index is required: the index form reports a force-added file's directory as not ignored.
     check = subprocess.run([*cmd, "check-ignore", "-q", "--no-index", "--", "."], **options)
     if check.returncode not in (0, 1):
