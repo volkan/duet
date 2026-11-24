@@ -1477,7 +1477,65 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertEqual(first["approval_revision"], second["approval_revision"])
         self.assertNotEqual(first["agent"], second["agent"])
 
-    def test_git_probe_warning_preserves_non_repository_fallback(self) -> None:
+    def test_edit_to_an_already_read_file_invalidates_the_approval(self) -> None:
+        (self.root / "second.py").write_text("second file\n", encoding="utf-8")
+        edit_pending = False
+        real_read = duet._revision_file
+
+        def replies():
+            nonlocal edit_pending
+            yield self.PROPOSAL
+            edit_pending = True
+            yield self.PROPOSAL
+
+        def read_file(parent_fd, name, expected):
+            nonlocal edit_pending
+            if edit_pending and name == b"second.py":
+                edit_pending = False
+                self.candidate.write_text("changed during the snapshot\n", encoding="utf-8")
+            return real_read(parent_fd, name, expected)
+
+        with mock.patch.object(duet, "_revision_file", side_effect=read_file):
+            state = self._run(replies(), max_turns=2)
+
+        self.assertEqual(self.candidate.read_text(encoding="utf-8"), "changed during the snapshot\n")
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertIn("approval_revision", state["history"][0])
+        self.assertNotIn("approval_revision", state["history"][1])
+
+    def test_submodule_ignores_cache_writes_and_detects_tracked_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = pathlib.Path(raw).resolve()
+            subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+            (source / ".gitignore").write_text("cache.log\n", encoding="utf-8")
+            (source / "app.py").write_text("first\n", encoding="utf-8")
+            subprocess.run(["git", "add", ".gitignore", "app.py"], cwd=source, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                 "commit", "-qm", "seed"], cwd=source, check=True,
+            )
+            subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+            subprocess.run(
+                ["git", "-c", "protocol.file.allow=always",
+                 "submodule", "add", "--quiet", "--", str(source), "nested"],
+                cwd=self.root, check=True,
+            )
+            cache = self.root / "nested" / "cache.log"
+            cache.write_text("before\n", encoding="utf-8")
+            tracked = self.root / "nested" / "app.py"
+
+            state = self._run(
+                [self.PROPOSAL] * 3, max_turns=3, edits={2: (tracked, "second\n")},
+                verify_cmd="printf 'verify\\n' >> nested/cache.log",
+            )
+
+        self.assertEqual(cache.read_text(encoding="utf-8"), "before\n" + "verify\n" * 3)
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        before, first, second = state["history"]
+        self.assertNotEqual(before["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+
+    def test_non_repository_git_diagnostics_allow_filesystem_fallback(self) -> None:
         cfg = duet.DuetConfig(
             cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
             metrics_enabled=False,
@@ -1488,10 +1546,16 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             b"couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\n"
         )
         no_repo = b"fatal: not a git repository (or any of the parent directories): .git\n"
+        mount_boundary = (
+            b"fatal: not a git repository (or any parent up to mount point /)\n"
+            b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n"
+        )
         with mock.patch.object(duet.subprocess, "run") as probe:
-            probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + no_repo)
-            revision = duet._approval_revision(cfg, cfg.runs_dir, None)
-            self.assertRegex(revision or "", r"^[0-9a-f]{64}$")
+            for stderr in (warning + no_repo, mount_boundary):
+                with self.subTest(stderr=stderr):
+                    probe.return_value = subprocess.CompletedProcess(command, 128, b"", stderr)
+                    revision = duet._approval_revision(cfg, cfg.runs_dir, None)
+                    self.assertRegex(revision or "", r"^[0-9a-f]{64}$")
 
             fatal = b"fatal: detected dubious ownership in repository\n"
             probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + fatal)

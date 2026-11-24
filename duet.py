@@ -1795,8 +1795,11 @@ def effective_verify_cwd(cfg: DuetConfig,
     return worktree_path or cfg.cwd
 
 
-def _candidate_has_git_marker(cwd: pathlib.Path) -> bool:
+def _candidate_has_git_marker(cwd: pathlib.Path, *, filesystem_boundary: bool = False) -> bool:
+    device = cwd.stat().st_dev
     for parent in (cwd, *cwd.parents):
+        if filesystem_boundary and parent.lstat().st_dev != device:
+            break
         try:
             (parent / ".git").lstat()
         except FileNotFoundError:
@@ -1805,7 +1808,22 @@ def _candidate_has_git_marker(cwd: pathlib.Path) -> bool:
     return False
 
 
-def _revision_git_selection(cwd: pathlib.Path) -> tuple[Optional[dict], Optional[pathlib.Path]]:
+def _git_discovery_found_no_repo(cwd: pathlib.Path, stderr: bytes) -> bool:
+    lines = stderr.splitlines()
+    not_repository = b"fatal: not a git repository (or any of the parent directories): .git"
+    if not_repository in lines:
+        return not _candidate_has_git_marker(cwd)
+    boundary = b"Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set)."
+    if boundary in lines and any(re.fullmatch(
+            rb"fatal: not a git repository \(or any parent up to mount point /.*\)", line)
+            for line in lines):
+        return not _candidate_has_git_marker(cwd, filesystem_boundary=True)
+    return False
+
+
+def _revision_git_selection(
+    cwd: pathlib.Path, *, require_root: bool = False,
+) -> tuple[Optional[dict], Optional[pathlib.Path]]:
     git = shutil.which("git")
     if git is None:
         if _candidate_has_git_marker(cwd):
@@ -1817,15 +1835,19 @@ def _revision_git_selection(cwd: pathlib.Path) -> tuple[Optional[dict], Optional
         **os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
         "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
     }, capture_output=True, timeout=10)
+    prefix = ["--show-prefix"] if require_root else []
     repo = subprocess.run(
-        [*cmd, "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"], **options,
+        [*cmd, "rev-parse", *prefix, "--is-inside-work-tree", "--absolute-git-dir"], **options,
     )
-    not_repository = b"fatal: not a git repository (or any of the parent directories): .git"
-    if repo.returncode and not_repository in repo.stderr.splitlines():
-        if not _candidate_has_git_marker(cwd):
-            return None, None
+    if repo.returncode == 128 and not require_root and _git_discovery_found_no_repo(cwd, repo.stderr):
+        return None, None
     repo.check_returncode()
-    worktree, _, git_dir = repo.stdout.partition(b"\n")
+    output = repo.stdout
+    if require_root:
+        if not output.startswith(b"\n"):
+            raise OSError("cannot confirm nested Git worktree root")
+        output = output[1:]
+    worktree, _, git_dir = output.partition(b"\n")
     if worktree != b"true" or not git_dir:
         raise OSError("candidate is outside the Git worktree")
     listing = subprocess.run(
@@ -1857,10 +1879,9 @@ def _revision_selection_tree(listing: bytes) -> dict:
     return selection
 
 
-def _revision_exclusions(cfg: DuetConfig, cwd: pathlib.Path, run_dir: pathlib.Path,
-                         git_dir: Optional[pathlib.Path]) -> set[bytes]:
+def _revision_exclusions(cfg: DuetConfig, cwd: pathlib.Path, run_dir: pathlib.Path) -> set[bytes]:
     outputs = [run_dir.parent.resolve() / run_dir.name, cfg.run_info_file,
-               cfg._generated_runs_ignore, git_dir]
+               cfg._generated_runs_ignore]
     metric_id = cfg._metrics_context.get("id")
     if metric_id is not None:
         root = _metrics_root().resolve()
@@ -1891,15 +1912,40 @@ def _revision_file(parent_fd: int, name: bytes, expected: os.stat_result) -> byt
     return digest.digest()
 
 
-def _hash_revision_entry(digest, parent_fd: int, name: bytes, relative: bytes,
+@dataclasses.dataclass
+class _RevisionScan:
+    root: pathlib.Path
+    digest: Optional[object] = None
+    identities: dict = dataclasses.field(default_factory=dict)
+
+
+def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
                          selection: Optional[dict], excluded: set[bytes],
                          listed_by_git: bool) -> None:
     try:
         info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
         if listed_by_git:
+            scan.identities[relative] = None
             return  # The Git index can still name a deleted working-tree path.
         raise
+    identity = _revision_stat(info)
+    scan.identities[relative] = identity
+    if stat.S_ISDIR(info.st_mode):
+        if scan.digest is not None:
+            _revision_frame(scan.digest, relative)
+            _revision_frame(scan.digest, b"directory")
+        _scan_revision_directory(scan, name, parent_fd=parent_fd, relative=relative,
+                                 selection=selection, excluded=excluded)
+    elif scan.digest is not None:
+        _hash_revision_leaf(scan.digest, parent_fd, name, relative, info)
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if _revision_stat(current) != identity:
+        raise OSError("candidate entry changed during reading")
+
+
+def _hash_revision_leaf(digest, parent_fd: int, name: bytes, relative: bytes,
+                        info: os.stat_result) -> None:
     _revision_frame(digest, relative)
     if stat.S_ISREG(info.st_mode):
         _revision_frame(digest, b"file" + bytes((info.st_mode & 0o111,)))
@@ -1907,26 +1953,40 @@ def _hash_revision_entry(digest, parent_fd: int, name: bytes, relative: bytes,
     elif stat.S_ISLNK(info.st_mode):
         _revision_frame(digest, b"symlink")
         _revision_frame(digest, os.readlink(name, dir_fd=parent_fd))
-    elif stat.S_ISDIR(info.st_mode):
-        _revision_frame(digest, b"directory")
-        _hash_revision_directory(digest, name, parent_fd=parent_fd, relative=relative,
-                                 selection=selection, excluded=excluded)
     else:
         raise OSError("unsupported candidate file type")
-    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-    if _revision_stat(current) != _revision_stat(info):
-        raise OSError("candidate entry changed during reading")
 
 
-def _hash_revision_directory(digest, name: bytes, *, parent_fd: Optional[int],
+def _has_nested_git_marker(fd: int) -> bool:
+    try:
+        os.stat(b".git", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _scan_revision_git_paths(
+    cwd: pathlib.Path, identity: tuple, *, nested: bool,
+) -> tuple[Optional[dict], Optional[pathlib.Path]]:
+    # Git's pathname must still refer to the directory opened without following links.
+    if cwd.resolve(strict=True) != cwd or _revision_stat(cwd.lstat()) != identity:
+        raise OSError("candidate Git directory changed before enumeration")
+    return _revision_git_selection(cwd, require_root=nested)
+
+
+def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Optional[int],
                              relative: bytes, selection: Optional[dict],
                              excluded: set[bytes]) -> None:
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         info = _revision_stat(os.fstat(fd))
+        scan.identities[relative] = info
+        if not relative or (selection is None and _has_nested_git_marker(fd)):
+            cwd = scan.root / os.fsdecode(relative)
+            selection, git_dir = _scan_revision_git_paths(cwd, info, nested=bool(relative))
+            if git_dir is not None and cwd in git_dir.parents:
+                excluded = excluded | {os.fsencode(git_dir.relative_to(scan.root))}
         if selection is None:
-            # Git can return a directory for a submodule or embedded repository.
-            # Walk its contents as a fallback when Git provides no individual paths.
             with os.scandir(fd) as directory:
                 entries = {os.fsencode(entry.name): None for entry in directory}
         else:
@@ -1935,7 +1995,7 @@ def _hash_revision_directory(digest, name: bytes, *, parent_fd: Optional[int],
             path = relative + b"/" + child if relative else child
             if child == b".git" or path in excluded:
                 continue
-            _hash_revision_entry(digest, fd, child, path, entries[child], excluded,
+            _scan_revision_entry(scan, fd, child, path, entries[child], excluded,
                                  listed_by_git=selection is not None)
         if _revision_stat(os.fstat(fd)) != info:
             raise OSError("candidate directory changed during reading")
@@ -1947,14 +2007,15 @@ def _approval_revision(cfg: DuetConfig, run_dir: pathlib.Path,
                         wt_path: Optional[pathlib.Path]) -> Optional[str]:
     try:
         cwd = effective_verify_cwd(cfg, wt_path).resolve(strict=True)
-        info = _revision_stat(cwd.lstat())
-        selection, git_dir = _revision_git_selection(cwd)
         digest = hashlib.sha256(b"duet candidate revision\0")
-        _hash_revision_directory(
-            digest, os.fsencode(cwd), parent_fd=None, relative=b"",
-            selection=selection, excluded=_revision_exclusions(cfg, cwd, run_dir, git_dir),
-        )
-        if _revision_stat(cwd.lstat()) == info:
+        before = _RevisionScan(cwd, digest)
+        after = _RevisionScan(cwd)
+        excluded = _revision_exclusions(cfg, cwd, run_dir)
+        # Recheck every path after the content scan to catch changes to earlier files.
+        for scan in (before, after):
+            _scan_revision_directory(scan, os.fsencode(cwd), parent_fd=None, relative=b"",
+                                     selection=None, excluded=excluded)
+        if before.identities == after.identities:
             return digest.hexdigest()
     except (OSError, subprocess.SubprocessError, RuntimeError):
         pass
@@ -6713,6 +6774,7 @@ def print_run_status_safe(arg: str, json_output: bool = False) -> int:
 _LIST_STATUS_FINISHED = {
     FINISHED_CONVERGED:             ("✅", "converged"),
     FINISHED_CONVERGED_AFTER_FORCE: ("✅", "converged"),
+    FINISHED_REVISION_CHANGED:      ("⚠", "revision_changed"),
     FINISHED_MAX_TURNS:             ("⏰", "max_turns"),
     FINISHED_FORCE_STOP:            ("🔴", "force_stop"),
     FINISHED_TIMEOUT:               ("⏱", "timeout"),
