@@ -1857,8 +1857,12 @@ def _revision_git_selection(
         check=True, **options,
     )
     read_warnings = (b"warning: unable to access", b"warning: could not open directory")
-    if any(line.startswith(read_warnings) for line in listing.stderr.splitlines()):
-        raise OSError("Git could not read the candidate paths or ignore rules")
+    unread = next((line for line in listing.stderr.splitlines()
+                   if line.startswith(read_warnings)), None)
+    if unread is not None:
+        warning = " ".join(unread.decode("utf-8", "backslashreplace").split())[:200]
+        raise OSError(f"Git could not read the candidate ({warning}). "
+                      "Make it readable or add it to .gitignore.")
     return (_revision_selection_tree(listing.stdout),
             pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
 
@@ -1925,11 +1929,14 @@ class _RevisionScan:
     root: pathlib.Path
     digest: Optional[object] = None
     identities: dict = dataclasses.field(default_factory=dict)
+    contents: dict = dataclasses.field(default_factory=dict)
+    current: bytes = b""
 
 
 def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
                          selection: Optional[dict], excluded: set[bytes],
                          listed_by_git: bool) -> None:
+    scan.current = relative
     try:
         info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -1942,28 +1949,33 @@ def _scan_revision_entry(scan: _RevisionScan, parent_fd: int, name: bytes, relat
     if stat.S_ISDIR(info.st_mode):
         # A directory Git names only as the parent of listed paths is identified by those paths.
         if scan.digest is not None and not selection:
+            scan.contents[relative] = b"directory"
             _revision_frame(scan.digest, relative)
             _revision_frame(scan.digest, b"directory")
         _scan_revision_directory(scan, name, parent_fd=parent_fd, relative=relative,
                                  selection=selection, excluded=excluded)
     elif scan.digest is not None:
-        _hash_revision_leaf(scan.digest, parent_fd, name, relative, info)
+        _hash_revision_leaf(scan, parent_fd, name, relative, info)
+    scan.current = relative
     current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     if _revision_stat(current) != identity:
         raise OSError("candidate entry changed during reading")
 
 
-def _hash_revision_leaf(digest, parent_fd: int, name: bytes, relative: bytes,
+def _hash_revision_leaf(scan: _RevisionScan, parent_fd: int, name: bytes, relative: bytes,
                         info: os.stat_result) -> None:
-    _revision_frame(digest, relative)
+    leaf = hashlib.sha256()
     if stat.S_ISREG(info.st_mode):
-        _revision_frame(digest, b"file" + bytes((info.st_mode & 0o111,)))
-        _revision_frame(digest, _revision_file(parent_fd, name, info))
+        _revision_frame(leaf, b"file" + bytes((info.st_mode & 0o111,)))
+        _revision_frame(leaf, _revision_file(parent_fd, name, info))
     elif stat.S_ISLNK(info.st_mode):
-        _revision_frame(digest, b"symlink")
-        _revision_frame(digest, os.readlink(name, dir_fd=parent_fd))
+        _revision_frame(leaf, b"symlink")
+        _revision_frame(leaf, os.readlink(name, dir_fd=parent_fd))
     else:
         raise OSError("unsupported candidate file type")
+    scan.contents[relative] = leaf.digest()
+    _revision_frame(scan.digest, relative)
+    _revision_frame(scan.digest, scan.contents[relative])
 
 
 def _has_nested_git_marker(fd: int) -> bool:
@@ -1986,6 +1998,7 @@ def _scan_revision_git_paths(
 def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Optional[int],
                              relative: bytes, selection: Optional[dict],
                              excluded: set[bytes]) -> None:
+    scan.current = relative
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
     try:
         info = _revision_stat(os.fstat(fd))
@@ -2006,14 +2019,49 @@ def _scan_revision_directory(scan: _RevisionScan, name: bytes, *, parent_fd: Opt
                 continue
             _scan_revision_entry(scan, fd, child, path, entries[child], excluded,
                                  listed_by_git=selection is not None)
+        scan.current = relative
         if _revision_stat(os.fstat(fd)) != info:
             raise OSError("candidate directory changed during reading")
     finally:
         os.close(fd)
 
 
+@dataclasses.dataclass
+class _RevisionResult:
+    digest: Optional[str] = None
+    problem: Optional[str] = None
+    contents: dict = dataclasses.field(default_factory=dict)
+
+
+def _revision_problem(exc: BaseException, current: bytes) -> str:
+    """One bounded line naming the path and cause. Paths are decoded leniently so the
+    note can always be encoded as UTF-8."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"git timed out after {exc.timeout:g} s"[:ERROR_SUMMARY_MAX_CHARS]
+    if isinstance(exc, subprocess.CalledProcessError):
+        lines = (exc.stderr or b"").decode("utf-8", "backslashreplace").splitlines()
+        reason = next((line for line in lines if line.startswith(("fatal:", "error:"))),
+                      lines[0] if lines else f"git exited with status {exc.returncode}")
+    elif isinstance(exc, OSError) and exc.errno is not None:
+        reason = exc.strerror or str(exc)
+    else:
+        reason = str(exc)
+    path = current.decode("utf-8", "backslashreplace") or "."
+    return f"{path}: {' '.join(reason.split())}"[:ERROR_SUMMARY_MAX_CHARS]
+
+
+def _first_changed_path(before: dict, after: dict) -> bytes:
+    changed = sorted(path for path in before.keys() | after.keys()
+                     if before.get(path) != after.get(path))
+    leaves = [path for path in changed
+              if not any(identity and stat.S_ISDIR(identity[2])
+                         for identity in (before.get(path), after.get(path)))]
+    return (leaves or changed or [b""])[0]
+
+
 def _approval_revision(cfg: DuetConfig, run_dir: pathlib.Path,
-                        wt_path: Optional[pathlib.Path]) -> Optional[str]:
+                        wt_path: Optional[pathlib.Path]) -> _RevisionResult:
+    scan = None
     try:
         cwd = effective_verify_cwd(cfg, wt_path).resolve(strict=True)
         digest = hashlib.sha256(b"duet candidate revision\0")
@@ -2025,10 +2073,13 @@ def _approval_revision(cfg: DuetConfig, run_dir: pathlib.Path,
             _scan_revision_directory(scan, os.fsencode(cwd), parent_fd=None, relative=b"",
                                      selection=None, excluded=excluded)
         if before.identities == after.identities:
-            return digest.hexdigest()
-    except (OSError, subprocess.SubprocessError, RuntimeError):
-        pass
-    return None
+            return _RevisionResult(digest.hexdigest(), None, before.contents)
+        problem = _revision_problem(
+            OSError("changed while Duet read the candidate"),
+            _first_changed_path(before.identities, after.identities))
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        problem = _revision_problem(exc, scan.current if scan is not None else b"")
+    return _RevisionResult(None, problem)
 
 
 def _tail_text(text: str, max_chars: int = VERIFY_OUTPUT_TAIL_CHARS) -> str:
@@ -4908,6 +4959,14 @@ def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
             and not stop.requested)
 
 
+def _unconfirmed_revision_note(after: _RevisionResult) -> str:
+    note = ("[duet] convergence proposal ignored: "
+            "could not confirm the candidate revision after verification.")
+    if after.digest is None:
+        note += f" Cause: {after.problem}"
+    return note
+
+
 def _check_convergence_proposal(
     cfg: DuetConfig, reply: str, call_succeeded: bool, run_dir: pathlib.Path,
     turn_label: str, wt_path: Optional[pathlib.Path],
@@ -4917,11 +4976,12 @@ def _check_convergence_proposal(
     if cfg.dry_run:
         return reply, True, None, None
 
-    revision = _approval_revision(cfg, run_dir, wt_path)
+    candidate = _approval_revision(cfg, run_dir, wt_path)
+    revision = candidate.digest
     verify_state = None
     if revision is None:
-        reply += ("\n\n[duet] convergence proposal ignored: "
-                  "unable to hash the candidate revision.")
+        reply += ("\n\n[duet] convergence proposal ignored: unable to hash the "
+                  f"candidate revision. Cause: {candidate.problem}")
     if cfg.verify_cmd:
         result = run_verify_command(cfg, run_dir, turn_label, wt_path)
         verify_state = verify_result_state(result)
@@ -4929,10 +4989,11 @@ def _check_convergence_proposal(
             reply += "\n\n" + format_verify_failure_block(result)
             return reply, False, verify_state, None
         reply += "\n\n" + format_verify_success_block(result)
-        if revision is not None and _approval_revision(cfg, run_dir, wt_path) != revision:
-            reply += ("\n\n[duet] convergence proposal ignored: "
-                      "could not confirm the candidate revision after verification.")
-            revision = None
+        if revision is not None:
+            confirmed = _approval_revision(cfg, run_dir, wt_path)
+            if confirmed.digest != revision:
+                reply += "\n\n" + _unconfirmed_revision_note(confirmed)
+                revision = None
     return reply, revision is not None, verify_state, revision
 
 
@@ -5677,9 +5738,14 @@ def _finish_force_prompt(cfg: DuetConfig, reason: str, history: list,
     if cfg.dry_run or reason != FINISHED_CONVERGED:
         return reason
     current = _approval_revision(cfg, transcript_path.parent, wt_path)
-    if current is not None and history and current == history[-1].get("approval_revision"):
+    if (current.digest is not None and history
+            and current.digest == history[-1].get("approval_revision")):
         return reason
-    note = "[duet] candidate revision changed or could not be verified at the force prompt."
+    if current.digest is None:
+        note = ("[duet] candidate revision could not be verified at the force prompt. "
+                f"Cause: {current.problem}")
+    else:
+        note = "[duet] candidate revision changed at the force prompt."
     append_text_atomic(transcript_path, f"\n{note}\n")
     print(note)
     return FINISHED_REVISION_CHANGED

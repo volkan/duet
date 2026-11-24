@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -1493,7 +1494,7 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         )
 
         def revision():
-            digest = duet._approval_revision(cfg, cfg.runs_dir, None)
+            digest = duet._approval_revision(cfg, cfg.runs_dir, None).digest
             self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
             return digest
 
@@ -1516,7 +1517,7 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             cwd=cwd, agents=_agents(), task="review", runs_dir=self.root / "runs",
             metrics_enabled=False,
         )
-        digest = duet._approval_revision(cfg, cfg.runs_dir, None)
+        digest = duet._approval_revision(cfg, cfg.runs_dir, None).digest
         self.assertRegex(digest or "", r"^[0-9a-f]{64}$")
         return digest
 
@@ -1555,6 +1556,48 @@ class TestRevisionBoundConvergence(unittest.TestCase):
             (candidate / "a.py").write_text("second\n", encoding="utf-8")
             self.assertNotEqual(self._revision_digest(candidate), before)
 
+    def _transcript(self, state: dict) -> str:
+        return pathlib.Path(state["transcript_path"]).read_text(encoding="utf-8")
+
+    def test_unhashable_entry_note_names_path_and_reason(self) -> None:
+        os.mkfifo(self.root / "pipe")
+
+        state = self._run([self.PROPOSAL] * 2, max_turns=2)
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertNotIn("approval_revision", state["history"][0])
+        self.assertIn("pipe: unsupported candidate file type", self._transcript(state))
+
+    def test_unreadable_directory_note_names_path_and_remedy(self) -> None:
+        if os.geteuid() == 0:
+            self.skipTest("root can read any directory")
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        locked = self.root / "locked"
+        locked.mkdir()
+        (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+
+        with self.subTest(ignored=False):
+            state = self._run([self.PROPOSAL] * 2, max_turns=2)
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+            transcript = self._transcript(state)
+            self.assertIn("locked/", transcript)
+            self.assertIn("Permission denied", transcript)
+            self.assertIn("add it to .gitignore", transcript)
+
+        with self.subTest(ignored=True):
+            (self.root / ".gitignore").write_text("locked/\n", encoding="utf-8")
+            self._revision_digest(self.root)
+
+    def test_problem_text_survives_non_utf8_paths_and_is_bounded(self) -> None:
+        text = duet._revision_problem(OSError("unsupported candidate file type"), b"caf\xe9\xff")
+        text.encode("utf-8")
+        self.assertIn("unsupported candidate file type", text)
+        long_reason = duet._revision_problem(RuntimeError("x" * 5000), b"dir")
+        self.assertLessEqual(len(long_reason), duet.ERROR_SUMMARY_MAX_CHARS)
+
     def test_edit_to_an_already_read_file_invalidates_the_approval(self) -> None:
         (self.root / "second.py").write_text("second file\n", encoding="utf-8")
         edit_pending = False
@@ -1580,6 +1623,8 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
         self.assertIn("approval_revision", state["history"][0])
         self.assertNotIn("approval_revision", state["history"][1])
+        self.assertIn("candidate.py: changed while Duet read the candidate",
+                      self._transcript(state))
 
     def test_submodule_ignores_cache_writes_and_detects_tracked_edits(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1633,11 +1678,13 @@ class TestRevisionBoundConvergence(unittest.TestCase):
                 with self.subTest(stderr=stderr):
                     probe.return_value = subprocess.CompletedProcess(command, 128, b"", stderr)
                     revision = duet._approval_revision(cfg, cfg.runs_dir, None)
-                    self.assertRegex(revision or "", r"^[0-9a-f]{64}$")
+                    self.assertRegex(revision.digest or "", r"^[0-9a-f]{64}$")
 
             fatal = b"fatal: detected dubious ownership in repository\n"
             probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + fatal)
-            self.assertIsNone(duet._approval_revision(cfg, cfg.runs_dir, None))
+            failed = duet._approval_revision(cfg, cfg.runs_dir, None)
+            self.assertIsNone(failed.digest)
+            self.assertIn("detected dubious ownership", failed.problem)
 
     def test_first_forced_approval_is_pending_after_candidate_changes(self) -> None:
         state = self._run(
