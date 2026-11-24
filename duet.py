@@ -5165,8 +5165,9 @@ def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
     """Create the runs dir and a unique timestamped run dir under it.
 
     Falls back to ~/.duet/runs/<cwd-slug> when the configured runs dir is
-    unwritable (mutating cfg.runs_dir), writes the auto-.gitignore once, and
-    registers the run in the home index. Returns (run_dir, run_id).
+    unwritable (mutating cfg.runs_dir), writes the auto-.gitignore once unless
+    the candidate lies inside the runs dir, and registers the run in the home
+    index. Returns (run_dir, run_id).
     """
     try:
         cfg.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -5179,6 +5180,8 @@ def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
         cfg.runs_dir = fallback
     # Auto-ignore everything duet writes (transcripts, state, worktrees) from
     # the host repo's POV. Idempotent — only written once per runs_dir.
+    # Skipped when the candidate lies inside runs_dir: a `*` ignore file there
+    # would hide the candidate itself from Git and from the revision scan.
     gi = cfg.runs_dir / ".gitignore"
     cfg._generated_runs_ignore = None
     if not gi.exists() and not _runs_ignore_overlaps_candidate(cfg):

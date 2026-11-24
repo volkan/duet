@@ -1812,6 +1812,43 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertIn("candidate.py (changed)", self._transcript(state))
 
 
+class TestRunsIgnoreFile(unittest.TestCase):
+    def _allocate(self, *, runs_dir, cwd, worktree_path=None) -> duet.DuetConfig:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        cwd.mkdir(parents=True, exist_ok=True)
+        cfg = duet.DuetConfig(
+            cwd=cwd, agents=_agents(), task="review", runs_dir=runs_dir,
+            worktree_path=worktree_path, metrics_enabled=False,
+        )
+        with mock.patch.object(duet, "_register_run_in_home_index"):
+            duet._allocate_run_dir(cfg)
+        return cfg
+
+    def test_overlap_with_the_candidate_skips_the_ignore_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cases = {
+                "runs_dir is the cwd": dict(runs_dir=root / "a", cwd=root / "a"),
+                "cwd is inside runs_dir": dict(runs_dir=root / "b", cwd=root / "b" / "proj"),
+                "worktree is inside runs_dir": dict(
+                    runs_dir=root / "c", cwd=root / "other",
+                    worktree_path=root / "c" / "wt"),
+            }
+            for label, kwargs in cases.items():
+                with self.subTest(label):
+                    cfg = self._allocate(**kwargs)
+                    self.assertFalse((cfg.runs_dir / ".gitignore").exists())
+                    self.assertIsNone(cfg._generated_runs_ignore)
+
+    def test_runs_dir_inside_the_candidate_gets_the_ignore_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._allocate(runs_dir=root / "proj" / "runs", cwd=root / "proj")
+            ignore = cfg.runs_dir / ".gitignore"
+            self.assertTrue(ignore.read_text(encoding="utf-8").endswith("*\n"))
+            self.assertEqual(cfg._generated_runs_ignore, ignore.resolve())
+
+
 def _envelope(result: str = "Review findings.", denials=None, **extra) -> str:
     payload = {"type": "result", "subtype": "success", "is_error": False,
                "result": result, "session_id": "kickoff-session-id", "num_turns": 3}
