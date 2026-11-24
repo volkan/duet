@@ -4959,12 +4959,26 @@ def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
             and not stop.requested)
 
 
-def _unconfirmed_revision_note(after: _RevisionResult) -> str:
-    note = ("[duet] convergence proposal ignored: "
-            "could not confirm the candidate revision after verification.")
+def _changed_candidate_paths(before: dict, after: dict, limit: int = 5) -> str:
+    kinds = {path: ("added" if path not in before else
+                    "removed" if path not in after else "changed")
+             for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+    shown = [f"{path.decode('utf-8', 'backslashreplace')[:100]} ({kinds[path]})"
+             for path in sorted(kinds)[:limit]]
+    if len(kinds) > limit:
+        shown.append(f"+{len(kinds) - limit} more")
+    return ", ".join(shown)
+
+
+def _unconfirmed_revision_note(before: _RevisionResult, after: _RevisionResult) -> str:
+    head = "[duet] convergence proposal ignored: "
     if after.digest is None:
-        note += f" Cause: {after.problem}"
-    return note
+        return (head + "could not confirm the candidate revision after verification. "
+                f"Cause: {after.problem}")
+    return (head + "the verification command changed the candidate: "
+            f"{_changed_candidate_paths(before.contents, after.contents)}. "
+            "The verifier must leave the candidate unchanged. "
+            "In Git, ignore its outputs. Outside Git, write them outside the candidate.")
 
 
 def _check_convergence_proposal(
@@ -4992,7 +5006,7 @@ def _check_convergence_proposal(
         if revision is not None:
             confirmed = _approval_revision(cfg, run_dir, wt_path)
             if confirmed.digest != revision:
-                reply += "\n\n" + _unconfirmed_revision_note(confirmed)
+                reply += "\n\n" + _unconfirmed_revision_note(candidate, confirmed)
                 revision = None
     return reply, revision is not None, verify_state, revision
 

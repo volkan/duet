@@ -1763,6 +1763,40 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertNotIn("approval_revision", first)
         self.assertRegex(second["approval_revision"], r"^[0-9a-f]{64}$")
 
+    def test_verifier_output_note_names_changed_paths(self) -> None:
+        report = self.root / "report.xml"
+        with self.subTest(ignored=False):
+            state = self._run([self.PROPOSAL] * 3, max_turns=3,
+                              verify_cmd="echo $$ > report.xml")
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+            self.assertFalse(any("approval_revision" in turn for turn in state["history"]))
+            transcript = self._transcript(state)
+            self.assertIn("report.xml (added)", transcript)
+            self.assertIn("report.xml (changed)", transcript)
+            self.assertIn("ignore", transcript)
+
+        with self.subTest(ignored=True):
+            report.unlink()
+            subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+            (self.root / ".gitignore").write_text("report.xml\n", encoding="utf-8")
+
+            state = self._run([self.PROPOSAL] * 3, max_turns=3,
+                              verify_cmd="echo $$ > report.xml")
+
+            self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+            self.assertEqual(state["turns_used"], 2)
+
+    def test_changed_path_list_is_limited_and_marks_each_change(self) -> None:
+        before = {b"keep": b"1", b"edit": b"1", b"gone": b"1"}
+        after = {b"keep": b"1", b"edit": b"2", b"new": b"1"}
+        self.assertEqual(duet._changed_candidate_paths(before, after),
+                         "edit (changed), gone (removed), new (added)")
+        many = {b"f%d" % n: b"1" for n in range(8)}
+        listed = duet._changed_candidate_paths({}, many)
+        self.assertEqual(listed.count(" (added)"), 5)
+        self.assertTrue(listed.endswith("+3 more"))
+
     def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
         state = self._run(
             [self.PROPOSAL] * 3, max_turns=3,
@@ -1775,6 +1809,7 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertTrue(changed["verify"]["ok"])
         self.assertNotIn("approval_revision", changed)
         self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertIn("candidate.py (changed)", self._transcript(state))
 
 
 def _envelope(result: str = "Review findings.", denials=None, **extra) -> str:
