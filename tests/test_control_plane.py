@@ -1430,6 +1430,127 @@ class TestToolDenialLoop(unittest.TestCase):
         self.assertIn("was denied 1 tool call(s)", saved)
 
 
+class TestRevisionBoundConvergence(unittest.TestCase):
+    PROPOSAL = "LGTM rationale: checked the candidate by reading it.\n<<<LGTM>>>"
+
+    def setUp(self) -> None:
+        fixture = tempfile.TemporaryDirectory()
+        self.addCleanup(fixture.cleanup)
+        self.root = pathlib.Path(fixture.name).resolve()
+        self.candidate = self.root / "candidate.py"
+        self.candidate.write_text("first\n", encoding="utf-8")
+
+    def _run(self, replies, *, max_turns, edits=None, inputs=None, verify_cmd=None):
+        cfg = duet.DuetConfig(
+            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            max_turns=max_turns, metrics_enabled=False, verify_cmd=verify_cmd,
+        )
+        scripted_replies = iter(replies)
+
+        def reply_to_turn(_agent, _message, _cfg, first_turn_for_agent, *,
+                          run_dir=None, turn_label=None):
+            turn = int(turn_label.split("-", 1)[0])
+            if edits and turn in edits:
+                path, content = edits[turn]
+                path.write_text(content, encoding="utf-8")
+            return next(scripted_replies)
+
+        with mock.patch.object(duet, "call_agent", reply_to_turn), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet.sys.stdin, "isatty", return_value=inputs is not None), \
+                mock.patch("builtins.input", side_effect=inputs), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return duet.run_duet(cfg)
+
+    def test_untracked_change_requires_fresh_approvals(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+        edits = {2: (self.candidate, "second\n"), 3: (self.root / "ignored.txt", "ignored\n")}
+
+        state = self._run([self.PROPOSAL] * 3, max_turns=3, edits=edits)
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(state["turns_used"], 3)
+        before, first, second = state["history"]
+        self.assertNotEqual(before["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertNotEqual(first["agent"], second["agent"])
+
+    def test_git_probe_warning_preserves_non_repository_fallback(self) -> None:
+        cfg = duet.DuetConfig(
+            cwd=self.root, agents=_agents(), task="review", runs_dir=self.root / "runs",
+            metrics_enabled=False,
+        )
+        command = ["git", "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"]
+        warning = (
+            b"git: warning: confstr() failed with code 5: "
+            b"couldn't get path of DARWIN_USER_TEMP_DIR; using /tmp instead\n"
+        )
+        no_repo = b"fatal: not a git repository (or any of the parent directories): .git\n"
+        with mock.patch.object(duet.subprocess, "run") as probe:
+            probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + no_repo)
+            revision = duet._approval_revision(cfg, cfg.runs_dir, None)
+            self.assertRegex(revision or "", r"^[0-9a-f]{64}$")
+
+            fatal = b"fatal: detected dubious ownership in repository\n"
+            probe.return_value = subprocess.CompletedProcess(command, 128, b"", warning + fatal)
+            self.assertIsNone(duet._approval_revision(cfg, cfg.runs_dir, None))
+
+    def test_first_forced_approval_is_pending_after_candidate_changes(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 3, max_turns=1, edits={2: (self.candidate, "second\n")},
+            inputs=["review the update", "confirm the reviewed update", ""],
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED_AFTER_FORCE)
+        self.assertEqual(state["turns_used"], 3)
+        automatic, first, second = state["history"]
+        self.assertTrue(first["forced"] and second["forced"])
+        self.assertNotEqual(automatic["approval_revision"], first["approval_revision"])
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+        self.assertNotEqual(first["agent"], second["agent"])
+
+    def test_forced_approval_can_confirm_last_automatic_turn(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 2, max_turns=1, inputs=["review the candidate", ""],
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED_AFTER_FORCE)
+        automatic, forced = state["history"]
+        self.assertTrue(forced["forced"])
+        self.assertEqual(automatic["approval_revision"], forced["approval_revision"])
+        self.assertNotEqual(automatic["agent"], forced["agent"])
+
+    def test_accepting_after_idle_edit_reports_revision_changed(self) -> None:
+        for eof in (False, True):
+            with self.subTest(eof=eof):
+                self.candidate.write_text("first\n", encoding="utf-8")
+
+                def edit_while_waiting(_prompt):
+                    self.candidate.write_text("second\n", encoding="utf-8")
+                    if eof:
+                        raise EOFError
+                    return ""
+
+                state = self._run([self.PROPOSAL] * 2, max_turns=2, inputs=edit_while_waiting)
+
+                self.assertEqual(state["finished_reason"], "revision_changed")
+
+    def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
+        state = self._run(
+            [self.PROPOSAL] * 3, max_turns=3,
+            verify_cmd="printf 'second\\n' > candidate.py",
+        )
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
+        self.assertEqual(state["turns_used"], 3)
+        changed, first, second = state["history"]
+        self.assertTrue(changed["verify"]["ok"])
+        self.assertNotIn("approval_revision", changed)
+        self.assertEqual(first["approval_revision"], second["approval_revision"])
+
+
 def _envelope(result: str = "Review findings.", denials=None, **extra) -> str:
     payload = {"type": "result", "subtype": "success", "is_error": False,
                "result": result, "session_id": "kickoff-session-id", "num_turns": 3}

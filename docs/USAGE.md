@@ -676,8 +676,8 @@ worktree gated by `verify_cmd`.
 | `--lead-model MODEL` | model name for the declared lead agent. Duet sends it with the selected backend syntax. Claude defaults to the `sonnet` alias when omitted. See [Same-backend peering](#same-backend-peering) for availability limits |
 | `--partner-model MODEL` | model name for the declared partner agent. Duet sends it with the selected backend syntax. Claude defaults to the `sonnet` alias when omitted. See [Same-backend peering](#same-backend-peering) for availability limits |
 | `--turns N` | max turns (default 2 — codex tries, claude reviews; the `force>` prompt at the end lets you push more rounds. Bump to 6+ for multi-step bugs) |
-| `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must propose convergence in back-to-back turns before duet stops |
-| `--verify-cmd CMD` | optional shell command that must exit 0 before a valid convergence proposal can count. Runs only when a reply already has the sentinel plus rationale; non-zero, timeout, or execution error appends a capped failure block to the transcript and the next agent prompt. `--dry-run` records/prints the command but does not execute it. YAML key: `verify_cmd:` |
+| `--sentinel STR` | convergence sentinel (default `<<<LGTM>>>`). A reply must also include an `LGTM rationale:` / `Rationale:` outside fenced code, and both agents must approve the same candidate revision in back-to-back turns |
+| `--verify-cmd CMD` | optional shell command to check a convergence proposal. The command must exit 0 and leave the candidate revision unchanged for the approval to count. See [Stop conditions and force prompt](#stop-conditions-and-force-prompt). YAML key: `verify_cmd:` |
 | `--cwd PATH` | working dir for both agents |
 | `--sandbox` | Codex sandbox: `read-only`, `workspace-write`, `danger-full-access`. No-op for Claude, Gemini, Copilot, OpenCode, and ZCode |
 | `--permission-mode` | Claude permissions: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Gemini maps these to `--approval-mode default\|auto_edit\|plan\|yolo`. No-op for Copilot, OpenCode, and ZCode |
@@ -837,7 +837,9 @@ command, cwd, exit code, stdout, and stderr for each verification run.
 `state.json` also records the continuation-critical safety knobs
 (`sentinel`, `sandbox`, `permission_mode`, `add_dirs`, `reasoning`,
 `codex_fast`, `per_turn_timeout`, `on_turn_timeout`) plus `verify_cmd` and a
-capped `last_verify` summary.
+capped `last_verify` summary. A turn that records a valid approval includes
+the SHA-256 fingerprint in `state.json` under `history[].approval_revision`.
+Use `duet --status` for the run result.
 
 ### Recap view
 
@@ -1030,10 +1032,11 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 | trigger | result |
 |---|---|
-| both agents propose convergence in back-to-back turns | `reason=converged` |
+| both agents approve the same candidate revision in back-to-back turns | `reason=converged` |
 | `--turns` reached | `reason=max_turns` |
-| forced post-loop turn proposes convergence | `reason=converged_after_force` |
-| forced post-loop turn runs, then you press Enter | `reason=forced_continuation` |
+| a forced turn completes two back-to-back approvals of the same candidate revision | `reason=converged_after_force` |
+| press Enter or send EOF after a forced turn without a matching approval pair | `reason=forced_continuation` |
+| press Enter or send EOF after convergence and Duet cannot confirm the approved candidate revision | `reason=revision_changed` |
 | Ctrl-C once | finishes current turn, exits with `reason=force_stop` |
 | Ctrl-C twice | hard exit (130) |
 | `duet --stop RUN` | validates and signals only that run's supervisor; finishes the current turn, then exits with `reason=force_stop` |
@@ -1057,14 +1060,24 @@ force>
 
 Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree handoff block without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
 
-Convergence is deliberately a pair decision. A single reply with `<<<LGTM>>>`
-does not stop the loop unless it also has an `LGTM rationale:` / `Rationale:`
-outside fenced code, and the immediately previous agent turn also proposed
-convergence with rationale. This lets one agent propose "I think this is done"
-while the partner can still reject the rationale and ask for another round.
+A convergence proposal needs `<<<LGTM>>>` on its own line and an
+`LGTM rationale:` or `Rationale:`. Both must be outside fenced code.
+Duet accepts convergence after different agents approve the same candidate
+revision in consecutive turns. An ordinary reply or failed verification
+breaks the pair. A valid approval on a changed revision starts a new pair.
 
-Convergence means that both agents agreed. It is not an independent review.
-Both agents can agree on code that they did not run. For example, Duet's
+The candidate comes from the selected worktree, or from `--cwd` when there
+is no worktree. Duet computes a SHA-256 fingerprint over file paths, file
+contents, executable bits, and symbolic link targets. In Git, the fingerprint
+covers tracked and non-ignored untracked files in that directory. Outside
+Git, it covers the directory contents. Duet excludes Git metadata and its own
+run files.
+
+A forced turn can pair with the last automatic turn's valid approval if
+both apply to the same revision. If the candidate changes, the two agents
+must approve the new revision. A continued run starts with a fresh pair.
+
+Agent agreement can include code that neither agent ran. For example, Duet's
 default permission mode for Claude, `acceptEdits`, can deny the Bash tool in
 `claude -p`.
 The prompts ask each agent to name the checks that either agent ran. Each
@@ -1095,13 +1108,16 @@ run total and says that the claims that need those tools are unverified. The
 total counts successful loop and forced turns and the `review` recipe kickoff,
 but not seed extraction. Dry runs print neither note.
 
-With `--verify-cmd`, that valid proposal is only counted after the command
-exits 0. A non-zero exit, timeout, or command execution error suppresses the
-proposal, leaves the normal loop running, and appends a capped `[duet verify
-failed]` block to both the transcript and the next agent prompt. Repeated
-verify failures still finish through the existing `--turns` limit rather than
-a special finish reason. Dry-run mode skips command execution while still
-showing and recording the configured verifier.
+With `--verify-cmd`, Duet runs the command only when the reply contains a
+convergence proposal. The approval counts when the command exits 0 and the
+candidate fingerprint is the same before and after it runs. A nonzero exit,
+timeout, or execution error breaks the pair. Duet adds a capped verification
+failure block to the transcript and the next agent prompt.
+If the candidate changes or Duet cannot compute its fingerprint, Duet adds
+a separate note that it ignored the approval. A successful command still
+records exit code 0 and a `[duet verify passed]` block.
+Repeated rejected approvals can reach the `--turns` limit. `--dry-run`
+simulates convergence and shows the configured command without executing it.
 
 While duet is at the `force>` prompt, `duet --status RUN_DIR` from another terminal returns exit 1 with `state: between turns / awaiting force> prompt`.
 
@@ -1207,9 +1223,8 @@ git -C <worktree-path> diff HEAD
 
 Project-specific test commands belong in `CLAUDE.md` / `README` — the handoff stays generic so it works in any project. The diff section then includes `git status --short` + `git diff --stat` + truncated `git diff HEAD`, plus fenced previews of untracked text files.
 
-If `--verify-cmd` is configured and an effective worktree path exists, duet
-runs verification in that worktree, not the host checkout. Without a worktree,
-verification runs in `--cwd`.
+Duet takes the candidate revision from the selected worktree. It runs
+`--verify-cmd` in the same directory. Without a worktree, both use `--cwd`.
 
 ### Access to the worktree from the other agent
 
@@ -1253,7 +1268,9 @@ Duet prints a clone drop hint only during the invocation that created it. Two re
 
 To override, use `--worktree-root PATH`. The worktree lands at `<PATH>/<run_id>/`. Use separate roots when different repositories can share a run ID. Existing destinations fail setup. Pass `/tmp` (or `$TMPDIR`) if you want the old throwaway-temp behavior.
 
-duet auto-creates `<runs_dir>/.gitignore` containing `*` on first use, so nothing it writes (transcripts, state, worktrees) shows up in your host repo's `git status`.
+Duet keeps any existing `<runs_dir>/.gitignore`. Otherwise, it creates one
+with `*` to keep run artifacts out of `git status`. Duet skips creation if
+`<runs_dir>` is or contains `--cwd` or a reused worktree.
 
 ### Cleanup
 
@@ -1308,8 +1325,8 @@ duet --list
 
 #### Fastest finalize: let claude commit, push, and open the PR
 
-When the loop converged (both agents accepted with rationale-backed
-`<<<LGTM>>>` turns), claude already has the full diff and the spec in its
+When both agents approved the same revision with rationale-backed
+`<<<LGTM>>>` turns, claude already has the full diff and the spec in its
 session context — it reviewed every turn. Convergence is pair agreement, not
 an independent review. Before you merge, review the final diff in a fresh
 context and run its checks. Check `tool_denials` in `duet --status RUN --json`
@@ -1340,7 +1357,7 @@ gh pr create --fill --base main
 ```
 
 Use this shortcut when:
-- The loop converged with pair-approved, rationale-backed `<<<LGTM>>>` turns.
+- Both agents approved the same revision in rationale-backed `<<<LGTM>>>` turns.
 - You're fine with claude composing the message + PR description.
 - You'll skim the resulting commit / PR but don't need to micro-stage.
 - The final merge will still happen through the PR after all required checks
@@ -1421,7 +1438,7 @@ duet --continue "$RUN" \
 Notes:
 - The argument accepts the same path-or-bare-id forms as `--status`.
 - `--task`, `--kickoff`, and `--task-from-cmd` are optional; if present, they are treated as one extra continuation instruction. Pass at most one.
-- The old run remains intact. Continuation always creates a new run directory whose `state.json` includes `continue_from`.
+- Continuation creates a new run directory whose `state.json` includes `continue_from`. Both agents must approve the candidate in the new run.
 - If the old run used worktree mode, duet reuses that worktree. To override which agent owns it, pass `--worktree-for lead` or `--worktree-for partner`.
 - `state.json` is inside the run directory and may have been writable during the original run. `--continue` refuses to replay a saved `verify_cmd`, agent `extra_args`, non-empty `add_dirs`, `danger-full-access`/unknown sandbox, or `bypassPermissions`/unknown permission mode unless you pass `--trust-state` after inspecting that file. Safe saved values (`read-only`/`workspace-write` and `default`/`acceptEdits`/`plan`) still restore normally. Fresh `--verify-cmd`, `--sandbox`, `--permission-mode`, or `--add-dir` values count as explicit user overrides.
 - Pass `--no-codex-fast` when you want to disable a saved `codex_fast: true` value for the continued run.

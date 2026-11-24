@@ -62,6 +62,8 @@ OpenCode peer model and effort constraints, see
 [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
 The skill preserves requested models and efforts, reports unsupported or unknown
 selections, and proposes supported Duet effort levels for approval.
+The installed CLI defines the stop conditions the skill reports. See
+[convergence and force-prompt results](USAGE.md#stop-conditions-and-force-prompt).
 Before launch, the skill checks installed CLI versions and relevant help output.
 See its [prerequisites](../plugins/duet/skills/duet/SKILL.md#prerequisites).
 For clone placement and cleanup limits, see [worktree isolation](USAGE.md#where-the-worktree-lives).

@@ -61,6 +61,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,7 @@ ON_TURN_TIMEOUT_CHOICES = ("stop", "continue")
 REASONING_TIMEOUT_DEFAULTS = {"high": 1200, "xhigh": 1800, "max": 1800}
 FINISHED_CONVERGED = "converged"
 FINISHED_CONVERGED_AFTER_FORCE = "converged_after_force"
+FINISHED_REVISION_CHANGED = "revision_changed"
 FINISHED_FORCED_CONTINUATION = "forced_continuation"
 FINISHED_MAX_TURNS = "max_turns"
 FINISHED_FORCE_STOP = "force_stop"
@@ -139,6 +141,7 @@ FINISHED_SETUP_ERROR = "setup_error"
 FINISHED_REASONS = {
     FINISHED_CONVERGED,
     FINISHED_CONVERGED_AFTER_FORCE,
+    FINISHED_REVISION_CHANGED,
     FINISHED_FORCED_CONTINUATION,
     FINISHED_MAX_TURNS,
     FINISHED_FORCE_STOP,
@@ -531,6 +534,8 @@ class DuetConfig:
                                               # instead of ending the run; a second
                                               # consecutive timeout still stops
     runs_dir: pathlib.Path = pathlib.Path("runs")
+    _generated_runs_ignore: Optional[pathlib.Path] = dataclasses.field(
+        default=None, init=False, repr=False)
     sandbox: str = DEFAULT_SANDBOX            # codex
     permission_mode: str = DEFAULT_PERMISSION_MODE  # claude/gemini
     dry_run: bool = False
@@ -1788,6 +1793,172 @@ def effective_verify_cwd(cfg: DuetConfig,
                          worktree_path: Optional[pathlib.Path]) -> pathlib.Path:
     """Return the directory where the convergence verify command should run."""
     return worktree_path or cfg.cwd
+
+
+def _candidate_has_git_marker(cwd: pathlib.Path) -> bool:
+    for parent in (cwd, *cwd.parents):
+        try:
+            (parent / ".git").lstat()
+        except FileNotFoundError:
+            continue
+        return True
+    return False
+
+
+def _revision_git_selection(cwd: pathlib.Path) -> tuple[Optional[dict], Optional[pathlib.Path]]:
+    git = shutil.which("git")
+    if git is None:
+        if _candidate_has_git_marker(cwd):
+            raise OSError("Git is required to enumerate the candidate")
+        return None, None
+    # Enumeration must not invoke fsmonitor, write index locks, or fetch objects.
+    cmd = [git, "-C", str(cwd), "-c", "core.fsmonitor=false"]
+    options = dict(stdin=subprocess.DEVNULL, env={
+        **os.environ, "LC_ALL": "C", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "",
+    }, capture_output=True, timeout=10)
+    repo = subprocess.run(
+        [*cmd, "rev-parse", "--is-inside-work-tree", "--absolute-git-dir"], **options,
+    )
+    not_repository = b"fatal: not a git repository (or any of the parent directories): .git"
+    if repo.returncode and not_repository in repo.stderr.splitlines():
+        if not _candidate_has_git_marker(cwd):
+            return None, None
+    repo.check_returncode()
+    worktree, _, git_dir = repo.stdout.partition(b"\n")
+    if worktree != b"true" or not git_dir:
+        raise OSError("candidate is outside the Git worktree")
+    listing = subprocess.run(
+        [*cmd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        check=True, **options,
+    )
+    read_warnings = (b"warning: unable to access", b"warning: could not open directory")
+    if any(line.startswith(read_warnings) for line in listing.stderr.splitlines()):
+        raise OSError("Git could not read the candidate paths or ignore rules")
+    return (_revision_selection_tree(listing.stdout),
+            pathlib.Path(os.fsdecode(git_dir.removesuffix(b"\n"))))
+
+
+def _revision_selection_tree(listing: bytes) -> dict:
+    selection: dict = {}
+    for path in listing.split(b"\0"):
+        if not path:
+            continue
+        parts = path.rstrip(b"/").split(b"/")
+        if any(part in (b"", b".", b"..") for part in parts):
+            raise OSError("Git named a path outside the candidate")
+        selected = selection
+        for part in parts[:-1]:
+            selected = selected.setdefault(part, {})
+            if selected is None:
+                break
+        else:
+            selected[parts[-1]] = None
+    return selection
+
+
+def _revision_exclusions(cfg: DuetConfig, cwd: pathlib.Path, run_dir: pathlib.Path,
+                         git_dir: Optional[pathlib.Path]) -> set[bytes]:
+    outputs = [run_dir.parent.resolve() / run_dir.name, cfg.run_info_file,
+               cfg._generated_runs_ignore, git_dir]
+    metric_id = cfg._metrics_context.get("id")
+    if metric_id is not None:
+        root = _metrics_root().resolve()
+        outputs.extend((root / "runs" / f"{metric_id}.json",
+                        root / "locks" / f"{metric_id}.lock"))
+    return {os.fsencode(path.relative_to(cwd))
+            for path in outputs if path is not None and cwd in path.parents}
+
+
+def _revision_stat(file_stat: os.stat_result) -> tuple:
+    return (file_stat.st_dev, file_stat.st_ino, file_stat.st_mode, file_stat.st_size,
+            file_stat.st_mtime_ns, file_stat.st_ctime_ns)
+
+
+def _revision_frame(digest, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _revision_file(parent_fd: int, name: bytes, expected: os.stat_result) -> bytes:
+    digest = hashlib.sha256()
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+    with os.fdopen(fd, "rb") as file:
+        if _revision_stat(os.fstat(fd)) != _revision_stat(expected):
+            raise OSError("candidate file changed before reading")
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
+def _hash_revision_entry(digest, parent_fd: int, name: bytes, relative: bytes,
+                         selection: Optional[dict], excluded: set[bytes],
+                         listed_by_git: bool) -> None:
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if listed_by_git:
+            return  # The Git index can still name a deleted working-tree path.
+        raise
+    _revision_frame(digest, relative)
+    if stat.S_ISREG(info.st_mode):
+        _revision_frame(digest, b"file" + bytes((info.st_mode & 0o111,)))
+        _revision_frame(digest, _revision_file(parent_fd, name, info))
+    elif stat.S_ISLNK(info.st_mode):
+        _revision_frame(digest, b"symlink")
+        _revision_frame(digest, os.readlink(name, dir_fd=parent_fd))
+    elif stat.S_ISDIR(info.st_mode):
+        _revision_frame(digest, b"directory")
+        _hash_revision_directory(digest, name, parent_fd=parent_fd, relative=relative,
+                                 selection=selection, excluded=excluded)
+    else:
+        raise OSError("unsupported candidate file type")
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if _revision_stat(current) != _revision_stat(info):
+        raise OSError("candidate entry changed during reading")
+
+
+def _hash_revision_directory(digest, name: bytes, *, parent_fd: Optional[int],
+                             relative: bytes, selection: Optional[dict],
+                             excluded: set[bytes]) -> None:
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        info = _revision_stat(os.fstat(fd))
+        if selection is None:
+            # Git can return a directory for a submodule or embedded repository.
+            # Walk its contents as a fallback when Git provides no individual paths.
+            with os.scandir(fd) as directory:
+                entries = {os.fsencode(entry.name): None for entry in directory}
+        else:
+            entries = selection
+        for child in sorted(entries):
+            path = relative + b"/" + child if relative else child
+            if child == b".git" or path in excluded:
+                continue
+            _hash_revision_entry(digest, fd, child, path, entries[child], excluded,
+                                 listed_by_git=selection is not None)
+        if _revision_stat(os.fstat(fd)) != info:
+            raise OSError("candidate directory changed during reading")
+    finally:
+        os.close(fd)
+
+
+def _approval_revision(cfg: DuetConfig, run_dir: pathlib.Path,
+                        wt_path: Optional[pathlib.Path]) -> Optional[str]:
+    try:
+        cwd = effective_verify_cwd(cfg, wt_path).resolve(strict=True)
+        info = _revision_stat(cwd.lstat())
+        selection, git_dir = _revision_git_selection(cwd)
+        digest = hashlib.sha256(b"duet candidate revision\0")
+        _hash_revision_directory(
+            digest, os.fsencode(cwd), parent_fd=None, relative=b"",
+            selection=selection, excluded=_revision_exclusions(cfg, cwd, run_dir, git_dir),
+        )
+        if _revision_stat(cwd.lstat()) == info:
+            return digest.hexdigest()
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        pass
+    return None
 
 
 def _tail_text(text: str, max_chars: int = VERIFY_OUTPUT_TAIL_CHARS) -> str:
@@ -4011,7 +4182,7 @@ _METRIC_PHASES = {"kickoff_pending", "kickoff_running", "turn_running",
                  "between_turns", "awaiting_force", "finished"}
 _METRIC_REASONS = {"converged", "converged_after_force", "max_turns", "timeout",
                    "agent_error", "kickoff_error", "setup_error", "force_stop",
-                   "forced_continuation", "dry_run"}
+                   "forced_continuation", "dry_run", FINISHED_REVISION_CHANGED}
 
 
 def _metrics_root() -> pathlib.Path:
@@ -4667,6 +4838,43 @@ def _continue_after_timeout(result: _TurnResult, timeout_may_continue: bool,
             and not stop.requested)
 
 
+def _check_convergence_proposal(
+    cfg: DuetConfig, reply: str, call_succeeded: bool, run_dir: pathlib.Path,
+    turn_label: str, wt_path: Optional[pathlib.Path],
+) -> tuple[str, bool, Optional[dict], Optional[str]]:
+    if not call_succeeded or not convergence_proposed(reply, cfg.sentinel):
+        return reply, False, None, None
+    if cfg.dry_run:
+        return reply, True, None, None
+
+    revision = _approval_revision(cfg, run_dir, wt_path)
+    verify_state = None
+    if revision is None:
+        reply += ("\n\n[duet] convergence proposal ignored: "
+                  "unable to hash the candidate revision.")
+    if cfg.verify_cmd:
+        result = run_verify_command(cfg, run_dir, turn_label, wt_path)
+        verify_state = verify_result_state(result)
+        if not result.ok:
+            reply += "\n\n" + format_verify_failure_block(result)
+            return reply, False, verify_state, None
+        reply += "\n\n" + format_verify_success_block(result)
+        if revision is not None and _approval_revision(cfg, run_dir, wt_path) != revision:
+            reply += ("\n\n[duet] convergence proposal ignored: "
+                      "could not confirm the candidate revision after verification.")
+            revision = None
+    return reply, revision is not None, verify_state, revision
+
+
+def _has_approval_pair(history: list) -> bool:
+    if len(history) < 2:
+        return False
+    previous, current = history[-2:]
+    revision = current.get("approval_revision")
+    return (revision is not None and revision == previous.get("approval_revision")
+            and current["agent"] != previous["agent"])
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
@@ -4737,17 +4945,10 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         seen_first_turn[speaker.name] = True
     elapsed = time.monotonic() - measured_start
     raw_reply = reply
-    convergence_hit = convergence_proposed(raw_reply, cfg.sentinel)
-    verify_state: Optional[dict] = None
-    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-        verify_result = run_verify_command(cfg, run_dir, f"{turn:02d}", wt_path)
-        verify_state = verify_result_state(verify_result)
+    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
+        cfg, raw_reply, call_succeeded, run_dir, f"{turn:02d}", wt_path)
+    if verify_state is not None:
         last_verify_state = verify_state
-        if verify_result.ok:
-            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-        else:
-            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-            convergence_hit = False
 
     recap_block: Optional[str] = None
     if cfg.recap:
@@ -4787,6 +4988,8 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
             run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
     if verify_state is not None:
         history_entry["verify"] = verify_state
+    if revision is not None:
+        history_entry["approval_revision"] = revision
     history.append(history_entry)
     # A timeout the loop may continue past must not be persisted as the run's
     # finished_reason — that would flip the phase to "finished" and make
@@ -4802,6 +5005,12 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     _write_run_state(state_path, turn_state)
     return _TurnResult(reply, convergence_hit, failure_reason,
                        last_verify_state, recap_block)
+
+
+def _runs_ignore_overlaps_candidate(cfg: DuetConfig) -> bool:
+    root = cfg.runs_dir.resolve()
+    return any(path.expanduser().resolve().is_relative_to(root)
+               for path in (cfg.cwd, cfg.worktree_path) if path is not None)
 
 
 def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
@@ -4823,10 +5032,12 @@ def _allocate_run_dir(cfg: DuetConfig) -> tuple[pathlib.Path, str]:
     # Auto-ignore everything duet writes (transcripts, state, worktrees) from
     # the host repo's POV. Idempotent — only written once per runs_dir.
     gi = cfg.runs_dir / ".gitignore"
-    if not gi.exists():
+    cfg._generated_runs_ignore = None
+    if not gi.exists() and not _runs_ignore_overlaps_candidate(cfg):
         write_text_atomic(gi, "# auto-created by duet — ignores all run artifacts\n"
                               "# (transcripts, state.json, worktrees) so they don't\n"
                               "# pollute the host repo. Safe to delete or edit.\n*\n")
+        cfg._generated_runs_ignore = gi.resolve()
     base_run_id = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     for n in range(100):
         run_id = base_run_id if n == 0 else f"{base_run_id}-{n:02d}"
@@ -5186,7 +5397,7 @@ def run_duet(cfg: DuetConfig) -> dict:
     # next speaker from the previous run's last completed turn.
     speaker_idx = cfg.start_speaker_idx
     finished_reason = FINISHED_MAX_TURNS
-    previous_convergence_proposal = False
+    previous_preview_proposal = False
     previous_turn_timed_out = False
     last_verify_state: Optional[dict] = None
 
@@ -5221,7 +5432,7 @@ def run_duet(cfg: DuetConfig) -> dict:
                       f"the partner (--on-turn-timeout continue)",
                       file=sys.stderr)
                 last_msg = result.reply
-                previous_convergence_proposal = False
+                previous_preview_proposal = False
                 previous_turn_timed_out = True
                 speaker_idx = 1 - speaker_idx
                 continue
@@ -5231,12 +5442,13 @@ def run_duet(cfg: DuetConfig) -> dict:
             finished_reason = FINISHED_FORCE_STOP
             break
         previous_turn_timed_out = False
-        if result.convergence_hit and previous_convergence_proposal:
+        last_msg = result.reply
+        speaker_idx = 1 - speaker_idx
+        if _has_approval_pair(history) or (
+                cfg.dry_run and result.convergence_hit and previous_preview_proposal):
             finished_reason = FINISHED_CONVERGED
             break
-        last_msg = result.reply
-        previous_convergence_proposal = result.convergence_hit
-        speaker_idx = 1 - speaker_idx
+        previous_preview_proposal = result.convergence_hit
     else:
         finished_reason = FINISHED_MAX_TURNS
 
@@ -5335,17 +5547,10 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         seen_first_turn[next_speaker.name] = True
     elapsed = time.monotonic() - measured_start
     raw_reply = reply
-    convergence_hit = convergence_proposed(reply, cfg.sentinel)
-    verify_state: Optional[dict] = None
-    if convergence_hit and cfg.verify_cmd and not cfg.dry_run:
-        verify_result = run_verify_command(cfg, run_dir, label, wt_path)
-        verify_state = verify_result_state(verify_result)
+    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
+        cfg, raw_reply, call_succeeded, run_dir, label, wt_path)
+    if verify_state is not None:
         last_verify_state = verify_state
-        if verify_result.ok:
-            reply = raw_reply + "\n\n" + format_verify_success_block(verify_result)
-        else:
-            reply = raw_reply + "\n\n" + format_verify_failure_block(verify_result)
-            convergence_hit = False
     reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
     before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and next_speaker.cwd_override == wt_path:
@@ -5381,6 +5586,8 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         next_speaker, raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
     _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
+    if revision is not None:
+        history_entry["approval_revision"] = revision
     if failure_reason is not None:
         history_entry["finished_reason"] = failure_reason
         history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
@@ -5393,6 +5600,19 @@ def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
         print(reply)
     return _TurnResult(reply, convergence_hit, failure_reason,
                        last_verify_state, recap_block)
+
+
+def _finish_force_prompt(cfg: DuetConfig, reason: str, history: list,
+                         transcript_path: pathlib.Path, wt_path: Optional[pathlib.Path]) -> str:
+    if cfg.dry_run or reason != FINISHED_CONVERGED:
+        return reason
+    current = _approval_revision(cfg, transcript_path.parent, wt_path)
+    if current is not None and history and current == history[-1].get("approval_revision"):
+        return reason
+    note = "[duet] candidate revision changed or could not be verified at the force prompt."
+    append_text_atomic(transcript_path, f"\n{note}\n")
+    print(note)
+    return FINISHED_REVISION_CHANGED
 
 
 def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
@@ -5428,13 +5648,13 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         try:
             line = input("force> ").strip()
         except EOFError:
-            return (
-                FINISHED_FORCE_STOP if stop is not None and stop.requested else reason,
-                last_verify_state,
-            )
+            line = ""
         if stop is not None and stop.requested:
             return FINISHED_FORCE_STOP, last_verify_state
         if not line:
+            reason = _finish_force_prompt(cfg, reason, history, transcript_path, wt_path)
+            if stop is not None and stop.requested:
+                reason = FINISHED_FORCE_STOP
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
         first_turn_for_agent = not seen_first_turn[next_speaker.name]
@@ -5475,7 +5695,7 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
-        if result.convergence_hit:
+        if _has_approval_pair(history) or (cfg.dry_run and result.convergence_hit):
             return FINISHED_CONVERGED_AFTER_FORCE, last_verify_state
 
 # ---------- config / cli parsing ----------
