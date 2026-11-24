@@ -1657,6 +1657,21 @@ class TestRevisionBoundConvergence(unittest.TestCase):
         self.assertEqual(state["finished_reason"], duet.FINISHED_CONVERGED)
         self.assertEqual(first["approval_revision"], second["approval_revision"])
 
+    def test_verifier_cannot_remove_gitlink_directory(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "update-index", "--add", "--cacheinfo", "160000", "a" * 40, "sub"],
+            cwd=self.root, check=True,
+        )
+        (self.root / "sub").mkdir()
+
+        state = self._run([self.PROPOSAL] * 2, max_turns=2, verify_cmd="rm -rf sub")
+
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        first, second = state["history"]
+        self.assertNotIn("approval_revision", first)
+        self.assertRegex(second["approval_revision"], r"^[0-9a-f]{64}$")
+
     def test_successful_verifier_cannot_approve_its_own_edit(self) -> None:
         state = self._run(
             [self.PROPOSAL] * 3, max_turns=3,
