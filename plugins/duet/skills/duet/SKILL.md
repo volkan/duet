@@ -375,8 +375,17 @@ scope.
 
 ### Codex peer models
 
-Check the Codex CLI's `/model` picker for the current account. Either peer can
-use any model ID accepted by its Codex backend.
+List the catalog without a session. Each `models[]` entry has `slug`,
+`visibility`, and `supported_reasoning_levels`:
+
+```bash
+codex debug models | jq -r '.models[] | [.slug, .visibility, (.supported_reasoning_levels | map(.effort) | join(","))] | @tsv'
+```
+
+Duet accepts only `minimal|low|medium|high|xhigh|max`, so skip catalog levels
+such as `ultra`. A catalog entry does not prove account access. If the installed
+CLI lacks `codex debug models`, report that discovery is unavailable. Either
+peer can use any model ID accepted by its Codex backend.
 
 | Family | Example model IDs |
 |---|---|
@@ -384,6 +393,52 @@ use any model ID accepted by its Codex backend.
 | GPT-6.1 | `gpt-6.1-sol`, `gpt-6.1-terra` |
 | GPT-6 | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` |
 | GPT-5.6 | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` |
+
+### Config-file runs: per-agent model and effort
+
+`--lead-model` and `--partner-model` give each peer its own model, but
+`--reasoning` sets one effort level for both agents. Use `--config` for a
+per-agent `reasoning_effort`, a custom `role_prompt`, or a resumed `session_id`.
+
+Write JSON. `.yaml` and `.yml` need PyYAML, which a plain `duet-cli` install
+lacks; Duet then exits with `PyYAML not installed`. For all keys, read
+`duet.example.yaml` and `docs/USAGE.md` in the `volkan/duet` GitHub repository.
+
+```json
+{
+  "runs_dir": ".duet/runs",
+  "sandbox": "read-only",
+  "on_turn_timeout": "continue",
+  "max_turns": 4,
+  "agents": [
+    {"name": "astra-reviewer", "backend": "codex", "role": "reviewer", "model": "gpt-6.2-astra", "reasoning_effort": "xhigh"},
+    {"name": "glm-reviewer", "backend": "opencode", "role": "reviewer", "model": "zai-coding-plan/glm-5.3", "reasoning_effort": "max"}
+  ]
+}
+```
+
+The second entry (`agents[1]`) answers the task first; the first entry replies.
+List order alone decides this, so swap the entries to change who opens.
+
+```bash
+duet --dry-run --config pair.json --task @/absolute/task.md
+duet --config pair.json --task @/absolute/task.md --run-info-file "$DUET_RUN_INFO"
+```
+
+Run from the project directory with an absolute `@file` path. CLI `--task`
+fills in only when the file has none of `task`, `kickoff`, or `task_from_cmd`.
+`--config` ignores `--turns`, `--cwd`, `--lead`, `--partner`, and the slot model
+flags. Do not add `--resume-claude` or `--resume-codex`; they can reset roles or
+replace an agent. Set `session_id` in the file to resume. Each `--dry-run` turn
+line shows `reasoning=<level>`; check both values, then monitor as in Discover
+and monitor. Turn lines print no models; the dry-run `state.json` lists them
+under `agents[].model`.
+
+`sandbox` binds Codex only; an OpenCode peer can still edit unless told not to.
+For a non-code opinion task, replace the built-in reviewer prompt, which asks
+for bugs, tests, and code evidence. `{SENTINEL}` expands to the run's sentinel
+and other braces stay literal:
+`{"role_prompt": "You are an independent advisor. State your position, challenge your partner's, and end with an LGTM rationale and {SENTINEL} on its own line."}`
 
 ### Examples
 

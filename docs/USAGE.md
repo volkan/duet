@@ -563,8 +563,9 @@ python3 duet.py --recipe codex-review --cwd /path/to/your/project \
 Here Astra reviews first and Sol implements supported fixes. The coder can
 change the recipe worktree. The pairing is an example, not a quality recommendation.
 Omit both model flags to use Codex's configured default in two sessions. You
-can also pass another string the Codex CLI accepts. Use Codex's `/model` picker
-to check your available choices.
+can also pass another string the Codex CLI accepts. Run `codex debug models` to
+list the catalog as JSON, with `slug`, `visibility`, and
+`supported_reasoning_levels` per entry, without opening a session.
 
 Codex supports [ChatGPT subscription sign-in](https://learn.chatgpt.com/docs/auth)
 for local CLI use; `codex login status` shows the active method. Duet reuses
