@@ -382,10 +382,11 @@ List the catalog without a session. Each `models[]` entry has `slug`,
 codex debug models | jq -r '.models[] | [.slug, .visibility, (.supported_reasoning_levels | map(.effort) | join(","))] | @tsv'
 ```
 
-Duet accepts only `minimal|low|medium|high|xhigh|max`, so skip catalog levels
-such as `ultra`. A catalog entry does not prove account access. If the installed
-CLI lacks `codex debug models`, report that discovery is unavailable. Either
-peer can use any model ID accepted by its Codex backend.
+Prefer slugs whose `visibility` is `list`. Without `jq`, read the `models`
+array in the raw JSON. Duet accepts only `minimal|low|medium|high|xhigh|max`,
+so skip catalog levels such as `ultra`. A catalog entry does not prove account
+access. If the installed CLI lacks `codex debug models`, report that discovery
+is unavailable. Either peer can use any model ID accepted by its Codex backend.
 
 | Family | Example model IDs |
 |---|---|
@@ -401,8 +402,9 @@ peer can use any model ID accepted by its Codex backend.
 per-agent `reasoning_effort`, a custom `role_prompt`, or a resumed `session_id`.
 
 Write JSON. `.yaml` and `.yml` need PyYAML, which a plain `duet-cli` install
-lacks; Duet then exits with `PyYAML not installed`. For all keys, read
-`duet.example.yaml` and `docs/USAGE.md` in the `volkan/duet` GitHub repository.
+lacks; Duet then exits with `PyYAML not installed`. For other keys, read the
+commented example at
+https://github.com/volkan/duet/blob/main/duet.example.yaml.
 
 ```json
 {
@@ -427,12 +429,16 @@ duet --config pair.json --task @/absolute/task.md --run-info-file "$DUET_RUN_INF
 
 Run from the project directory with an absolute `@file` path. CLI `--task`
 fills in only when the file has none of `task`, `kickoff`, or `task_from_cmd`.
-`--config` ignores `--turns`, `--cwd`, `--lead`, `--partner`, and the slot model
-flags. Do not add `--resume-claude` or `--resume-codex`; they can reset roles or
-replace an agent. Set `session_id` in the file to resume. Each `--dry-run` turn
-line shows `reasoning=<level>`; check both values, then monitor as in Discover
-and monitor. Turn lines print no models; the dry-run `state.json` lists them
-under `agents[].model`.
+`--config` ignores `--turns`, `--cwd`, `--lead`, `--partner`, and the slot
+model flags. Do not add `--resume-claude` or `--resume-codex`; they can reset
+roles or replace an agent. Set `session_id` in the file to resume. A
+`session_id` on `agents[0]` makes Duet ask that session for its latest message
+and use it as the seed; `task` and `--task` are not sent. To send new text
+instead, set `kickoff` in the file (or pass `--kickoff` when the file has no
+`task`, `kickoff`, or `task_from_cmd`); it wins over extraction. Or put the
+session on `agents[1]`. Each `--dry-run` turn line shows `reasoning=<level>`;
+check both values, then monitor as in Discover and monitor. Turn lines print no
+models; the dry-run `state.json` lists them under `agents[].model`.
 
 `sandbox` binds Codex only; an OpenCode peer can still edit unless told not to.
 For a non-code opinion task, replace the built-in reviewer prompt, which asks

@@ -148,8 +148,10 @@ Auto mode still respects explicit permission denials.
 ## OpenCode peer models
 
 Use a `provider/model` ID for an OpenCode peer. Duet rejects a `#variant`
-suffix in the model ID. Set `--reasoning` or the agent's `reasoning_effort`
-instead. Report a rejected ID without substituting another model.
+suffix in the model ID. Set the effort separately. `--reasoning` sets both
+peers. A per-agent `reasoning_effort` needs a config file; see
+[Config-file runs](../plugins/duet/skills/duet/SKILL.md#config-file-runs-per-agent-model-and-effort).
+Report a rejected ID without substituting another model.
 
 OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
 requires an explicit model to receive effort through `-m provider/model#<level>`.
