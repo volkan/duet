@@ -148,8 +148,10 @@ Auto mode still respects explicit permission denials.
 ## OpenCode peer models
 
 Use a `provider/model` ID for an OpenCode peer. Duet rejects a `#variant`
-suffix in the model ID. Set `--reasoning` or the agent's `reasoning_effort`
-instead. Report a rejected ID without substituting another model.
+suffix in the model ID. Set the effort separately. `--reasoning` sets both
+peers. A per-agent `reasoning_effort` needs a config file; see
+[Config-file runs](../plugins/duet/skills/duet/SKILL.md#config-file-runs-per-agent-model-and-effort).
+Report a rejected ID without substituting another model.
 
 OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
 requires an explicit model to receive effort through `-m provider/model#<level>`.
@@ -168,7 +170,8 @@ opencode api --standalone model.list --param 'location[directory]=<absolute-peer
 Use the model list for discovery. Forward an exact requested ID even when discovery omits it.
 In the API response's `data` array, match `providerID` and `id`, then read `variants[].id`.
 Resolved variants include provider handling, budget-derived levels, and configured overrides.
-If the installed CLI lacks this API command, report that discovery is unavailable.
+If the installed CLI lacks this API command or the response has an empty `data` array,
+report that discovery is unavailable.
 OpenCode v2.3.0 [caches its catalog in the database](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/core/src/models-dev.ts#L531-L575).
 Thus, `cache/models.json` can be a stale legacy file.
 The [models.dev API](https://models.dev/api.json) supplies supplementary metadata for the exact provider and model.
