@@ -383,11 +383,19 @@ List the catalog without a session. Each `models[]` entry has `slug`,
 codex debug models | jq -r '.models[] | [.slug, .visibility, (.supported_reasoning_levels | map(.effort) | join(","))] | @tsv'
 ```
 
-Prefer slugs whose `visibility` is `list`. Without `jq`, read the `models`
-array in the raw JSON. Duet accepts only `minimal|low|medium|high|xhigh|max`,
-so skip catalog levels such as `ultra`. A catalog entry does not prove account
-access. If the installed CLI lacks `codex debug models`, report that discovery
-is unavailable. Either peer can use any model ID accepted by its Codex backend.
+Prefer slugs whose `visibility` is `list`. Without `jq`, filter with `python3`;
+the raw JSON is too large to read whole:
+
+```bash
+codex debug models | python3 -c 'import json, sys
+for m in json.load(sys.stdin)["models"]:
+    print(m["slug"], m.get("visibility"), ",".join(l["effort"] for l in m.get("supported_reasoning_levels") or []), sep="\t")'
+```
+
+Duet accepts only `minimal|low|medium|high|xhigh|max`, so skip catalog levels
+such as `ultra`. A catalog entry does not prove account access. If the installed
+CLI lacks `codex debug models`, report that discovery is unavailable. Either
+peer can use any model ID accepted by its Codex backend.
 
 | Family | Example model IDs |
 |---|---|
