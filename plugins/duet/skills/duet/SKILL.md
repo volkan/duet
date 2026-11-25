@@ -329,7 +329,8 @@ opencode api --standalone model.list --param 'location[directory]=<absolute-peer
 
 In the response's `data` array, match `providerID` and `id`, then read `variants[].id`.
 These variants include provider handling, budget-derived levels, and configured overrides.
-If the installed CLI lacks this API command, report that discovery is unavailable.
+If the installed CLI lacks this API command, or the response has an empty `data`
+array, report that discovery is unavailable.
 OpenCode v2.3.0 caches its catalog in the database; `cache/models.json` can be a stale legacy file.
 Use `https://models.dev/api.json` only as supplementary metadata for the exact provider and model.
 Its `reasoning_options` is an array; select the object with `type: "effort"` and read `values`.
