@@ -333,6 +333,8 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertTrue(any("duet --continue" in line for line in with_open), with_open)
         lines = self._announce(self._announce_state(run, {"L1": ("supported", "supported")}))
         self.assertEqual(lines, [f"[duet] finding report: {run / 'review.md'} (0 unresolved)"])
+
+    def test_end_of_run_prints_nothing_when_reports_are_off(self) -> None:
         self.assertEqual(self._announce({"finding_reports": False}), [])
 
     def test_end_of_run_has_no_command_when_the_history_is_incomplete(self) -> None:

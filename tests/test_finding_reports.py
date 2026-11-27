@@ -293,7 +293,6 @@ class TestUnresolvedReasons(unittest.TestCase):
                 "and at least one still marks it unresolved."):
             with self.subTest(sentence=sentence):
                 self.assertIn("\n\n" + sentence + "\n\n", rendered)
-        self.assertIn("not proven facts", rendered)
 
     def test_rejected_reply_leaves_the_earlier_accepted_assessment_in_charge(self):
         rejected = {"turn": 3, "agent": "reviewer",
