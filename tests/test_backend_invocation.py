@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -109,6 +110,56 @@ class TestCodexInvocation(unittest.TestCase):
         self.assertIn("model_reasoning_effort=low", coder_cmd)
         self.assertNotIn("model_reasoning_effort=high", coder_cmd)
         self.assertIn("model_reasoning_summary=concise", coder_cmd)
+
+
+class TestCodexPeerIsolation(unittest.TestCase):
+    def _run(self, sessions, *, opening=1, separate_cwds=False):
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            lead = duet.Agent("codex-lead", "codex", role="planner")
+            partner = duet.Agent("codex-partner", "codex", role="coder")
+            if separate_cwds:
+                partner.cwd_override = root / "partner"
+                partner.cwd_override.mkdir()
+            cfg = duet.DuetConfig(cwd=root, runs_dir=root / "runs", agents=[lead, partner],
+                                  task="review", start_speaker_idx=opening, max_turns=3,
+                                  metrics_enabled=False)
+            replies = [(0, "peer reply", f"session id: {sid}\n" if sid else "")
+                       for sid in sessions]
+            with mock.patch.object(duet, "_run", side_effect=replies) as run, \
+                    mock.patch.object(duet, "_register_run_in_home_index"), \
+                    mock.patch.object(duet.sys.stdin, "isatty", return_value=False), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+            return state, run.call_args_list
+
+    def test_shared_cwd_resumes_the_opening_peer_by_uuid(self) -> None:
+        state, calls = self._run([SESSION, OTHER_SESSION, SESSION], opening=0)
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertEqual(len(calls), 3)
+        resumed = calls[2].args[0]
+        self.assertEqual(resumed[:4], ["codex", "exec", "resume", SESSION])
+        self.assertNotIn("--last", resumed)
+
+    def test_shared_cwd_refusal_preserves_the_first_peers_pin(self) -> None:
+        for opening in (0, 1):
+            with self.subTest(opening=opening):
+                state, calls = self._run([SESSION, None], opening=opening)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(state["finished_reason"], duet.FINISHED_SETUP_ERROR)
+                self.assertEqual(state["turns_used"], 2)
+                self.assertIn("cannot safely continue codex/codex", state["history"][-1]["error"])
+                self.assertEqual(state["agents"][opening]["session_id"], SESSION)
+                self.assertIsNone(state["agents"][1 - opening]["session_id"])
+
+    def test_distinct_cwds_can_resume_using_last(self) -> None:
+        state, calls = self._run([None, None, None], separate_cwds=True)
+        self.assertEqual(state["finished_reason"], duet.FINISHED_MAX_TURNS)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2].args[0][:4], ["codex", "exec", "resume", "--last"])
+        self.assertEqual(calls[2].kwargs["cwd"], calls[0].kwargs["cwd"])
+        self.assertNotEqual(calls[2].kwargs["cwd"], calls[1].kwargs["cwd"])
 
 
 class TestGeminiInvocation(unittest.TestCase):

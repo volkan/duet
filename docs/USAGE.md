@@ -840,7 +840,18 @@ When `--task-from-cmd` is used, `turn-00-kickoff.pid` exists while it runs and
 set, that separate caller-owned JSON file points to this run before kickoff.
 The raw shell command is never written to launch metadata or `state.json`.
 
-The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn. If an agent timeout or command error ends the run, duet writes a bounded error block to `transcript.md`, records the failing turn in `state.json["history"]`, and links the matching stderr log. The block keeps the beginning and end of the exception text, caps that excerpt at 12,000 characters, and reports how many characters were omitted; the complete subprocess stderr remains in the per-turn log.
+The per-turn `*.stderr.log` files record the stderr that Duet captures from
+each peer, including Codex reasoning summaries, tool calls, and Claude
+progress messages. If the terminal cannot keep up, the live view can skip
+output. Read the log for the captured stderr. Duet drains inherited pipes
+for up to 250 ms after the peer exits.
+
+`turn-00-extract-*` is the optional Claude seed-extraction call.
+`turn-NN-forced-*` is a human-forced post-loop turn. When a timeout or
+command error ends the run, Duet records it in `state.json["history"]` and
+links the stderr log from a bounded error block in `transcript.md`.
+The block includes the start and end of the error, up to 12,000 characters.
+It also reports the number of omitted characters.
 
 For a kickoff failure, the transcript and terminal error summary include a
 bounded excerpt. Read `turn-00-kickoff.stderr.log` for the full subprocess stderr.

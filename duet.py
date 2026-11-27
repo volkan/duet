@@ -117,7 +117,10 @@ TASK_MAX_CHARS = 512 * 1024
 KICKOFF_ENVELOPE_MAX_CHARS = 8 * TASK_MAX_CHARS
 REVIEW_KICKOFF_KIND = "recipe_review_json"
 REVIEW_KICKOFF_AGENT = "review-kickoff"
-_NON_LOOP_HISTORY_KINDS = frozenset({"kickoff", "seed_extract", "final_review"})
+_RESUME_REFUSED_KIND = "resume_refused"
+_NON_LOOP_HISTORY_KINDS = frozenset({
+    "kickoff", "seed_extract", "final_review", _RESUME_REFUSED_KIND,
+})
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
@@ -780,21 +783,33 @@ def _unregister_proc(proc: subprocess.Popen) -> None:
         _ACTIVE_PROCS.discard(proc)
 
 
-def _signal_proc_tree(proc: subprocess.Popen, sig: int) -> None:
-    if proc.poll() is not None:
-        return
+def _child_has_exited(proc: subprocess.Popen) -> bool:
+    if proc.returncode is not None:
+        return True
     try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, sig)
-        else:
-            proc.send_signal(sig)
-    except ProcessLookupError:
-        pass
-    except Exception:
+        # Retain the child PID until the deadline watcher has stopped.
+        status = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        return True
+    return status is not None and status.si_pid != 0
+
+
+def _signal_proc_tree(proc: subprocess.Popen, sig: int) -> None:
+    with _ACTIVE_PROCS_LOCK:
+        if _child_has_exited(proc):
+            return
         try:
-            proc.kill()
-        except Exception:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, sig)
+            else:
+                proc.send_signal(sig)
+        except ProcessLookupError:
             pass
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def _terminate_active_processes(sig: int = signal.SIGKILL) -> None:
@@ -1188,15 +1203,61 @@ _CHILD_POLL_INTERVAL = 0.1
 _CHILD_DRAIN_TIMEOUT = 0.25
 _CHILD_IO_CHUNK = 64 * 1024
 _CHILD_HEARTBEAT_INTERVAL = 20
+_CHILD_TERM_GRACE = 2
 
 
-def _write_live_output(target, text: str) -> None:
+def _write_child_log(target, text: str) -> None:
     if target is not None:
         try:
             target.write(text)
             target.flush()
         except Exception:
             pass
+
+
+def _open_live_terminal() -> Optional[int]:
+    if not LIVE_STREAM or RECAP_MODE or not sys.stderr.isatty():
+        return None
+    try:
+        source = sys.stderr.fileno()
+        # Reopen instead of dup: O_NONBLOCK on a dup would also change sys.stderr.
+        terminal = os.open(os.ttyname(source), os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY)
+    except (OSError, ValueError):
+        return None
+    try:
+        if os.path.samestat(os.fstat(source), os.fstat(terminal)):
+            return terminal
+    except OSError:
+        pass
+    os.close(terminal)
+    return None
+
+
+def _mirror_child_output(terminal: Optional[int], text: str) -> None:
+    if terminal is not None:
+        try:
+            os.write(terminal, text.encode("utf-8"))
+        except OSError:
+            pass
+
+
+@dataclasses.dataclass
+class _ChildDeadline:
+    proc: subprocess.Popen
+    expires_at: float
+    finished: threading.Event = dataclasses.field(default_factory=threading.Event)
+    expired: bool = False
+
+    def watch(self) -> None:
+        if self.finished.wait(max(0, self.expires_at - time.monotonic())):
+            return
+        with _ACTIVE_PROCS_LOCK:
+            if _child_has_exited(self.proc):
+                return
+            self.expired = True
+            _signal_proc_tree(self.proc, signal.SIGTERM)
+        if not self.finished.wait(_CHILD_TERM_GRACE):
+            _signal_proc_tree(self.proc, signal.SIGKILL)
 
 
 class _ChildOutput:
@@ -1214,21 +1275,17 @@ class _ChildOutput:
         for line in lines[:-1]:
             rendered = "".join(self.pending_line) + line + "\n"
             self.pending_line.clear()
-            _write_live_output(self.mirror, self.prefix + rendered)
+            _mirror_child_output(self.mirror, self.prefix + rendered)
         self.pending_line.append(lines[-1])
         if final and (tail := "".join(self.pending_line)):
-            _write_live_output(self.mirror, self.prefix + tail)
+            _mirror_child_output(self.mirror, self.prefix + tail)
 
     def capture(self, data: bytes, *, final: bool = False) -> None:
         text = self.decoder.decode(data, final)
         self.chunks.append(text)
-        _write_live_output(self.tee, text)
+        _write_child_log(self.tee, text)
         if self.mirror is not None:
             self._mirror_lines(text, final)
-
-
-def _live_stream_target(enabled: bool = True):
-    return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
 
 
 def _write_child_stdin(selector, stream, data: memoryview) -> memoryview:
@@ -1257,12 +1314,10 @@ def _read_child_output(selector, stream, output: _ChildOutput) -> bool:
     return False
 
 
-def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], timeout: float,
-                   stdout: _ChildOutput, stderr: _ChildOutput) -> int:
+def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threading.Event,
+                   stdout: _ChildOutput, stderr: _ChildOutput) -> None:
     start = time.monotonic()
-    deadline = start + timeout
     next_heartbeat = start + _CHILD_HEARTBEAT_INTERVAL
-    did_timeout = False
     data = memoryview((stdin or "").encode("utf-8", errors="replace"))
     with selectors.DefaultSelector() as selector:
         for stream, output in ((proc.stdout, stdout), (proc.stderr, stderr)):
@@ -1273,28 +1328,21 @@ def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], timeout: float,
             selector.register(proc.stdin, selectors.EVENT_WRITE)
         else:
             proc.stdin.close()
-        while proc.poll() is None:
+        while not _child_has_exited(proc):
             now = time.monotonic()
-            if now >= deadline:
-                if did_timeout:
-                    _signal_proc_tree(proc, signal.SIGKILL)
-                    proc.wait()
-                    break
-                did_timeout = True
-                _signal_proc_tree(proc, signal.SIGTERM)
-                deadline = now + 2
             if now >= next_heartbeat:
-                _write_live_output(
+                _mirror_child_output(
                     stderr.mirror,
                     f"{stderr.prefix}[duet] still working… ({int(now - start)}s; "
                     "subprocess silent — typical for `claude -p`)\n")
                 next_heartbeat = now + _CHILD_HEARTBEAT_INTERVAL
-            delay = min(_CHILD_POLL_INTERVAL, deadline - now, next_heartbeat - now)
+            delay = min(_CHILD_POLL_INTERVAL, next_heartbeat - now)
             for key, _ in selector.select(delay):
                 if key.data is None:
                     data = _write_child_stdin(selector, key.fileobj, data)
                 elif _read_child_output(selector, key.fileobj, key.data):
                     next_heartbeat = time.monotonic() + _CHILD_HEARTBEAT_INTERVAL
+        finished.set()
         if not proc.stdin.closed:
             selector.unregister(proc.stdin)
             proc.stdin.close()
@@ -1306,10 +1354,6 @@ def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], timeout: float,
                 _read_child_output(selector, key.fileobj, key.data)
     for output in (stdout, stderr):
         output.capture(b"", final=True)
-    if did_timeout:
-        stderr.chunks.append(f"\n[duet] TIMEOUT after {timeout}s")
-        return 124
-    return proc.returncode
 
 
 def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: float,
@@ -1323,8 +1367,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
-    to our stderr line-by-line as it's produced. stdout is captured silently
-    unless `mirror_stdout` is set — duet logs agent final answers to the
+    to the terminal line-by-line when it can accept output. stdout is captured
+    silently unless `mirror_stdout` is set — duet logs agent final answers to the
     transcript afterwards.
     Set `mirror_stderr=False` for private configuration probes; their captured
     output must not reach live output or a persistent stderr log.
@@ -1339,8 +1383,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
     vs "agent crashed silently". Critical for agents like `claude -p` that
     emit no stderr during their long API call.
     """
-    mirror = _live_stream_target()
-    stderr_mirror = _live_stream_target(mirror_stderr)
+    terminal = None
     prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
     stderr_file = None
     if stderr_log_path is not None:
@@ -1361,6 +1404,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
                   file=sys.stderr)
             stderr_file = None
     try:
+        terminal = _open_live_terminal() if mirror_stdout or mirror_stderr else None
         try:
             proc = subprocess.Popen(
                 cmd, cwd=str(cwd),
@@ -1372,28 +1416,39 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
         except FileNotFoundError:
             return 127, "", f"[duet] command not found: {cmd[0]}"
         _register_proc(proc)
-        if pid_file_path is not None:
-            try:
-                pid_file_path.parent.mkdir(parents=True, exist_ok=True)
-                # Write atomically so a poller never reads a half-written PID.
-                tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
-                tmp.write_text(f"{proc.pid}\n", encoding="utf-8")
-                os.replace(tmp, pid_file_path)
-            except OSError as e:
-                print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
-                      file=sys.stderr)
-        stdout = _ChildOutput(mirror if mirror_stdout else None, prefix)
-        stderr = _ChildOutput(stderr_mirror, prefix, stderr_file)
+        deadline = _ChildDeadline(proc, time.monotonic() + timeout)
+        worker = threading.Thread(target=deadline.watch, name="duet-child-deadline", daemon=True)
         try:
-            rc = _pump_child_io(proc, stdin, timeout, stdout, stderr)
+            worker.start()
+            stdout = _ChildOutput(terminal if mirror_stdout else None, prefix)
+            stderr = _ChildOutput(terminal if mirror_stderr else None, prefix, stderr_file)
+            if pid_file_path is not None:
+                try:
+                    pid_file_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Write atomically so a poller never reads a half-written PID.
+                    tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
+                    tmp.write_text(f"{proc.pid}\n", encoding="utf-8")
+                    os.replace(tmp, pid_file_path)
+                except OSError as e:
+                    print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
+                          file=sys.stderr)
+            _pump_child_io(proc, stdin, deadline.finished, stdout, stderr)
         finally:
+            deadline.finished.set()
+            if worker.ident is not None:
+                worker.join()
             _signal_proc_tree(proc, signal.SIGKILL)
-            proc.wait()
+            rc = proc.wait()
             _unregister_proc(proc)
             for stream in (proc.stdin, proc.stdout, proc.stderr):
                 stream.close()
+        if deadline.expired:
+            rc = 124
+            stderr.chunks.append(f"\n[duet] TIMEOUT after {timeout}s")
         return rc, "".join(stdout.chunks), "".join(stderr.chunks)
     finally:
+        if terminal is not None:
+            os.close(terminal)
         if stderr_file is not None:
             try:
                 stderr_file.close()
@@ -4049,8 +4104,8 @@ class StopFlag:
 def _install_sigint(stop: StopFlag) -> None:
     def handler(signum, frame):
         if stop.requested:
-            print("\n[duet] second SIGINT — exiting hard.", file=sys.stderr)
             _terminate_active_processes(signal.SIGKILL)
+            print("\n[duet] second SIGINT — exiting hard.", file=sys.stderr)
             os._exit(130)
         print("\n[duet] SIGINT received — finishing current turn, then stopping. "
               "Press Ctrl-C again to abort immediately.", file=sys.stderr)
@@ -4078,17 +4133,16 @@ def _install_run_stop_signal(stop: StopFlag) -> None:
 def _install_sigterm(stop: StopFlag) -> None:
     """Make run-scoped immediate stops durable before this process exits."""
     def handler(signum, frame):
-        if not stop.requested:
+        first = not stop.requested
+        stop.request("SIGTERM")
+        # The terminal can be full. Signal tracked child groups before writing.
+        _terminate_active_processes(signal.SIGKILL)
+        if first:
             print(
                 "\n[duet] immediate stop requested — terminating the active "
                 "child, then stopping.",
                 file=sys.stderr,
             )
-        stop.request("SIGTERM")
-        # Each tracked child is its own process-group leader. This preserves
-        # the existing descendant cleanup without signaling the supervisor's
-        # process group or any other duet run.
-        _terminate_active_processes(signal.SIGKILL)
 
     signal.signal(signal.SIGTERM, handler)
 
@@ -4651,7 +4705,7 @@ def build_metrics_snapshot(state: dict, state_path: pathlib.Path) -> dict:
                    for slot, raw in zip(("lead", "partner"), profiles)] if recorded
                   else _metrics_legacy_profiles(state),
         "turns": [_metrics_snapshot_turn(entry, state) for entry in history
-                  if entry.get("kind") != "kickoff"],
+                  if entry.get("kind") not in ("kickoff", _RESUME_REFUSED_KIND)],
         "verification": {"attempts": len(checks), "passed": sum(checks),
                          "failed": len(checks) - sum(checks)},
     }
@@ -5157,7 +5211,7 @@ def _has_approval_pair(history: list) -> bool:
 
 def _invoke_turn(cfg: DuetConfig, *, turn: int, label: str, speaker: Agent,
                  message: str, first_turn: bool, run_dir: pathlib.Path
-                 ) -> tuple[Optional[str], Optional[Exception], bool, float]:
+                 ) -> tuple[Optional[str], Optional[Exception], float]:
     started = time.monotonic()
     inflight = None
     if cfg.recap:
@@ -5169,11 +5223,8 @@ def _invoke_turn(cfg: DuetConfig, *, turn: int, label: str, speaker: Agent,
 
     reply = None
     error = None
-    call_started = False
     previous_session_id = speaker.session_id
     try:
-        guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn)
-        call_started = True
         reply = call_agent(speaker, message, cfg, first_turn_for_agent=first_turn,
                            run_dir=run_dir, turn_label=label)
         guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn)
@@ -5182,13 +5233,10 @@ def _invoke_turn(cfg: DuetConfig, *, turn: int, label: str, speaker: Agent,
         if reply is not None:
             # Retain the reply for diagnosis, but discard its unsafe resume handle.
             speaker.session_id = previous_session_id
-        if not call_started:
-            speaker.last_call_metrics = {}
-            speaker.last_tool_denials = None
     finally:
         if inflight is not None:
             _stop_recap_inflight(*inflight)
-    return reply, error, call_started, time.monotonic() - started
+    return reply, error, time.monotonic() - started
 
 
 def _turn_recap(cfg: DuetConfig, turn: int, speaker: Agent, elapsed: float,
@@ -5212,6 +5260,20 @@ def _turn_recap(cfg: DuetConfig, turn: int, speaker: Agent, elapsed: float,
     return block
 
 
+def _resume_refusal_entry(speaker: Agent, error: AgentRunError, label: str,
+                          forced: bool = False) -> dict:
+    entry = {
+        "kind": _RESUME_REFUSED_KIND,
+        "agent": speaker.name,
+        "turn_label": label,
+        "finished_reason": error.finished_reason,
+        "error": _bounded_agent_error_excerpt(str(error)),
+    }
+    if forced:
+        entry["forced"] = True
+    return entry
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
@@ -5228,6 +5290,25 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     whether to stop or rotate. Stop-flag and speaker-rotation checks stay in the
     caller — this handles only the mechanics of one turn.
     """
+    first_turn_for_agent = not seen_first_turn[speaker.name]
+    label = f"{turn:02d}-forced" if forced else f"{turn:02d}"
+    try:
+        guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
+    except AgentRunError as error:
+        failure_reason = error.finished_reason
+        reply = _agent_failure_block(failure_reason, error, label, speaker, run_dir,
+                                     call_started=False)
+        log(speaker.name, speaker.role, reply, kind="forced" if forced else "setup_error")
+        history.append(_resume_refusal_entry(speaker, error, label, forced))
+        state = _build_run_state(
+            cfg, turns_used=turn - 1, history=history, finished_reason=failure_reason,
+            transcript_path=transcript_path, recap_path=recap_path,
+            last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+        )
+        _write_run_state(state_path, state)
+        print(reply, file=sys.stderr)
+        return _TurnResult(reply, False, failure_reason, last_verify_state)
+
     running_state = _build_run_state(
         cfg,
         turns_used=turn - 1,
@@ -5241,9 +5322,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         phase="turn_running",
     )
     _write_run_state(state_path, running_state)
-    first_turn_for_agent = not seen_first_turn[speaker.name]
-    label = f"{turn:02d}-forced" if forced else f"{turn:02d}"
-    output, error, call_started, elapsed = _invoke_turn(
+    output, error, elapsed = _invoke_turn(
         cfg, turn=turn, label=label, speaker=speaker, message=last_msg,
         first_turn=first_turn_for_agent, run_dir=run_dir,
     )
@@ -5255,8 +5334,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         seen_first_turn[speaker.name] = True
     else:
         failure_reason = _agent_finished_reason(error)
-        failure_block = _agent_failure_block(failure_reason, error, label, speaker, run_dir,
-                                             call_started=call_started)
+        failure_block = _agent_failure_block(failure_reason, error, label, speaker, run_dir)
         raw_reply = f"{output}\n\n{failure_block}" if output else failure_block
         if cfg.recap and failure_reason != FINISHED_SETUP_ERROR:
             print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
@@ -5287,8 +5365,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     if error is not None:
         history_entry["finished_reason"] = failure_reason
         history_entry["error"] = _bounded_agent_error_excerpt(str(error))
-        if call_started:
-            history_entry["stderr_log_path"] = str(run_dir / stderr_log_name)
+        history_entry["stderr_log_path"] = str(run_dir / stderr_log_name)
     if verify_state is not None:
         history_entry["verify"] = verify_state
     if revision is not None:
@@ -5436,27 +5513,27 @@ def _derive_seed_or_failure(
             return None, state
         failure_reason = _agent_finished_reason(e)
         seed_agent = cfg.agents[0]
-        call_started = failure_reason != FINISHED_SETUP_ERROR
+        resume_refused = isinstance(e, AgentRunError) and failure_reason == FINISHED_SETUP_ERROR
         reply = _agent_failure_block(
             failure_reason, e, "00-extract", seed_agent, run_dir,
-            call_started=call_started,
+            call_started=not resume_refused,
         )
-        log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
-        entry = {
-            "turn": 0,
-            "agent": seed_agent.name,
-            "kind": "seed_extract",
-            "elapsed_s": time.monotonic() - seed_t0,
-            "metrics": _record_turn_metrics(seed_agent, "", reply, False, cfg),
-            "len_chars": len(reply),
-            "session_id": seed_agent.session_id,
-            "finished_reason": failure_reason,
-            "error": _bounded_agent_error_excerpt(str(e)),
-        }
-        if call_started:
-            entry["stderr_log_path"] = str(
-                run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
-            )
+        log(seed_agent.name, seed_agent.role, reply, kind=failure_reason if resume_refused else "agent_error")
+        if resume_refused:
+            entry = _resume_refusal_entry(seed_agent, e, "00-extract")
+        else:
+            entry = {
+                "turn": 0,
+                "agent": seed_agent.name,
+                "kind": "seed_extract",
+                "elapsed_s": time.monotonic() - seed_t0,
+                "metrics": _record_turn_metrics(seed_agent, "", reply, False, cfg),
+                "len_chars": len(reply),
+                "session_id": seed_agent.session_id,
+                "finished_reason": failure_reason,
+                "error": _bounded_agent_error_excerpt(str(e)),
+                "stderr_log_path": str(run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"),
+            }
         history.append(entry)
         state = _build_run_state(
             cfg, turns_used=0, history=history, finished_reason=failure_reason,
@@ -6640,7 +6717,7 @@ _STATUS_AGENT_NAME_RE = re.compile(r"[\w.:-]{1,128}")
 
 def _status_history_turn(item: object) -> Optional[dict]:
     """Sanitize one history entry for the public status contract."""
-    if not isinstance(item, dict):
+    if not isinstance(item, dict) or item.get("kind") == _RESUME_REFUSED_KIND:
         return None
     turn = item.get("turn")
     if not isinstance(turn, int) or isinstance(turn, bool):
@@ -7132,7 +7209,7 @@ def _finding_collect_history(state: dict, events: list[dict]) -> tuple[dict, lis
     slots = _finding_slot_map(state)
     truncated = len(history) > _FINDING_EVENT_LIMIT
     for entry in history[:_FINDING_EVENT_LIMIT]:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("kind") == _RESUME_REFUSED_KIND:
             continue
         agent_name = entry.get("agent")
         slot = slots.get(agent_name) if isinstance(agent_name, str) else None

@@ -286,12 +286,13 @@ Convergence is pair agreement, not an independent review. `CONVERGENCE_INSTRUCTI
 ### Subprocess plumbing (`_run`)
 
 `subprocess.Popen` uses `start_new_session=True` to give each child its own
-process group. One selector feeds stdin, drains both output pipes, and checks
-the timeout without blocking on an unread prompt. Live stderr and any enabled
-stdout mirror use `LIVE_PREFIX = "  │ "` per line. Captured stderr also goes to
-the per-turn log. Quiet heartbeats stop when the child exits. After exit, Duet
-drains both pipes until EOF or one 250 ms deadline. Descendants that retain
-pipes cannot hold the turn open or append to the log after it returns.
+process group. One selector feeds stdin, drains both output pipes, and writes
+the stderr log. A separate watcher enforces the child deadline even during a
+slow log write. Duet joins the watcher before it reaps the child.
+The live mirror uses an independent nonblocking terminal descriptor.
+A full terminal can skip live output. Capture and the log keep those bytes.
+Quiet heartbeats stop when the child exits. Duet drains the pipes up to one
+shared 250 ms deadline after exit, then closes them and the stderr log.
 Duet writes the PID file atomically at startup and removes it on return.
 `_terminate_active_processes(SIGKILL)` signals tracked child process groups on
 the second Ctrl-C. Immediate stop signals only the validated supervisor, whose

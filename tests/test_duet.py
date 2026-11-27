@@ -17,14 +17,18 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import fcntl
 import io
 import json
+import os
 import pathlib
+import pty
 import re
 import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -2880,6 +2884,87 @@ class TestChildProcessIO(unittest.TestCase):
             self.assertEqual((rc, stdout), (124, "ready\n"))
             self.assertIn("TIMEOUT", stderr)
             self.assertFalse(pid_path.exists())
+
+    def test_child_deadline_survives_blocked_sidecar_write(self) -> None:
+        class SlowLog(io.StringIO):
+            content = ""
+            stalled = False
+
+            def write(self, text):
+                if text == "ready\n":
+                    self.stalled = True
+                    time.sleep(0.85)
+                return super().write(text)
+
+            def close(self):
+                self.content = self.getvalue()
+                super().close()
+
+        script = (
+            "import pathlib, sys, time; "
+            "print('ready', file=sys.stderr, flush=True); "
+            "time.sleep(.6); pathlib.Path('too-late').touch()"
+        )
+        log = SlowLog()
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            with mock.patch.object(duet, "open", return_value=log, create=True):
+                rc, _, stderr = duet._run([sys.executable, "-c", script], cwd=cwd,
+                                          stdin=None, timeout=0.35, stderr_log_path=cwd / "stderr.log")
+            self.assertTrue(log.stalled)
+            self.assertEqual(rc, 124)
+            self.assertFalse((cwd / "too-late").exists())
+            self.assertIn("ready\n", stderr)
+            self.assertTrue(log.content.endswith("ready\n"))
+
+    def test_full_terminal_preserves_deadline_capture_and_stderr_flags(self) -> None:
+        master, slave = pty.openpty()
+        try:
+            with os.fdopen(slave, "w", encoding="utf-8") as original, \
+                    os.fdopen(os.dup(original.fileno()), "w", encoding="utf-8") as alias, \
+                    tempfile.TemporaryDirectory() as temp:
+                cwd = pathlib.Path(temp)
+                flags = fcntl.fcntl(alias.fileno(), fcntl.F_GETFL)
+                helper = """\nimport contextlib, fcntl, os, pathlib, sys, threading
+import duet
+with os.fdopen(int(sys.argv[1]), "w", encoding="utf-8") as tty:
+    flags = fcntl.fcntl(tty.fileno(), fcntl.F_GETFL)
+    with contextlib.redirect_stderr(tty):
+        result = duet._run(
+            [sys.executable, "-c", sys.argv[2]], cwd=pathlib.Path.cwd(),
+            stdin=None, timeout=.4, stderr_log_path=pathlib.Path("trace.log"),
+            mirror_stdout=True, live_prefix="prefix ",
+        )
+    assert result[0] == 124, result[0]
+    assert result[1] == "stdout record\\n"
+    assert result[2].startswith("stderr record\\n" * 8000)
+    assert pathlib.Path("trace.log").read_text().endswith("stderr record\\n" * 8000)
+    assert not pathlib.Path("too-late").exists()
+    assert fcntl.fcntl(tty.fileno(), fcntl.F_GETFL) == flags
+    assert not any(t.name == "duet-child-deadline" for t in threading.enumerate())
+"""
+                script = (
+                    "import pathlib, sys, time; print('stdout record', flush=True); "
+                    "time.sleep(.05); sys.stderr.write('stderr record\\n' * 8000); sys.stderr.flush(); "
+                    "time.sleep(.7); pathlib.Path('too-late').touch()"
+                )
+                subprocess.run([sys.executable, "-c", helper, str(alias.fileno()), script],
+                               cwd=cwd, env={**os.environ, "PYTHONPATH": str(_ROOT)},
+                               pass_fds=(alias.fileno(),), check=True, timeout=5)
+                self.assertEqual(fcntl.fcntl(original.fileno(), fcntl.F_GETFL), flags)
+                os.set_blocking(master, False)
+                self.assertIn(b"prefix stdout record", os.read(master, 65536))
+        finally:
+            os.close(master)
+
+    def test_fast_non_terminal_call_joins_deadline_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            rc, out, err = duet._run([sys.executable, "-c", "print('ok')"],
+                                     cwd=pathlib.Path(temp), stdin=None, timeout=60,
+                                     mirror_stdout=True)
+        self.assertEqual((rc, out, err), (0, "ok\n", ""))
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertFalse(any(thread.name == "duet-child-deadline" for thread in threading.enumerate()))
 
     def test_captures_delayed_descendant_output_within_drain_window(self) -> None:
         grandchild = """

@@ -609,7 +609,9 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
                 self.assertTrue(all("resume" not in cmd for cmd in calls))
                 self.assertEqual(saved["phase"], "finished")
                 self.assertEqual(saved["finished_reason"], "setup_error")
+                self.assertEqual(saved["turns_used"], len(answers))
                 self.assertEqual(entry["finished_reason"], "setup_error")
+                self.assertIn("cannot safely continue codex/codex", entry["error"])
                 self.assertIn("cannot safely continue codex/codex", transcript)
                 self.assertNotIn("approval_revision", entry)
                 self.assertNotIn("finding_updates", entry)
@@ -617,17 +619,22 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
                     self.assertTrue(entry["forced"])
                     self.assertIn("human — force-feedback", transcript)
                     self.assertEqual(saved["agents"][1]["session_id"], self.UUID)
+                parser = duet._build_arg_parser()
+                args = parser.parse_args(["--continue", str(run)])
+                restored = duet.build_continue_config(str(run), args, parser, {})
                 if case.endswith("after"):
                     self.assertIn(self.REPLY, transcript)
                     self.assertIn("backend diagnostic", pathlib.Path(entry["stderr_log_path"]).read_text())
                     self.assertIsNone(entry["session_id"])
                     slot = 0 if case.startswith("force") else 1
                     self.assertIsNone(saved["agents"][slot]["session_id"])
-                    parser = duet._build_arg_parser()
-                    args = parser.parse_args(["--continue", str(run)])
-                    self.assertIsNone(duet.build_continue_config(str(run), args, parser, {}).agents[slot].session_id)
+                    self.assertIsNone(restored.agents[slot].session_id)
+                    self.assertEqual(restored.start_speaker_idx, 1 - slot)
                 else:
                     self.assertNotIn("stderr_log_path", entry)
+                    self.assertEqual(entry["kind"], "resume_refused")
+                    self.assertNotIn("turn", entry)
+                    self.assertEqual(restored.start_speaker_idx, 0 if case == "force-before" else 1)
                 status_output = io.StringIO()
                 with mock.patch.object(duet.sys, "argv", ["duet", "--status", str(run), "--json"]), \
                         contextlib.redirect_stdout(status_output):
@@ -635,6 +642,46 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
                 status = json.loads(status_output.getvalue())
                 self.assertEqual(status["health"], "terminal")
                 self.assertEqual(status["finished_reason"], "setup_error")
+                self.assertEqual(status["turns_used"], len(answers))
+                completed = status["last_completed_turn"]
+                if answers:
+                    self.assertEqual(completed["turn"], len(answers))
+                    self.assertEqual(completed["agent"], "lead" if case == "force-after" else "partner")
+                    self.assertEqual(completed["finished_reason"],
+                                     "setup_error" if case.endswith("after") else None)
+                else:
+                    self.assertIsNone(completed)
+                with mock.patch.object(duet, "_metrics_project_id", return_value="a" * 64):
+                    metrics = duet.build_metrics_snapshot(saved, run / "state.json")
+                self.assertEqual(len(metrics["turns"]), len(answers))
+                coverage = duet.build_finding_report(saved)["structured_turns"]
+                self.assertEqual(coverage["failed"], int(case.endswith("after")))
+
+    def test_continue_retries_the_uncalled_peer_after_cwd_isolation(self) -> None:
+        for case, slot in (("loop-before", "partner"), ("force-before", "lead")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw).resolve()
+                answers = ([(0, "first reply", f"session id: {self.UUID}\n")]
+                           if case == "force-before" else [])
+                previous = self._run_cli(root, case, answers, [])
+                peer_dir = root / "isolated"
+                peer_dir.mkdir()
+                args = ["duet", "--continue", str(previous), "--turns", "1", "--no-metrics",
+                        "--worktree-path", str(peer_dir), "--worktree-for", slot,
+                        "--runs-dir", str(root / "resumed"), "--quiet"]
+                with mock.patch.object(duet.sys, "argv", args), \
+                        mock.patch.object(duet, "_register_run_in_home_index"), \
+                        mock.patch.object(duet, "_run", return_value=(0, "resumed reply", "")) as run, \
+                        mock.patch.object(duet.sys.stdin, "isatty", return_value=False), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(duet.main(), 0)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][:4], ["codex", "exec", "resume", "--last"])
+                self.assertEqual(run.call_args.kwargs["cwd"], peer_dir)
+                state_path = next((root / "resumed").glob("*/state.json"))
+                resumed = json.loads(state_path.read_text())
+                self.assertEqual(resumed["finished_reason"], "max_turns")
+                self.assertEqual(resumed["history"][0]["agent"], slot)
 
 
 class TestStatusSchema(unittest.TestCase):
