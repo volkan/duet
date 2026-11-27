@@ -768,47 +768,40 @@ class VerifyResult:
 
 # ---------- active child process tracking ----------
 
-_ACTIVE_PROCS: set[subprocess.Popen] = set()
+# True means only the deadline watcher may poll while the child is registered.
+_ACTIVE_PROCS: dict[subprocess.Popen, bool] = {}
 # A signal handler can interrupt the main thread inside this lock and re-enter it.
 _ACTIVE_PROCS_LOCK = threading.RLock()
 
 
-def _register_proc(proc: subprocess.Popen) -> None:
+def _register_proc(proc: subprocess.Popen, *, watched: bool = False) -> None:
     with _ACTIVE_PROCS_LOCK:
-        _ACTIVE_PROCS.add(proc)
+        _ACTIVE_PROCS[proc] = watched
 
 
 def _unregister_proc(proc: subprocess.Popen) -> None:
     with _ACTIVE_PROCS_LOCK:
-        _ACTIVE_PROCS.discard(proc)
-
-
-def _child_has_exited(proc: subprocess.Popen) -> bool:
-    if proc.returncode is not None:
-        return True
-    try:
-        # Retain the child PID until the deadline watcher has stopped.
-        status = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-    except ChildProcessError:
-        return True
-    return status is not None and status.si_pid != 0
+        _ACTIVE_PROCS.pop(proc, None)
 
 
 def _signal_proc_tree(proc: subprocess.Popen, sig: int) -> None:
     with _ACTIVE_PROCS_LOCK:
-        if _child_has_exited(proc):
+        watched = _ACTIVE_PROCS.get(proc)
+        if watched is None:
+            return
+        if (proc.returncode if watched else proc.poll()) is not None:
             return
         try:
             if hasattr(os, "killpg"):
                 os.killpg(proc.pid, sig)
             else:
-                proc.send_signal(sig)
+                os.kill(proc.pid, sig)
         except ProcessLookupError:
             pass
-        except Exception:
+        except OSError:
             try:
-                proc.kill()
-            except Exception:
+                os.kill(proc.pid, signal.SIGKILL)
+            except OSError:
                 pass
 
 
@@ -1247,17 +1240,25 @@ class _ChildDeadline:
     expires_at: float
     finished: threading.Event = dataclasses.field(default_factory=threading.Event)
     expired: bool = False
+    error: Optional[Exception] = None
 
     def watch(self) -> None:
-        if self.finished.wait(max(0, self.expires_at - time.monotonic())):
-            return
-        with _ACTIVE_PROCS_LOCK:
-            if _child_has_exited(self.proc):
-                return
-            self.expired = True
-            _signal_proc_tree(self.proc, signal.SIGTERM)
-        if not self.finished.wait(_CHILD_TERM_GRACE):
-            _signal_proc_tree(self.proc, signal.SIGKILL)
+        signal_at = self.expires_at
+        try:
+            while not self.finished.is_set():
+                with _ACTIVE_PROCS_LOCK:
+                    if self.proc.poll() is not None:
+                        return
+                    now = time.monotonic()
+                    if now >= signal_at:
+                        _signal_proc_tree(self.proc, signal.SIGKILL if self.expired else signal.SIGTERM)
+                        signal_at = math.inf if self.expired else now + _CHILD_TERM_GRACE
+                        self.expired = True
+                self.finished.wait(min(_CHILD_POLL_INTERVAL, max(0, signal_at - time.monotonic())))
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self.finished.set()
 
 
 class _ChildOutput:
@@ -1328,7 +1329,7 @@ def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threa
             selector.register(proc.stdin, selectors.EVENT_WRITE)
         else:
             proc.stdin.close()
-        while not _child_has_exited(proc):
+        while not finished.is_set():
             now = time.monotonic()
             if now >= next_heartbeat:
                 _mirror_child_output(
@@ -1342,7 +1343,6 @@ def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threa
                     data = _write_child_stdin(selector, key.fileobj, data)
                 elif _read_child_output(selector, key.fileobj, key.data):
                     next_heartbeat = time.monotonic() + _CHILD_HEARTBEAT_INTERVAL
-        finished.set()
         if not proc.stdin.closed:
             selector.unregister(proc.stdin)
             proc.stdin.close()
@@ -1415,7 +1415,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
             )
         except FileNotFoundError:
             return 127, "", f"[duet] command not found: {cmd[0]}"
-        _register_proc(proc)
+        _register_proc(proc, watched=True)
         deadline = _ChildDeadline(proc, time.monotonic() + timeout)
         worker = threading.Thread(target=deadline.watch, name="duet-child-deadline", daemon=True)
         try:
@@ -1438,10 +1438,12 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: fl
             if worker.ident is not None:
                 worker.join()
             _signal_proc_tree(proc, signal.SIGKILL)
-            rc = proc.wait()
             _unregister_proc(proc)
+            rc = proc.wait()
             for stream in (proc.stdin, proc.stdout, proc.stderr):
                 stream.close()
+        if deadline.error is not None:
+            raise deadline.error
         if deadline.expired:
             rc = 124
             stderr.chunks.append(f"\n[duet] TIMEOUT after {timeout}s")

@@ -25,6 +25,7 @@ import pathlib
 import pty
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -2956,6 +2957,48 @@ with os.fdopen(int(sys.argv[1]), "w", encoding="utf-8") as tty:
                 self.assertIn(b"prefix stdout record", os.read(master, 65536))
         finally:
             os.close(master)
+
+    def test_stop_waits_for_watcher_to_publish_exit(self) -> None:
+        poll_started = threading.Event()
+        publish_exit = threading.Event()
+        stop_started = threading.Event()
+        stop_returned = threading.Event()
+        proc = mock.Mock(returncode=None)
+
+        def poll():
+            poll_started.set()
+            if not publish_exit.wait(3):
+                raise AssertionError("test did not release the watcher")
+            proc.returncode = 0
+            return proc.returncode
+
+        def stop():
+            stop_started.set()
+            duet._signal_proc_tree(proc, signal.SIGKILL)
+            stop_returned.set()
+
+        proc.poll.side_effect = poll
+        deadline = duet._ChildDeadline(proc, time.monotonic() + 60)
+        watcher = threading.Thread(target=deadline.watch)
+        stopper = threading.Thread(target=stop)
+        duet._register_proc(proc, watched=True)
+        with mock.patch.object(duet.os, "killpg") as killpg:
+            try:
+                watcher.start()
+                self.assertTrue(poll_started.wait(3))
+                stopper.start()
+                self.assertTrue(stop_started.wait(3))
+                self.assertFalse(stop_returned.wait(0.05))
+            finally:
+                publish_exit.set()
+                watcher.join(timeout=3)
+                if stopper.ident is not None:
+                    stopper.join(timeout=3)
+                duet._unregister_proc(proc)
+            self.assertTrue(stop_returned.is_set())
+            self.assertTrue(deadline.finished.is_set())
+            self.assertIsNone(deadline.error)
+            killpg.assert_not_called()
 
     def test_fast_non_terminal_call_joins_deadline_worker(self) -> None:
         with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stderr(io.StringIO()) as stderr:

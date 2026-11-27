@@ -288,7 +288,9 @@ Convergence is pair agreement, not an independent review. `CONVERGENCE_INSTRUCTI
 `subprocess.Popen` uses `start_new_session=True` to give each child its own
 process group. One selector feeds stdin, drains both output pipes, and writes
 the stderr log. A separate watcher enforces the child deadline even during a
-slow log write. Duet joins the watcher before it reaps the child.
+slow log write. The watcher polls and reaps registered turn children.
+It holds the process registry lock while it polls or signals a group.
+The supervisor joins the watcher and unregisters the child before its final wait.
 The live mirror uses an independent nonblocking terminal descriptor.
 A full terminal can skip live output. Capture and the log keep those bytes.
 Quiet heartbeats stop when the child exits. Duet drains the pipes up to one
