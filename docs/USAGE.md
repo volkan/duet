@@ -148,6 +148,13 @@ and paste the command and output.
 
 `--task` and `--kickoff` accept literal text, `@file`, or `@-` for stdin. `--task-from-cmd` runs a shell command in the target `--cwd` and uses stdout as the kickoff task, while streaming the command's stderr live.
 
+Duet sends combined prompts over 64 KiB through standard input for Codex,
+Gemini, Copilot, and OpenCode. Gemini CLI limits this input to 8 MiB.
+Claude always receives the partner message through standard input. Duet uses
+a private temporary file for Claude system prompts over 64 KiB. ZCode uses one
+native argument. Its size limit depends on the platform and environment. See
+[ZCode](ZCODE.md) for the error and available options.
+
 Canonical recipes:
 
 ```bash
@@ -695,7 +702,7 @@ worktree gated by `verify_cmd`.
 | `--allow-worktree-fallback` | allow the legacy same-repo fallback; overrides the review recipe's strict setting |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior. OpenCode v2 peers instead get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, because v2 resolves git-worktree sessions to the main checkout |
-| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. A per-agent `reasoning_effort` in a `--config` file overrides this value for that agent. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>` — an unknown variant is a model-resolution error there, so an unsupported level fails that turn instead of running at another effort — and a v2 peer without an explicit model gets only the prompt prefix plus a one-line note. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
+| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. A per-agent `reasoning_effort` in a `--config` file overrides this value for that agent. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>` — an unknown variant is a model-resolution error there, so an unsupported level fails that turn instead of running at another effort — A v2 peer without an explicit model keeps native reasoning. Only high, xhigh, and max add prompt guidance. Duet prints a note in this case. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
@@ -736,7 +743,7 @@ The snapshot is written best effort to `~/.duet/metrics/runs/<UUID>.json` using
 an atomic replace. It contains the duet version, bounded backend CLI version
 probes, role, requested model, CLI-reported model when available, reasoning
 requested/effective/backend values and transport, fast-mode effects, turn
-budget, timing fields, prompt/output/handoff byte counts, and optional
+budget, timing fields, per-turn prompt transport, prompt/output/handoff byte counts, and optional
 provider-reported token and USD cost data. Missing values remain unknown and
 are accompanied by coverage information. Codex remains on its current text
 transport: absent actual-model, token, and cost metadata stays unknown. Duet

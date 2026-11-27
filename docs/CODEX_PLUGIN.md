@@ -181,8 +181,8 @@ another model.
 For OpenCode peers, use `provider/model` without a `#variant` suffix.
 Duet rejects that suffix. Set `--reasoning` or the agent's `reasoning_effort`
 instead. OpenCode v2 needs an explicit model to receive a backend effort
-argument. Without one, it receives only the prompt prefix and Duet prints a
-note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
+argument. Without a model, v2 uses native reasoning. Only high, xhigh, and max
+add prompt guidance. Duet prints a note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
 Preserve the requested effort when reporting this limit.
 For OpenCode clone placement and cleanup, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 

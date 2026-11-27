@@ -313,9 +313,9 @@ another model. OpenCode model IDs use the `provider/model` form. Duet rejects
 a `#variant` suffix in that ID; report the validation error without changing
 the user's selection. Use `reasoning_effort` or `--reasoning` for effort.
 OpenCode v1 receives `--variant <level>`. OpenCode v2 needs an explicit model
-to receive effort through `-m provider/model#<level>`. Without a model, v2 gets
-only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
-nudges; the other levels have no prompt nudge.
+to receive effort through `-m provider/model#<level>`. Without a model, v2 uses
+native reasoning and Duet prints a note. Only high, xhigh, and max add prompt
+guidance.
 Report this effort limit without inventing a model or changing the requested effort.
 
 When the user requests effort for an explicit OpenCode v2 peer model, inspect

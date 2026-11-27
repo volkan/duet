@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import io
 import json
 import importlib.util
@@ -163,6 +164,35 @@ class ZCodeBackendTests(unittest.TestCase):
         self.assertIn("\n[duet] hint: ZCode has no usable model.", str(caught.exception))
         self.assertFalse(paths[0].exists())
         self.assertIsNone(self.agent.zcode_selection)
+
+    def test_oversized_prompt_reports_os_limit_without_logging_the_prompt(self):
+        content = "synthetic prompt marker" * 100_000
+        real_run = duet._run
+
+        def run(command, **kwargs):
+            self.assertEqual(command[command.index("--mode") + 1], "plan")
+            self.assertEqual(command[command.index("--resume") + 1], "sess_abc")
+            self.assertIn("Bash", command[command.index("--disallowed-tools") + 1].split(","))
+            prompt = command[command.index("--prompt") + 1]
+            self.assertTrue(prompt.endswith(content))
+            return real_run([sys.executable, "-c", "pass", prompt], **kwargs)
+
+        self.agent.session_id = "sess_abc"
+        self.agent.zcode_selection = {"model": self.agent.model, "reasoning": "max"}
+        with mock.patch.object(duet, "_run", side_effect=run):
+            with self.assertRaises(duet.AgentRunError) as caught:
+                self.invoke(message=content)
+        self.assertEqual(caught.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+        self.assertIn("argument limit", str(caught.exception))
+        self.assertNotIn("synthetic prompt marker", str(caught.exception))
+        self.assertEqual(self.agent.zcode_selection, {"model": self.agent.model, "reasoning": "max"})
+
+    def test_other_os_launch_errors_keep_their_diagnostic(self):
+        denied = PermissionError(errno.EACCES, "permission denied")
+        with mock.patch.object(duet, "_run", side_effect=denied):
+            with self.assertRaisesRegex(duet.AgentRunError, "permission denied") as caught:
+                self.invoke()
+        self.assertNotIn("argument limit", str(caught.exception))
 
     def test_login_failures_add_sign_in_hint(self):
         for marker, expected in (("project_token_login_failed", "could not get a project token"),

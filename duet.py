@@ -48,10 +48,13 @@ Stdlib only. Python 3.9+.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
+import io
 import json
 import math
 import os
@@ -1181,95 +1184,135 @@ LIVE_PREFIX_TASK = "  $ "
 RECAP_MODE = False
 
 
-def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
-                   tee_to=None, activity_event=None):
-    """Drain a pipe line-by-line, capture into `sink`, optionally mirror live and/or tee to file.
+_CHILD_POLL_INTERVAL = 0.1
+_CHILD_DRAIN_TIMEOUT = 0.25
+_CHILD_IO_CHUNK = 64 * 1024
+_CHILD_HEARTBEAT_INTERVAL = 20
 
-    `mirror_to` is a writable text stream (typically sys.stderr) that the
-    line is echoed to with `prefix`. `tee_to` is an open file handle that
-    receives the raw line — used to persist the live stream for post-hoc
-    forensics. `activity_event`, if given, is `set()` on every received
-    line so a heartbeat thread can detect "subprocess went quiet". All
-    parameters are optional.
-    """
-    try:
-        for line in iter(stream.readline, ""):
-            sink.append(line)
-            if activity_event is not None:
-                activity_event.set()
-            if mirror_to is not None:
-                try:
-                    mirror_to.write(prefix + line if prefix else line)
-                    mirror_to.flush()
-                except Exception:
-                    pass
-            if tee_to is not None:
-                try:
-                    tee_to.write(line)
-                    tee_to.flush()
-                except Exception:
-                    pass
-    finally:
+
+def _write_live_output(target, text: str) -> None:
+    if target is not None:
         try:
-            stream.close()
+            target.write(text)
+            target.flush()
         except Exception:
             pass
 
 
-def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
-                     activity_event, interval: int = 20,
-                     prefix: str = LIVE_PREFIX) -> None:
-    """Print "[duet] still working…" when a subprocess goes quiet.
+class _ChildOutput:
+    def __init__(self, mirror, prefix: str, tee=None):
+        self.decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")("replace"), True)
+        self.chunks: list[str] = []
+        self.pending_line: list[str] = []
+        self.mirror = mirror
+        self.prefix = prefix
+        self.tee = tee
 
-    Most subprocesses emit rich stderr live (codex, gh, npm). Some don't
-    — `claude -p` is silent on stderr during the API call, so a long
-    seed-extract or claude turn can look like duet has hung. This thread
-    waits on `activity_event`; if no activity for `interval` seconds AND
-    the subprocess is still alive, it prints elapsed time and resets.
-    Mirrors duet's own stderr so it interleaves with live output.
-    """
-    if mirror_to is None:
-        return
-    while proc.poll() is None:
-        if activity_event.wait(timeout=interval):
-            activity_event.clear()
-            continue
-        if proc.poll() is not None:
-            return
-        try:
-            elapsed = int(time.monotonic() - start_monotonic)
-            mirror_to.write(f"{prefix}[duet] still working… ({elapsed}s; "
-                            "subprocess silent — typical for `claude -p`)\n")
-            mirror_to.flush()
-        except Exception:
-            return
+    def _mirror_lines(self, text: str, final: bool) -> None:
+        lines = text.split("\n")
+        for line in lines[:-1]:
+            rendered = "".join(self.pending_line) + line + "\n"
+            self.pending_line.clear()
+            _write_live_output(self.mirror, self.prefix + rendered)
+        self.pending_line.append(lines[-1])
+        if final and (tail := "".join(self.pending_line)):
+            _write_live_output(self.mirror, self.prefix + tail)
+
+    def capture(self, data: bytes, *, final: bool = False) -> None:
+        text = self.decoder.decode(data, final)
+        self.chunks.append(text)
+        _write_live_output(self.tee, text)
+        if self.mirror is not None:
+            self._mirror_lines(text, final)
 
 
 def _live_stream_target(enabled: bool = True):
     return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
 
 
-def _feed_stdin(proc: subprocess.Popen, text: Optional[str]) -> None:
-    """Write `text` to the child and close its stdin.
-
-    Runs on its own thread: a child that stalls before reading would block a
-    large write, and the caller must already be waiting with its timeout.
-    """
-    if proc.stdin is None:
-        return
+def _write_child_stdin(selector, stream, data: memoryview) -> memoryview:
     try:
-        if text is not None:
-            proc.stdin.write(text)
-    except (OSError, ValueError):
-        pass
-    finally:
-        try:
+        count = os.write(stream.fileno(), data[:_CHILD_IO_CHUNK])
+        data = data[count:]
+    except BrokenPipeError:
+        data = data[:0]
+    except BlockingIOError:
+        return data
+    if not data:
+        selector.unregister(stream)
+        stream.close()
+    return data
+
+
+def _read_child_output(selector, stream, output: _ChildOutput) -> bool:
+    try:
+        chunk = os.read(stream.fileno(), _CHILD_IO_CHUNK)
+    except BlockingIOError:
+        return False
+    if chunk:
+        output.capture(chunk)
+        return True
+    selector.unregister(stream)
+    return False
+
+
+def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], timeout: float,
+                   stdout: _ChildOutput, stderr: _ChildOutput) -> int:
+    start = time.monotonic()
+    deadline = start + timeout
+    next_heartbeat = start + _CHILD_HEARTBEAT_INTERVAL
+    did_timeout = False
+    data = memoryview((stdin or "").encode("utf-8", errors="replace"))
+    with selectors.DefaultSelector() as selector:
+        for stream, output in ((proc.stdout, stdout), (proc.stderr, stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, output)
+        if data:
+            os.set_blocking(proc.stdin.fileno(), False)
+            selector.register(proc.stdin, selectors.EVENT_WRITE)
+        else:
             proc.stdin.close()
-        except (OSError, ValueError):
-            pass
+        while proc.poll() is None:
+            now = time.monotonic()
+            if now >= deadline:
+                if did_timeout:
+                    _signal_proc_tree(proc, signal.SIGKILL)
+                    proc.wait()
+                    break
+                did_timeout = True
+                _signal_proc_tree(proc, signal.SIGTERM)
+                deadline = now + 2
+            if now >= next_heartbeat:
+                _write_live_output(
+                    stderr.mirror,
+                    f"{stderr.prefix}[duet] still working… ({int(now - start)}s; "
+                    "subprocess silent — typical for `claude -p`)\n")
+                next_heartbeat = now + _CHILD_HEARTBEAT_INTERVAL
+            delay = min(_CHILD_POLL_INTERVAL, deadline - now, next_heartbeat - now)
+            for key, _ in selector.select(delay):
+                if key.data is None:
+                    data = _write_child_stdin(selector, key.fileobj, data)
+                elif _read_child_output(selector, key.fileobj, key.data):
+                    next_heartbeat = time.monotonic() + _CHILD_HEARTBEAT_INTERVAL
+        if not proc.stdin.closed:
+            selector.unregister(proc.stdin)
+            proc.stdin.close()
+        # A descendant can keep a pipe open after the tracked child exits.
+        # Give inherited writers a shared drain window, even if a pipe is idle.
+        drain_until = time.monotonic() + _CHILD_DRAIN_TIMEOUT
+        while selector.get_map() and (remaining := drain_until - time.monotonic()) > 0:
+            for key, _ in selector.select(remaining):
+                _read_child_output(selector, key.fileobj, key.data)
+    for output in (stdout, stderr):
+        output.capture(b"", final=True)
+    if did_timeout:
+        stderr.chunks.append(f"\n[duet] TIMEOUT after {timeout}s")
+        return 124
+    return proc.returncode
 
 
-def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
+def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: float,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
          live_prefix: Optional[str] = None,
@@ -1299,8 +1342,6 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     mirror = _live_stream_target()
     stderr_mirror = _live_stream_target(mirror_stderr)
     prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
-    out_chunks: list[str] = []
-    err_chunks: list[str] = []
     stderr_file = None
     if stderr_log_path is not None:
         try:
@@ -1325,8 +1366,7 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                 cmd, cwd=str(cwd),
                 env=None if env_overrides is None else {**os.environ, **env_overrides},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
-                bufsize=1,  # line-buffered
+                bufsize=0,
                 start_new_session=True,
             )
         except FileNotFoundError:
@@ -1342,43 +1382,17 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
             except OSError as e:
                 print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
                       file=sys.stderr)
-        activity_event = threading.Event()
-        t_out = threading.Thread(target=_stream_reader,
-                                 args=(proc.stdout, out_chunks,
-                                       mirror if mirror_stdout else None,
-                                       prefix if mirror_stdout else "",
-                                       None, activity_event),
-                                 daemon=True)
-        t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, stderr_mirror, prefix,
-                                       stderr_file, activity_event),
-                                 daemon=True)
-        t_out.start(); t_err.start()
-        # Heartbeat: print elapsed-time hint when proc goes quiet (>20s no
-        # stderr/stdout). Useful for `claude -p`, which stays silent on
-        # stderr during the API call. No-op if mirror is None (--quiet).
-        t_hb = threading.Thread(target=_quiet_heartbeat,
-                                args=(proc, stderr_mirror, time.monotonic(), activity_event, 20, prefix),
-                                daemon=True)
-        t_hb.start()
-
-        t_in = threading.Thread(target=_feed_stdin, args=(proc, stdin), daemon=True)
-        t_in.start()
+        stdout = _ChildOutput(mirror if mirror_stdout else None, prefix)
+        stderr = _ChildOutput(stderr_mirror, prefix, stderr_file)
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _signal_proc_tree(proc, signal.SIGTERM)
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                _signal_proc_tree(proc, signal.SIGKILL)
-                proc.wait()
-            t_out.join(timeout=2); t_err.join(timeout=2); t_in.join(timeout=2)
-            return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
+            rc = _pump_child_io(proc, stdin, timeout, stdout, stderr)
         finally:
+            _signal_proc_tree(proc, signal.SIGKILL)
+            proc.wait()
             _unregister_proc(proc)
-        t_out.join(timeout=5); t_err.join(timeout=5); t_in.join(timeout=2)
-        return proc.returncode, "".join(out_chunks), "".join(err_chunks)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+        return rc, "".join(stdout.chunks), "".join(stderr.chunks)
     finally:
         if stderr_file is not None:
             try:
@@ -1462,9 +1476,12 @@ def _opencode_note_missing_model(agent: Agent, reasoning: str) -> None:
     if agent.name in _OPENCODE_VARIANT_NOTE_AGENTS:
         return
     _OPENCODE_VARIANT_NOTE_AGENTS.add(agent.name)
-    print(f"[duet] note: opencode v2 applies reasoning '{reasoning}' only through "
-          f"model#variant; agent '{agent.name}' has no model, so only the prompt "
-          "prefix carries the effort request", file=sys.stderr)
+    adapter = backend_adapter("opencode")
+    _, transport = _prompt_reasoning(adapter, reasoning)
+    prompt_note = " with prompt guidance" if transport == "prompt" else ""
+    print(f"[duet] note: opencode v2 needs an explicit model to select reasoning "
+          f"'{reasoning}' for agent '{agent.name}'; using native reasoning{prompt_note}",
+          file=sys.stderr)
 
 
 def _opencode_policy_content(config: dict, *, worktree_confined: bool = False) -> dict:
@@ -2333,8 +2350,22 @@ def _metrics_cli_version(binary: str) -> Optional[str]:
     return version
 
 
-def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
-        Optional[str], Optional[str], Optional[str], str, bool]:
+def _prompt_reasoning(adapter: BackendAdapter, effective: str) -> tuple[Optional[str], str]:
+    if adapter.reasoning_prompt_prefix.get(effective):
+        return effective, "prompt"
+    return None, "native_default"
+
+
+def _opencode_reasoning_major(cli_version: Optional[str]) -> Optional[int]:
+    if _OPENCODE_CLI_MAJOR is not None:
+        return _OPENCODE_CLI_MAJOR
+    match = re.match(r"([0-9]+)\.", cli_version or "")
+    return int(match.group(1)) if match else None
+
+
+def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig,
+                               cli_version: Optional[str] = None) -> tuple[
+        Optional[str], Optional[str], Optional[str], Optional[str], bool]:
     """Return requested/effective/backend reasoning and its transport."""
     requested = effective_reasoning(agent, cfg.reasoning)
     fast = bool(cfg.codex_fast and agent.backend == "codex" and agent.role == "coder")
@@ -2342,35 +2373,33 @@ def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
     if effective is None:
         return requested, None, None, "native_default", fast
     adapter = backend_adapter(agent.backend)
-    backend_value = adapter.reasoning_map.get(effective, effective)
+    if agent.backend == "opencode" and not agent.model:
+        major = _opencode_reasoning_major(cli_version)
+        if major is None:
+            return requested, None, None, None, fast
+        if major >= 2:
+            level, transport = _prompt_reasoning(adapter, effective)
+            return requested, level, None, transport, fast
     if agent.backend == "gemini":
-        if effective not in {"high", "xhigh", "max"}:
-            # Gemini has no effort flag, and its low/medium/minimal prefixes
-            # are empty. Reporting those as an effective setting would claim
-            # control the adapter did not exercise.
-            return requested, None, None, "native_default", fast
-        transport = "prompt"
-        backend_value = None
-    elif agent.backend == "zcode":
-        transport = "config_file"
-    elif agent.backend == "codex":
-        transport = "config_flag"
-    else:
-        transport = "flag"
+        level, transport = _prompt_reasoning(adapter, effective)
+        return requested, level, None, transport, fast
+    backend_value = adapter.reasoning_map.get(effective, effective)
+    transport = {"zcode": "config_file", "codex": "config_flag"}.get(agent.backend, "flag")
     return requested, effective, backend_value, transport, fast
 
 
 def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
                           probe_versions: bool = False) -> dict:
     """Return safe, non-secret backend metadata for one agent configuration."""
-    requested, effective, backend_value, transport, fast = _metrics_reasoning_profile(
-        agent, cfg,
-    )
     adapter = backend_adapter(agent.backend)
     version = None
     if (probe_versions and not cfg.dry_run
             and getattr(cfg, "metrics_enabled", True)):
         version = _metrics_cli_version(adapter.binary)
+    known_version = version or _METRICS_CLI_VERSION_CACHE.get(adapter.binary)
+    requested, effective, backend_value, transport, fast = _metrics_reasoning_profile(
+        agent, cfg, known_version,
+    )
     return {
         "backend": adapter.name,
         "role": agent.role if agent.role in _METRICS_BUILTIN_ROLES else "custom",
@@ -2383,10 +2412,21 @@ def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
         "fast_mode": fast,
         "extra_args_present": bool(agent.extra_args),
         "subagent_policy": "disabled",
-        "prompt_transport": (
-            "system_flag_and_message" if agent.backend == "claude" else "combined_prompt"
-        ),
+        "prompt_transport": None,
     }
+
+
+def _refresh_opencode_reasoning_metrics(agent: Agent, cfg: DuetConfig) -> None:
+    _, effective, value, transport, _ = _metrics_reasoning_profile(
+        agent, cfg, _METRICS_CLI_VERSION_CACHE.get("opencode"),
+    )
+    update = {"reasoning_effective": effective, "reasoning_backend_value": value,
+              "reasoning_transport": transport}
+    agent.last_call_metrics.update(update)
+    for peer, profile in zip(cfg.agents, cfg._metrics_context.get("agents", [])):
+        if peer is agent:
+            profile.update(update)
+            break
 
 
 def _metrics_nonnegative_int(value: object) -> Optional[int]:
@@ -2618,6 +2658,62 @@ def _record_tool_denials(entry: dict, denials: Optional[dict]) -> None:
         entry["tool_denials"] = dict(denials)
 
 
+# Linux can limit one argument independently of the total argv/environment size.
+_PROMPT_ARG_MAX_BYTES = 64 * 1024
+_GEMINI_PROMPT_STDIN_MAX_BYTES = 8 * 1024 * 1024
+_PROMPT_TRANSPORTS = ("combined_argv", "combined_stdin",
+                      "system_flag_and_message", "system_file_and_message")
+
+
+def _prompt_fits_argv(prompt: str) -> bool:
+    return len(prompt.encode("utf-8")) <= _PROMPT_ARG_MAX_BYTES and "\0" not in prompt
+
+
+def _combined_prompt_input(agent: Agent, prompt: str, *,
+                           argv_flags: tuple[str, ...] = (),
+                           stdin_flags: tuple[str, ...] = ()) -> tuple[list[str], Optional[str]]:
+    if _prompt_fits_argv(prompt):
+        agent.last_call_metrics["prompt_transport"] = "combined_argv"
+        return [*argv_flags, prompt], None
+    if agent.backend == "gemini" and len(prompt.encode("utf-8")) > _GEMINI_PROMPT_STDIN_MAX_BYTES:
+        raise AgentRunError(FINISHED_AGENT_ERROR, "Gemini CLI stdin accepts up to 8 MiB of prompt text")
+    agent.last_call_metrics["prompt_transport"] = "combined_stdin"
+    return list(stdin_flags), prompt
+
+
+@contextlib.contextmanager
+def _claude_system_prompt_args(agent: Agent, system_prompt: str):
+    if _prompt_fits_argv(system_prompt):
+        agent.last_call_metrics["prompt_transport"] = "system_flag_and_message"
+        yield ["--append-system-prompt", system_prompt]
+    else:
+        with tempfile.TemporaryDirectory(prefix="duet-claude-") as directory:
+            path = pathlib.Path(directory) / "system-prompt.txt"
+            path.touch(mode=0o600)
+            path.write_text(system_prompt, encoding="utf-8")
+            agent.last_call_metrics["prompt_transport"] = "system_file_and_message"
+            yield ["--append-system-prompt-file", str(path)]
+
+
+def _parse_claude_turn(stdout: str) -> dict:
+    try:
+        payload = json.loads(stdout)
+    except ValueError as exc:
+        raise AgentRunError(FINISHED_AGENT_ERROR,
+                            f"claude returned malformed JSON output: {stdout[:500].strip()!r}") from exc
+    if not isinstance(payload, dict):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON result must be an object")
+    if payload.get("is_error") is True:
+        result = payload.get("result")
+        detail = f": {result[:500].strip()}" if isinstance(result, str) and result.strip() else ""
+        raise AgentRunError(FINISHED_AGENT_ERROR, f"claude reported is_error=true{detail}")
+    if "is_error" in payload and not isinstance(payload["is_error"], bool):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON is_error must be a boolean")
+    if not isinstance(payload.get("result"), str):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON result must contain text in result")
+    return payload
+
+
 def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
                 reasoning: Optional[str] = None,
@@ -2645,7 +2741,6 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         ), new_sid
     cmd = ["claude", "-p",
            "--output-format", "json",
-           "--append-system-prompt", system_prompt,
            "--permission-mode", perm_mode,
            *reasoning_args,
            "--add-dir", str(eff_cwd)]
@@ -2658,32 +2753,27 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd += ["--resume", agent.session_id]
     if agent.model:
         cmd += ["--model", agent.model]
-    cmd += _delegation_safe_extra_args(agent)
-    rc, out, err = _agent_run(
-        cmd,
-        backend="claude",
-        cwd=eff_cwd,
-        # A positional prompt that starts with "-" is parsed as an option.
-        stdin=message,
-        timeout=timeout,
-        stderr_log_path=stderr_log_path,
-        pid_file_path=pid_file_path,
-    )
+    with _claude_system_prompt_args(agent, system_prompt) as system_args:
+        cmd += [*system_args, *_delegation_safe_extra_args(agent)]
+        rc, out, err = _agent_run(
+            cmd,
+            backend="claude",
+            cwd=eff_cwd,
+            # A positional prompt that starts with "-" is parsed as an option.
+            stdin=message,
+            timeout=timeout,
+            stderr_log_path=stderr_log_path,
+            pid_file_path=pid_file_path,
+        )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
         raise AgentRunError(reason, _agent_exit_error("claude", rc, out, err))
-    try:
-        payload = json.loads(out)
-        _metrics_record_raw_output(agent, out)
-        _metrics_record_claude_metadata(agent, payload)
-        agent.last_tool_denials = parse_claude_tool_denials(payload)
-        return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
-    except json.JSONDecodeError:
-        snippet = out[:500].strip()
-        raise AgentRunError(
-            FINISHED_AGENT_ERROR,
-            f"claude returned malformed JSON output: {snippet!r}",
-        )
+    payload = _parse_claude_turn(out)
+    _metrics_record_raw_output(agent, out)
+    _metrics_record_claude_metadata(agent, payload)
+    agent.last_tool_denials = parse_claude_tool_denials(payload)
+    return payload["result"].rstrip(), payload.get("session_id") or agent.session_id
+
 
 
 # Codex's `codex exec` prints a line like `session id: 019e12ad-0b1b-7732-bd7b-6acbbd04ab46`
@@ -2762,6 +2852,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             f"{DEFAULT_SENTINEL}"
         ), new_sid
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt, stdin_flags=("-",))
     reasoning_args: list[str] = []
     if effective:
         codex_value = backend_adapter("codex").reasoning_map.get(effective, effective)
@@ -2791,7 +2882,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         exec_only_opts = ["--sandbox", sandbox, "--cd", str(eff_cwd)]
         options = [*exec_only_opts, *shared_opts, *reasoning_args,
                    *_delegation_safe_extra_args(agent), *CODEX_NO_SUBAGENT_ARGS]
-        cmd = ["codex", "exec", *options, full_prompt]
+        cmd = ["codex", "exec", *options, *prompt_args]
     else:
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
         # directory regardless of how we resume. Keep the supported config
@@ -2810,20 +2901,20 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             # robust to parallel codex sessions sharing the cwd because
             # codex looks up the session by id, not by recency.
             cmd = ["codex", "exec", "resume", agent.session_id,
-                   *options, full_prompt]
+                   *options, *prompt_args]
         else:
             # Sentinel value (typically "codex-current") meaning "we know a
             # prior turn happened but never captured a UUID." Fall back to
             # the most recent codex session in this cwd. Caveat: don't run
             # parallel codex sessions in the same cwd while a duet is alive.
             cmd = ["codex", "exec", "resume", "--last",
-                   *options, full_prompt]
+                   *options, *prompt_args]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
     rc, out, err = _agent_run(
         cmd,
         backend="codex",
         cwd=eff_cwd,
-        stdin="",
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -2887,11 +2978,14 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
         ), new_sid
 
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    prompt_args, prompt_stdin = _combined_prompt_input(
+        agent, full_prompt, argv_flags=("-p",), stdin_flags=("-p", ""),
+    )
     cmd = ["gemini"]
     if agent.session_id:
         cmd += ["--resume", agent.session_id]
     cmd += [
-        "-p", full_prompt,
+        *prompt_args,
         "--output-format", "json",
         "--approval-mode", _gemini_approval_mode(permission_mode),
     ]
@@ -2904,7 +2998,7 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
         cmd,
         backend="gemini",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -3032,12 +3126,13 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
     for d in (add_dirs or []):
         cmd += ["--add-dir", str(d)]
     cmd += _delegation_safe_extra_args(agent)
-    cmd += ["-p", full_prompt]
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt, argv_flags=("-p",))
+    cmd += prompt_args
     rc, out, err = _agent_run(
         cmd,
         backend="copilot",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -3201,12 +3296,13 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
     cmd = _opencode_run_cmd(agent, eff_cwd, reasoning)
     cmd += _delegation_safe_extra_args(agent)
-    cmd.append(full_prompt)
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt)
+    cmd += prompt_args
     rc, out, err = _agent_run(
         cmd,
         backend="opencode",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -3716,6 +3812,7 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
                     "--disallowed-tools", ",".join(denied)]
         if agent.session_id:
             command += ["--resume", agent.session_id]
+        agent.last_call_metrics["prompt_transport"] = "combined_argv"
         command += ["--prompt", f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"]
         with _zcode_peer_profile(selection, launch_env) as env:
             _zcode_check_permission_inputs(native_cwd, permission_inputs)
@@ -3735,6 +3832,13 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     except AgentRunError:
         raise
     except Exception as exc:
+        if isinstance(exc, OSError) and exc.errno == errno.E2BIG:
+            raise AgentRunError(
+                FINISHED_AGENT_ERROR,
+                "ZCode headless needs the combined prompt in one argument, which exceeds "
+                "the operating system's argument limit. Use a shorter prompt or choose a "
+                "backend that accepts large prompts on stdin.",
+            ) from None
         raise AgentRunError(FINISHED_AGENT_ERROR, f"ZCode invocation failed: {exc}") from exc
     agent.zcode_selection = pin
     _metrics_record_raw_output(agent, out)
@@ -3854,19 +3958,20 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
         log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
         pid_path = run_dir / f"turn-{turn_label}-{agent.name}.pid"
     adapter = backend_adapter(agent.backend)
-    text, new_sid = adapter.call(
-        agent, sys_prompt, message, cfg, first_turn_for_agent,
-        log_path, pid_path, reasoning,
-    )
-    if metrics_enabled:
-        if "raw_output_bytes" not in agent.last_call_metrics:
-            # Dry runs do not have provider stdout; their adapter result is
-            # the complete synthetic backend output for this call.
-            _metrics_record_raw_output(agent, text)
-    else:
-        # Adapters also support direct callers and therefore collect optional
-        # decoded telemetry locally. A disabled normal run must retain none.
-        agent.last_call_metrics = {}
+    try:
+        text, new_sid = adapter.call(
+            agent, sys_prompt, message, cfg, first_turn_for_agent,
+            log_path, pid_path, reasoning,
+        )
+    finally:
+        if not metrics_enabled:
+            agent.last_call_metrics = {}
+        elif agent.backend == "opencode" and not agent.model:
+            _refresh_opencode_reasoning_metrics(agent, cfg)
+    if metrics_enabled and "raw_output_bytes" not in agent.last_call_metrics:
+        # Dry runs do not have provider stdout; their adapter result is
+        # the complete synthetic backend output for this call.
+        _metrics_record_raw_output(agent, text)
     agent.session_id = new_sid
     return text
 
@@ -4488,7 +4593,8 @@ def _metrics_snapshot_turn(entry: dict, state: dict) -> dict:
                 "delivered_output_bytes", "handoff_bytes"):
         value[key] = _metrics_nonnegative_int(metrics.get(key))
     for key, allowed in (("call_mode", {"fresh", "resume"}),
-                         ("usage_scope", {"invocation", "turn", "session", "unknown"})):
+                         ("usage_scope", {"invocation", "turn", "session", "unknown"}),
+                         ("prompt_transport", _PROMPT_TRANSPORTS)):
         value[key] = metrics.get(key) if metrics.get(key) in allowed else None
     usage = metrics.get("usage") if isinstance(metrics.get("usage"), dict) else {}
     value["usage"] = {key: _metrics_nonnegative_int(usage.get(key)) for key in (
@@ -7304,6 +7410,10 @@ def _metrics_report_turn_labels(payload: dict, fields: dict[str, object]) -> boo
                                   or call_mode not in {"fresh", "resume"}):
         return False
     fields["call_mode"] = call_mode
+    prompt_transport = payload.get("prompt_transport")
+    if prompt_transport is not None and prompt_transport not in _PROMPT_TRANSPORTS:
+        return False
+    fields["prompt_transport"] = prompt_transport
     usage_scope = payload.get("usage_scope")
     if usage_scope is not None and (not isinstance(usage_scope, str)
                                     or usage_scope not in {"invocation", "turn", "session", "unknown"}):

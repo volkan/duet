@@ -155,8 +155,8 @@ Report a rejected ID without substituting another model.
 
 OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
 requires an explicit model to receive effort through `-m provider/model#<level>`.
-Without a model, v2 receives only the prompt prefix and Duet prints a note.
-High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
+Without a model, v2 uses native reasoning and Duet prints a note.
+Only high, xhigh, and max add prompt guidance.
 Report this limit without choosing another model or changing the requested effort.
 
 For an explicit v2 peer model, inspect its resolved variants before launch.
