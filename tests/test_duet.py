@@ -3032,6 +3032,43 @@ print("trailing diagnostic", file=sys.stderr, flush=True)
                              (0, "initial output\ntrailing output\n", "trailing diagnostic\n"))
             self.assertTrue(log_path.read_text().endswith(stderr))
 
+    def test_post_exit_drain_keeps_buffered_output_after_slow_sidecar_write(self) -> None:
+        stdout_fd, stdout_writer = os.pipe()
+        stderr_fd, stderr_writer = os.pipe()
+        self.addCleanup(os.close, stdout_writer)
+        self.addCleanup(os.close, stderr_writer)
+        now = 0.0
+        reply = '{"ok":true}\n'
+
+        def write_sidecar(text):
+            nonlocal now
+            if text == "diagnostic\n":
+                os.write(stdout_writer, reply.encode("utf-8"))
+                os.write(stderr_writer, b"queued diagnostic\n")
+                now += duet._CHILD_DRAIN_TIMEOUT + 1
+
+        def mirror_output(_terminal, text):
+            if text == reply:
+                os.write(stdout_writer, b"late output\n")
+                os.write(stderr_writer, b"late diagnostic\n")
+
+        log = mock.Mock()
+        log.write.side_effect = write_sidecar
+        stdout = duet._ChildOutput(1, "")
+        stderr = duet._ChildOutput(None, "", log)
+        finished = threading.Event()
+        finished.set()
+        os.write(stderr_writer, b"diagnostic\n")
+        with os.fdopen(stdout_fd, "rb") as stdout_pipe, os.fdopen(stderr_fd, "rb") as stderr_pipe:
+            proc = mock.Mock(stdin=io.BytesIO(), stdout=stdout_pipe, stderr=stderr_pipe)
+            with mock.patch.object(duet.time, "monotonic", side_effect=lambda: now), \
+                    mock.patch.object(duet, "_mirror_child_output", side_effect=mirror_output):
+                duet._pump_child_io(proc, None, finished, stdout, stderr)
+
+        self.assertEqual("".join(stdout.chunks), reply)
+        self.assertEqual("".join(stderr.chunks), "diagnostic\nqueued diagnostic\n")
+        log.write.assert_any_call("queued diagnostic\n")
+
     def test_detached_pipe_holder_cannot_write_after_run_returns(self) -> None:
         grandchild = """
 import os, pathlib, sys, time

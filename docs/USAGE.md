@@ -843,8 +843,9 @@ The raw shell command is never written to launch metadata or `state.json`.
 The per-turn `*.stderr.log` files record the stderr that Duet captures from
 each peer, including Codex reasoning summaries, tool calls, and Claude
 progress messages. If the terminal cannot keep up, the live view can skip
-output. Read the log for the captured stderr. Duet drains inherited pipes
-for up to 250 ms after the peer exits.
+output. Read the log for the captured stderr. After the peer exits, Duet
+waits up to 250 ms for inherited output. It then captures any bytes still
+queued in the pipes before closing them.
 
 `turn-00-extract-*` is the optional Claude seed-extraction call.
 `turn-NN-forced-*` is a human-forced post-loop turn. When a timeout or

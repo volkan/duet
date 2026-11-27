@@ -1303,16 +1303,37 @@ def _write_child_stdin(selector, stream, data: memoryview) -> memoryview:
     return data
 
 
-def _read_child_output(selector, stream, output: _ChildOutput) -> bool:
+def _read_child_output(selector, stream, output: _ChildOutput, size: int = _CHILD_IO_CHUNK) -> int:
     try:
-        chunk = os.read(stream.fileno(), _CHILD_IO_CHUNK)
+        chunk = os.read(stream.fileno(), size)
     except BlockingIOError:
-        return False
+        return 0
     if chunk:
         output.capture(chunk)
-        return True
+        return len(chunk)
     selector.unregister(stream)
-    return False
+    return 0
+
+
+def _drain_buffered_child_output(selector) -> None:
+    from array import array
+    import fcntl
+    import termios
+
+    # Sample both pipes before capture can stall on a log write. Inherited
+    # writers can refill a pipe as we read, so stop at each sampled byte count.
+    buffered = []
+    count = array("i", [0])
+    for key in selector.get_map().values():
+        fcntl.ioctl(key.fd, termios.FIONREAD, count)
+        buffered.append((key, count[0]))
+    for key, unread in buffered:
+        while unread > 0:
+            size = min(unread, _CHILD_IO_CHUNK)
+            read = _read_child_output(selector, key.fileobj, key.data, size)
+            if not read:
+                break
+            unread -= read
 
 
 def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threading.Event,
@@ -1352,6 +1373,8 @@ def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threa
         while selector.get_map() and (remaining := drain_until - time.monotonic()) > 0:
             for key, _ in selector.select(remaining):
                 _read_child_output(selector, key.fileobj, key.data)
+        if selector.get_map():
+            _drain_buffered_child_output(selector)
     for output in (stdout, stderr):
         output.capture(b"", final=True)
 

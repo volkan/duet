@@ -293,8 +293,9 @@ It holds the process registry lock while it polls or signals a group.
 The supervisor joins the watcher and unregisters the child before its final wait.
 The live mirror uses an independent nonblocking terminal descriptor.
 A full terminal can skip live output. Capture and the log keep those bytes.
-Quiet heartbeats stop when the child exits. Duet drains the pipes up to one
-shared 250 ms deadline after exit, then closes them and the stderr log.
+Quiet heartbeats stop when the child exits. Duet waits up to 250 ms for
+output from inherited writers. When that window ends, Duet samples both
+pipes and captures the queued bytes before closing the pipes and stderr log.
 Duet writes the PID file atomically at startup and removes it on return.
 `_terminate_active_processes(SIGKILL)` signals tracked child process groups on
 the second Ctrl-C. Immediate stop signals only the validated supervisor, whose
