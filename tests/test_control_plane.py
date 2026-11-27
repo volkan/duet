@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 
 import duet
+from scripts.duet_loop_e2e import parse_transcript
 
 
 def _agents() -> list[duet.Agent]:
@@ -601,10 +602,16 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
         for case, answers in cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
                 calls = []
-                run = self._run_cli(pathlib.Path(raw).resolve(), case, answers, calls)
+                with mock.patch.object(duet, "_write_run_state",
+                                       wraps=duet._write_run_state) as write:
+                    run = self._run_cli(pathlib.Path(raw).resolve(), case, answers, calls)
+                if not answers:
+                    phases = [call.args[1]["phase"] for call in write.call_args_list]
+                    self.assertNotIn("turn_running", phases)
                 saved = json.loads((run / "state.json").read_text())
                 entry = saved["history"][-1]
-                transcript = (run / "transcript.md").read_text()
+                transcript_path = run / "transcript.md"
+                transcript = transcript_path.read_text()
                 self.assertEqual(len(calls), len(answers))
                 self.assertTrue(all("resume" not in cmd for cmd in calls))
                 self.assertEqual(saved["phase"], "finished")
@@ -619,6 +626,13 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
                     self.assertTrue(entry["forced"])
                     self.assertIn("human — force-feedback", transcript)
                     self.assertEqual(saved["agents"][1]["session_id"], self.UUID)
+                    turns = parse_transcript(transcript_path, duet)
+                    agent_turns = [turn.kind for turn in turns if turn.kind in {"agent", "forced"}]
+                    self.assertEqual(agent_turns, ["agent", "forced"][:len(answers)])
+                    [feedback] = [turn for turn in turns if turn.kind == "force-feedback"]
+                    self.assertEqual(feedback.body, "inspect again")
+                    heading = "setup_error" if case == "force-before" else "forced"
+                    self.assertIn(f"## lead (reviewer) — {heading}", transcript)
                 parser = duet._build_arg_parser()
                 args = parser.parse_args(["--continue", str(run)])
                 restored = duet.build_continue_config(str(run), args, parser, {})
@@ -656,6 +670,16 @@ class TestCwdKeyedResumeRun(unittest.TestCase):
                 self.assertEqual(len(metrics["turns"]), len(answers))
                 coverage = duet.build_finding_report(saved)["structured_turns"]
                 self.assertEqual(coverage["failed"], int(case.endswith("after")))
+
+    def test_derive_seed_checks_the_resume_before_using_the_task(self) -> None:
+        lead = duet.Agent("lead", "codex", session_id="codex-current")
+        cfg = duet.DuetConfig(cwd=pathlib.Path.cwd(),
+                              agents=[lead, duet.Agent("partner", "codex")], task="fallback")
+        with mock.patch.object(duet, "call_agent") as call, \
+                self.assertRaises(duet.AgentRunError) as error:
+            duet.derive_seed(cfg)
+        self.assertEqual(error.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
+        call.assert_not_called()
 
     def test_continue_retries_the_uncalled_peer_after_cwd_isolation(self) -> None:
         for case, slot in (("loop-before", "partner"), ("force-before", "lead")):
@@ -718,19 +742,25 @@ class TestStatusSchema(unittest.TestCase):
             self.assertIsNone(snapshot["per_turn_timeout"])
             self.assertNotIn(secret, json.dumps(snapshot))
 
-    def test_live_turn_reports_budget_and_remaining_seconds(self) -> None:
+    def test_live_turn_reports_budget_and_prior_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
             secret = "live-status-secret"
             run = self._write_state(root, {
                 "task": secret,
                 "phase": "turn_running",
-                "turns_used": 0,
+                "turns_used": 1,
                 "finished_reason": None,
-                "history": [],
+                "history": [{
+                    "turn": 1,
+                    "agent": "codex-coder",
+                    "elapsed_s": 60.2,
+                    "finished_reason": "timeout",
+                    "error": secret,
+                }],
                 "per_turn_timeout": 60,
             })
-            (run / "turn-01-codex-coder.pid").write_text("123", encoding="utf-8")
+            (run / "turn-02-claude-reviewer.pid").write_text("123", encoding="utf-8")
             started = duet.dt.datetime.fromtimestamp(1_000)
             with mock.patch.object(
                     duet, "_pid_file_snapshot", return_value=(123, started)), \
@@ -749,6 +779,8 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(snapshot["active_turn"]["elapsed_seconds"], 42)
             self.assertEqual(snapshot["active_turn"]["budget_seconds"], 60)
             self.assertEqual(snapshot["active_turn"]["remaining_seconds"], 18)
+            self.assertEqual(snapshot["last_timeout"]["turn"], 1)
+            self.assertEqual(snapshot["last_timeout"]["finished_reason"], "timeout")
             human = io.StringIO()
             with contextlib.redirect_stdout(human):
                 duet._print_human_status(snapshot, str(run))

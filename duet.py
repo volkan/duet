@@ -4369,7 +4369,8 @@ def _stop_recap_inflight(stop_event: threading.Event,
     sys.stdout.flush()
 
 
-def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
+def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None, *,
+                before_extract: Optional[Callable[[], None]] = None) -> str:
     """Figure out the first message to send to the partner agent."""
     if cfg.kickoff:
         return cfg.kickoff
@@ -4384,6 +4385,8 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
                   f"call; expect 30–120s.")
             print(f"[duet]   from another terminal: "
                   f"duet --status {run_dir.name}")
+        if before_extract is not None:
+            before_extract()
         return call_agent(a0, EXTRACT_LATEST_PROMPT, cfg,
                           first_turn_for_agent=False,
                           run_dir=run_dir, turn_label="00-extract")
@@ -4592,9 +4595,11 @@ def _metrics_timed(cfg: DuetConfig, key: str, operation: Callable[[], str]) -> s
             cfg._metrics_context[key] = max(0.0, time.monotonic() - started)
 
 
-def _metrics_derive_seed(cfg: DuetConfig, run_dir: pathlib.Path) -> str:
+def _metrics_derive_seed(cfg: DuetConfig, run_dir: pathlib.Path,
+                         before_extract: Callable[[], None]) -> str:
     extracting = not cfg.kickoff and bool(cfg.agents[0].session_id)
-    seed = _metrics_timed(cfg, "seed_elapsed_s", lambda: derive_seed(cfg, run_dir))
+    seed = _metrics_timed(cfg, "seed_elapsed_s",
+                          lambda: derive_seed(cfg, run_dir, before_extract=before_extract))
     if extracting and cfg._metrics_context:
         cfg._metrics_context["seed_entry"] = {
             "turn": 0, "kind": "seed_extract", "agent": cfg.agents[0].name,
@@ -5325,7 +5330,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         failure_reason = error.finished_reason
         reply = _agent_failure_block(failure_reason, error, label, speaker, run_dir,
                                      call_started=False)
-        log(speaker.name, speaker.role, reply, kind="forced" if forced else "setup_error")
+        log(speaker.name, speaker.role, reply, kind=FINISHED_SETUP_ERROR)
         history.append(_resume_refusal_entry(speaker, error, label, forced))
         state = _build_run_state(
             cfg, turns_used=turn - 1, history=history, finished_reason=failure_reason,
@@ -5509,22 +5514,23 @@ def _derive_seed_or_failure(
     prints the done banner, and returns (None, state) so `run_duet` can return
     immediately.
     """
+    def mark_seed_running() -> None:
+        extracting = _build_run_state(
+            cfg,
+            turns_used=0,
+            history=history,
+            finished_reason=None,
+            transcript_path=transcript_path,
+            recap_path=recap_path,
+            wt_path=wt_path,
+            wt_branch=wt_branch,
+            phase="turn_running",
+        )
+        _write_run_state(state_path, extracting)
+
     seed_t0 = time.monotonic()
     try:
-        if not cfg.kickoff and cfg.agents[0].session_id:
-            extracting = _build_run_state(
-                cfg,
-                turns_used=0,
-                history=history,
-                finished_reason=None,
-                transcript_path=transcript_path,
-                recap_path=recap_path,
-                wt_path=wt_path,
-                wt_branch=wt_branch,
-                phase="turn_running",
-            )
-            _write_run_state(state_path, extracting)
-        return _metrics_derive_seed(cfg, run_dir), None
+        return _metrics_derive_seed(cfg, run_dir, mark_seed_running), None
     except Exception as e:
         if stop.requested and stop.reason == "SIGTERM":
             log("duet", "stop", "[duet] immediate stop requested", kind="stop")

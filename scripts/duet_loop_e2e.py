@@ -535,7 +535,7 @@ def load_duet_module(duet_path: pathlib.Path):
 
 HEADING_RE = re.compile(
     r"^## (?:(?P<human>human) - force-feedback \(next: (?P<next>[^)]+)\)"
-    r"|(?P<speaker>.+?) \((?P<role>[^)]*)\) - (?P<kind>seed|agent|forced))\s*$",
+    r"|(?P<speaker>.+?) \((?P<role>[^)]*)\) - (?P<kind>seed|agent|forced|setup_error))\s*$",
     re.MULTILINE,
 )
 
@@ -575,6 +575,8 @@ def parse_transcript(transcript: pathlib.Path, duet_module) -> list[Turn]:
             )
             continue
         kind = match.group("kind") or ""
+        if kind == "setup_error":
+            continue
         scored_body = strip_worktree_appendix(body)
         convergence = False
         if kind in {"agent", "forced"}:

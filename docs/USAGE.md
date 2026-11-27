@@ -945,10 +945,10 @@ the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 During a live turn, `active_turn.budget_seconds` repeats that budget and
 `active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
 at zero. All three fields are `null` when saved state contains a missing or
-invalid budget; status never performs arithmetic on the raw state value. `turns_used` counts
-loop and forced turns only; kickoff and seed-extraction entries are not counted.
-During a forced turn, `phase` is `turn_running`. The prompt between forced turns
-uses `awaiting_force`.
+invalid budget; status never performs arithmetic on the raw state value.
+`turns_used` counts loop and forced turns after the peer call ends.
+Seed extraction and forced turns enter `turn_running` after the resume check passes.
+The prompt between forced turns uses `awaiting_force`.
 `last_completed_turn.finished_reason` is that turn's sanitized outcome or
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
@@ -1076,7 +1076,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
 | per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
-| Codex peers share a working directory and a peer requires a cwd-keyed resume | Duet stops with `reason=setup_error`. The launch exits 1 and `--status` reports the terminal run with exit 0 |
+| Codex peers share a working directory and a peer requires a cwd-keyed resume | Duet stops with `reason=setup_error`. A refusal before the call adds a `setup_error` transcript block. The launch exits 1 and `--status` reports the terminal run with exit 0 |
 | a ZCode peer fails its launch check | error names the agent and the fix, no agent runs, run stops with `reason=setup_error` and exit code 1; for a peer in a worktree, the MCP check runs after the configured kickoff command; `--dry-run` skips the check |
 
 `force_stop` is reserved for intentional human interruption: Ctrl-C or a
@@ -1092,6 +1092,7 @@ force>
 ```
 
 Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree handoff block without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
+If Duet refuses the resume before the peer call, the transcript preserves the feedback and records the refusal under `<agent> — setup_error`.
 
 A convergence proposal needs `<<<LGTM>>>` on its own line and an
 `LGTM rationale:` or `Rationale:`. Both must be outside fenced code.
