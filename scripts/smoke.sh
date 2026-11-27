@@ -1594,13 +1594,13 @@ cfg = m.DuetConfig(
     task="x",
     max_turns=4,
 )
-try:
-    m.run_duet(cfg)
-except SystemExit as e:
-    assert "cannot safely continue codex/codex" in str(e), e
-    assert len(calls) == 1, calls
-else:
-    raise AssertionError("expected shared-cwd codex/codex missing UUID to fail")
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "setup_error", state
+assert state["phase"] == "finished", state
+assert "cannot safely continue codex/codex" in state["history"][-1]["error"], state
+assert "reply without uuid" in pathlib.Path(state["transcript_path"]).read_text(), state
+assert state["agents"][1]["session_id"] is None, state
+assert len(calls) == 1, calls
 PY
 
 expect "codex-codex seed last fatal"         0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
@@ -1637,13 +1637,11 @@ cfg = m.DuetConfig(
     task="x",
     max_turns=2,
 )
-try:
-    m.run_duet(cfg)
-except SystemExit as e:
-    assert "cannot safely continue codex/codex" in str(e), e
-    assert calls == [], calls
-else:
-    raise AssertionError("expected seed extraction with --last to fail")
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "setup_error", state
+assert state["phase"] == "finished", state
+assert "cannot safely continue codex/codex" in state["history"][-1]["error"], state
+assert calls == [], calls
 PY
 
 expect "codex-codex partial uuid fatal"      0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
@@ -1678,13 +1676,12 @@ cfg = m.DuetConfig(
     max_turns=4,
     start_speaker_idx=0,
 )
-try:
-    m.run_duet(cfg)
-except SystemExit as e:
-    assert "cannot safely continue codex/codex" in str(e), e
-    assert len(calls) == 2, calls
-else:
-    raise AssertionError("expected partial UUID capture to fail")
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "setup_error", state
+assert "cannot safely continue codex/codex" in state["history"][-1]["error"], state
+assert state["agents"][0]["session_id"] == UUID, state
+assert state["agents"][1]["session_id"] is None, state
+assert len(calls) == 2, calls
 PY
 
 expect "codex-codex partner first lead uuid fatal" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
@@ -1718,13 +1715,12 @@ cfg = m.DuetConfig(
     task="x",
     max_turns=2,
 )
-try:
-    m.run_duet(cfg)
-except SystemExit as e:
-    assert "cannot safely continue codex/codex" in str(e), e
-    assert len(calls) == 2, calls
-else:
-    raise AssertionError("expected lead's first missing UUID to fail")
+state = m.run_duet(cfg)
+assert state["finished_reason"] == "setup_error", state
+assert "cannot safely continue codex/codex" in state["history"][-1]["error"], state
+assert state["agents"][0]["session_id"] is None, state
+assert state["agents"][1]["session_id"] == UUID, state
+assert len(calls) == 2, calls
 PY
 
 expect "codex-codex isolated cwd allows last" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'

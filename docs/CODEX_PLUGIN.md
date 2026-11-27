@@ -296,8 +296,9 @@ means the backend did not report denials.
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
 `artifacts.transcript` file and the stderr log that it names.
-For `setup_error` or `kickoff_error`, there is no such block. Report the
-full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+For `setup_error`, read the `[duet] SETUP ERROR` transcript block when present.
+Otherwise, report the `[duet] ERROR:` message from the Duet process output.
+For `kickoff_error`, read the transcript excerpt and the stderr log it names.
 
 You can also list recent runs:
 

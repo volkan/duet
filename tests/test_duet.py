@@ -2044,10 +2044,11 @@ class TestCwdKeyedResumeGuards(unittest.TestCase):
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
         partner.session_id = "codex-current"
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(duet.AgentRunError) as caught:
             duet.guard_cwd_keyed_resume_after_call(
                 cfg, partner, first_turn_for_agent=True
             )
+        self.assertEqual(caught.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
 
     def test_missing_uuid_allowed_when_codex_peers_have_different_cwds(self) -> None:
         lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
@@ -2074,10 +2075,11 @@ class TestCwdKeyedResumeGuards(unittest.TestCase):
         )
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(duet.AgentRunError) as caught:
             duet.guard_cwd_keyed_resume_before_call(
                 cfg, partner, first_turn_for_agent=False
             )
+        self.assertEqual(caught.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
 
 
 # ---------- _markdown_fence ----------
@@ -2113,6 +2115,9 @@ class TestMarkdownFence(unittest.TestCase):
 
 
 class TestHumanizeAge(unittest.TestCase):
+    def test_future_activity_is_clamped_to_zero(self) -> None:
+        self.assertEqual(duet._humanize_age(-2), "0s ago")
+
     def test_seconds_bucket(self) -> None:
         self.assertEqual(duet._humanize_age(0), "0s ago")
         self.assertEqual(duet._humanize_age(59), "59s ago")
@@ -2208,6 +2213,26 @@ class TestNextSpeakerIdx(unittest.TestCase):
         agents = self._agents()
         self.assertEqual(
             duet._next_speaker_idx_from_state(agents, {"turns_used": "x"}), 1)
+
+    def test_setup_and_final_review_entries_do_not_choose_the_next_speaker(self) -> None:
+        agents = self._agents()
+        state = {"history": [
+            {"turn": 1, "agent": agents[1].name, "forced": True},
+            {"turn": 2, "agent": agents[0].name, "kind": "final_review"},
+            {"turn": 0, "agent": agents[0].name, "kind": "kickoff"},
+            {"turn": 0, "agent": agents[0].name, "kind": "seed_extract"},
+        ]}
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 0)
+
+    def test_zero_turns_use_saved_opening_slot_or_legacy_recipe_default(self) -> None:
+        agents = self._agents()
+        failed_seed = {"turn": 0, "agent": agents[1].name, "kind": "seed_extract"}
+        state = {"turns_used": 0, "history": [failed_seed]}
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 1)
+        state["task"] = duet.DEFAULT_CODEX_REVIEW_TASK
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 0)
+        state["start_speaker_idx"] = 1
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 1)
 
 
 # ---------- _resolve_opt_path ----------

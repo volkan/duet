@@ -25,6 +25,7 @@ Use your Duet checkout's absolute path. The link command fails if the destinatio
 Start a new ZCode session, then invoke `/duet` with your task or Duet arguments.
 The wrapper requires the shared skill and forwards arguments through ZCode's native command handling.
 It contains no separate launch or monitoring logic.
+Use the [status report](USAGE.md#--status-run_dir_or_id) to find run logs after a launch failure.
 
 ## Native review peer
 

@@ -71,7 +71,7 @@ import time
 import traceback
 import uuid
 import urllib.parse
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 # ---------- defaults ----------
 
@@ -733,7 +733,7 @@ def guard_cwd_keyed_resume_before_call(cfg: DuetConfig,
     if cfg.dry_run or not shared_cwd_backend_peers(cfg, agent.backend):
         return
     if not first_turn_for_agent and backend_adapter(agent.backend).resume_is_cwd_keyed(agent):
-        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
+        raise AgentRunError(FINISHED_SETUP_ERROR, cwd_keyed_resume_isolation_error(agent))
 
 
 def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
@@ -743,7 +743,7 @@ def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
         return
     if (shared_cwd_backend_peers(cfg, agent.backend)
             and backend_adapter(agent.backend).resume_is_cwd_keyed(agent)):
-        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
+        raise AgentRunError(FINISHED_SETUP_ERROR, cwd_keyed_resume_isolation_error(agent))
 
 
 @dataclasses.dataclass
@@ -3904,21 +3904,25 @@ def _bounded_agent_error_excerpt(
 
 def format_agent_error_for_transcript(
     exc: Exception,
-    stderr_log_path: pathlib.Path,
+    stderr_log_path: Optional[pathlib.Path],
     max_chars: int = AGENT_ERROR_TRANSCRIPT_MAX_CHARS,
 ) -> str:
     """Format bounded error context while pointing at the complete stderr."""
     excerpt = _bounded_agent_error_excerpt(str(exc), max_chars)
-    return "\n".join([
-        f"[duet] error: {excerpt}",
-        f"[duet] stderr log: {stderr_log_path}",
-    ])
+    detail = f"[duet] error: {excerpt}"
+    if stderr_log_path is not None:
+        detail += f"\n[duet] stderr log: {stderr_log_path}"
+    return detail
 
 
 def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
-                         agent: Agent, run_dir: pathlib.Path) -> str:
-    kind = "TIMEOUT" if reason == FINISHED_TIMEOUT else "AGENT ERROR"
-    log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
+                         agent: Agent, run_dir: pathlib.Path, *,
+                         call_started: bool = True) -> str:
+    kind = {
+        FINISHED_TIMEOUT: "TIMEOUT",
+        FINISHED_SETUP_ERROR: "SETUP ERROR",
+    }.get(reason, "AGENT ERROR")
+    log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log" if call_started else None
     return "\n".join([
         f"[duet] {kind}: turn {turn_label} failed for "
         f"{agent.name} ({agent.backend}/{agent.role})",
@@ -4186,6 +4190,7 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
     # If agent[0] has a session_id, ask it to dump its latest plan/message.
     a0 = cfg.agents[0]
     if a0.session_id:
+        guard_cwd_keyed_resume_before_call(cfg, a0, first_turn_for_agent=False)
         print(f"[duet] extracting latest message from {a0.backend} session "
               f"{a0.session_id[:8]}…")
         if a0.backend == "claude" and run_dir is not None:
@@ -4681,6 +4686,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "cwd": str(cfg.cwd),
         "phase": effective_phase,
         "turns_used": turns_used,
+        "start_speaker_idx": cfg.start_speaker_idx,
         "agents": [agent_state(a) for a in cfg.agents],
         "history": history,
         "finished_reason": finished_reason,
@@ -4894,13 +4900,14 @@ def _run_kickoff_command(
                 wt_path=wt_path,
                 wt_branch=wt_branch,
             )
-        message = str(exc)
-        summary = _error_summary(message, type(exc).__name__)
+        log_path = run_dir / "turn-00-kickoff.stderr.log"
+        detail = format_agent_error_for_transcript(exc, log_path)
+        summary = _error_summary(str(exc), type(exc).__name__)
         log(
             "duet",
             "kickoff",
             f"[duet kickoff failed]\nfinished_reason: "
-            f"{FINISHED_KICKOFF_ERROR}\n{message}",
+            f"{FINISHED_KICKOFF_ERROR}\n{detail}",
             kind="kickoff_error",
         )
         history.append({
@@ -4910,12 +4917,12 @@ def _run_kickoff_command(
             "elapsed_s": time.monotonic() - started,
             "finished_reason": FINISHED_KICKOFF_ERROR,
             "error": summary,
-            "stderr_log_path": str(run_dir / "turn-00-kickoff.stderr.log"),
+            "stderr_log_path": str(log_path),
         })
         return _launch_failure_state(
             cfg,
             reason=FINISHED_KICKOFF_ERROR,
-            message=message,
+            message=detail.removeprefix("[duet] error: "),
             history=history,
             transcript_path=transcript_path,
             recap_path=recap_path,
@@ -4952,7 +4959,6 @@ class _TurnResult:
     convergence_hit: bool
     failure_reason: Optional[str]
     last_verify_state: Optional[dict]
-    recap_block: Optional[str]
 
 
 def _timeout_may_continue(cfg: DuetConfig, previous_turn_timed_out: bool,
@@ -5043,6 +5049,63 @@ def _has_approval_pair(history: list) -> bool:
             and current["agent"] != previous["agent"])
 
 
+def _invoke_turn(cfg: DuetConfig, *, turn: int, label: str, speaker: Agent,
+                 message: str, first_turn: bool, run_dir: pathlib.Path
+                 ) -> tuple[Optional[str], Optional[Exception], bool, float]:
+    started = time.monotonic()
+    inflight = None
+    if cfg.recap:
+        inflight = _start_recap_inflight(turn, speaker.name, speaker.role, time.time())
+    else:
+        banner_turn = label if label.endswith("-forced") else str(turn)
+        print(f"\n--- Turn {banner_turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
+              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---", flush=True)
+
+    reply = None
+    error = None
+    call_started = False
+    previous_session_id = speaker.session_id
+    try:
+        guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn)
+        call_started = True
+        reply = call_agent(speaker, message, cfg, first_turn_for_agent=first_turn,
+                           run_dir=run_dir, turn_label=label)
+        guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn)
+    except Exception as exc:
+        error = exc
+        if reply is not None:
+            # Retain the reply for diagnosis, but discard its unsafe resume handle.
+            speaker.session_id = previous_session_id
+        if not call_started:
+            speaker.last_call_metrics = {}
+            speaker.last_tool_denials = None
+    finally:
+        if inflight is not None:
+            _stop_recap_inflight(*inflight)
+    return reply, error, call_started, time.monotonic() - started
+
+
+def _turn_recap(cfg: DuetConfig, turn: int, speaker: Agent, elapsed: float,
+                raw_reply: str, convergence_hit: bool,
+                recap_path: pathlib.Path) -> Optional[str]:
+    if not cfg.recap:
+        return None
+    parsed = parse_recap_headers(raw_reply)
+    files = extract_files_heuristic(raw_reply)
+    fallbacks = {
+        "recap": _derive_recap_heuristic(raw_reply),
+        "files": ", ".join(files) if files else "none",
+        "status": derive_status_heuristic(speaker.role, convergence_hit),
+    }
+    block = format_recap_block(
+        turn, speaker.name, speaker.role, elapsed,
+        len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
+        parsed, fallbacks, convergence_hit,
+    )
+    append_text_atomic(recap_path, block)
+    return block
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
@@ -5050,6 +5113,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                   last_verify_state: Optional[dict],
                   timeout_may_continue: bool = False,
+                  forced: bool = False,
                   log: Callable[..., None]) -> _TurnResult:
     """Run a single agent turn: invoke, verify, recap, persist transcript+state.
 
@@ -5072,88 +5136,53 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     )
     _write_run_state(state_path, running_state)
     first_turn_for_agent = not seen_first_turn[speaker.name]
-    guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
-    t0 = time.time()
-    measured_start = time.monotonic()
-    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
-    if cfg.recap:
-        inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
-    else:
-        # Print BEFORE the subprocess starts so the terminal user sees something
-        # happen instantly. claude -p emits nothing on stderr during its API
-        # call; without this banner the user thinks duet hung.
-        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
-              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
-        sys.stdout.flush()
-    call_succeeded = False
-    failure_reason: Optional[str] = None
-    failure_message: Optional[str] = None
-    try:
-        reply = call_agent(speaker, last_msg, cfg,
-                           first_turn_for_agent=first_turn_for_agent,
-                           run_dir=run_dir, turn_label=f"{turn:02d}")
-        call_succeeded = True
-    except Exception as e:
-        failure_reason = _agent_finished_reason(e)
-        failure_message = str(e)
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-            inflight = None
-            elapsed = time.monotonic() - measured_start
-            print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
-                  f"ERROR after {int(round(elapsed))}s — "
-                  f"see turn-{turn:02d}-{speaker.name}.stderr.log")
-        reply = _agent_failure_block(failure_reason, e, f"{turn:02d}", speaker, run_dir)
-    if cfg.recap and inflight is not None:
-        _stop_recap_inflight(*inflight)
-    if call_succeeded:
-        guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn_for_agent)
-        # Seen only on success: a timed-out/errored first turn must count as a
-        # first turn again on retry, so the same-cwd codex guards keep applying.
+    label = f"{turn:02d}-forced" if forced else f"{turn:02d}"
+    output, error, call_started, elapsed = _invoke_turn(
+        cfg, turn=turn, label=label, speaker=speaker, message=last_msg,
+        first_turn=first_turn_for_agent, run_dir=run_dir,
+    )
+    failure_reason = None
+    stderr_log_name = f"turn-{label}-{speaker.name}.stderr.log"
+    raw_reply = output or ""
+    failure_block = None
+    if error is None:
         seen_first_turn[speaker.name] = True
-    elapsed = time.monotonic() - measured_start
-    raw_reply = reply
+    else:
+        failure_reason = _agent_finished_reason(error)
+        failure_block = _agent_failure_block(failure_reason, error, label, speaker, run_dir,
+                                             call_started=call_started)
+        raw_reply = f"{output}\n\n{failure_block}" if output else failure_block
+        if cfg.recap and failure_reason != FINISHED_SETUP_ERROR:
+            print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
+                  f"ERROR after {int(round(elapsed))}s — see {stderr_log_name}")
     reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
-        cfg, raw_reply, call_succeeded, run_dir, f"{turn:02d}", wt_path)
+        cfg, raw_reply, error is None, run_dir, label, wt_path)
     if verify_state is not None:
         last_verify_state = verify_state
 
-    recap_block: Optional[str] = None
-    if cfg.recap:
-        parsed = parse_recap_headers(raw_reply)
-        files = extract_files_heuristic(raw_reply)
-        fallbacks = {
-            "recap": _derive_recap_heuristic(raw_reply),
-            "files": ", ".join(files) if files else "none",
-            "status": derive_status_heuristic(speaker.role, convergence_hit),
-        }
-        recap_block = format_recap_block(
-            turn, speaker.name, speaker.role, elapsed,
-            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
-            parsed, fallbacks, convergence_hit,
-        )
-        append_text_atomic(recap_path, recap_block)
+    recap_block = _turn_recap(cfg, turn, speaker, elapsed, failure_block or raw_reply,
+                              convergence_hit, recap_path)
 
-    reply, tool_denials = _append_tool_denial_note(reply, speaker, call_succeeded)
+    reply, tool_denials = _append_tool_denial_note(reply, speaker, output is not None)
     before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
 
-    log(speaker.name, speaker.role, reply)
+    log(speaker.name, speaker.role, reply, kind="forced" if forced else "agent")
     history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                      "len_chars": len(reply), "session_id": speaker.session_id}
+    if forced:
+        history_entry["forced"] = True
     _record_tool_denials(history_entry, tool_denials)
     history_entry["metrics"] = _record_turn_metrics(
-        speaker, raw_reply, reply, convergence_hit, cfg,
+        speaker, output if output is not None else raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
-    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
-    if failure_reason is not None:
+    _record_finding_updates(history_entry, raw_reply, error is None, cfg)
+    if error is not None:
         history_entry["finished_reason"] = failure_reason
-        # Bounded like the transcript block — a raw xhigh-codex stderr dump
-        # once ballooned state.json to 437KB. The stderr log stays complete.
-        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
-        history_entry["stderr_log_path"] = str(
-            run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
+        history_entry["error"] = _bounded_agent_error_excerpt(str(error))
+        if call_started:
+            history_entry["stderr_log_path"] = str(run_dir / stderr_log_name)
     if verify_state is not None:
         history_entry["verify"] = verify_state
     if revision is not None:
@@ -5169,10 +5198,16 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         cfg, turns_used=turn, history=history, finished_reason=persisted_reason,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+        phase="awaiting_force" if forced else None,
     )
     _write_run_state(state_path, turn_state)
-    return _TurnResult(reply, convergence_hit, failure_reason,
-                       last_verify_state, recap_block)
+    if failure_reason == FINISHED_SETUP_ERROR:
+        print(failure_block, file=sys.stderr)
+    if cfg.recap:
+        print(_format_live_recap_block(recap_block), end="")
+    elif failure_reason != FINISHED_SETUP_ERROR:
+        print(reply)
+    return _TurnResult(reply, convergence_hit, failure_reason, last_verify_state)
 
 
 def _runs_ignore_overlaps_candidate(cfg: DuetConfig) -> bool:
@@ -5279,9 +5314,6 @@ def _derive_seed_or_failure(
                 phase="turn_running",
             )
             _write_run_state(state_path, extracting)
-            guard_cwd_keyed_resume_before_call(
-                cfg, cfg.agents[0], first_turn_for_agent=False
-            )
         return _metrics_derive_seed(cfg, run_dir), None
     except Exception as e:
         if stop.requested and stop.reason == "SIGTERM":
@@ -5298,11 +5330,13 @@ def _derive_seed_or_failure(
             return None, state
         failure_reason = _agent_finished_reason(e)
         seed_agent = cfg.agents[0]
+        call_started = failure_reason != FINISHED_SETUP_ERROR
         reply = _agent_failure_block(
-            failure_reason, e, "00-extract", seed_agent, run_dir
+            failure_reason, e, "00-extract", seed_agent, run_dir,
+            call_started=call_started,
         )
         log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
-        history.append({
+        entry = {
             "turn": 0,
             "agent": seed_agent.name,
             "kind": "seed_extract",
@@ -5312,17 +5346,19 @@ def _derive_seed_or_failure(
             "session_id": seed_agent.session_id,
             "finished_reason": failure_reason,
             "error": _bounded_agent_error_excerpt(str(e)),
-            "stderr_log_path": str(
+        }
+        if call_started:
+            entry["stderr_log_path"] = str(
                 run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
-            ),
-        })
+            )
+        history.append(entry)
         state = _build_run_state(
             cfg, turns_used=0, history=history, finished_reason=failure_reason,
             transcript_path=transcript_path, recap_path=recap_path,
             wt_path=wt_path, wt_branch=wt_branch,
         )
         _write_run_state(state_path, state)
-        print(reply)
+        print(reply, file=sys.stderr if failure_reason == FINISHED_SETUP_ERROR else sys.stdout)
         print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
         if cfg.recap:
             print(f"[duet] recap: {recap_path}")
@@ -5588,10 +5624,6 @@ def run_duet(cfg: DuetConfig) -> dict:
             timeout_may_continue=may_continue, log=log,
         )
         last_verify_state = result.last_verify_state
-        if cfg.recap:
-            print(_format_live_recap_block(result.recap_block), end="")
-        else:
-            print(result.reply)
 
         if stop.requested and stop.reason == "SIGTERM":
             finished_reason = FINISHED_FORCE_STOP
@@ -5624,11 +5656,12 @@ def run_duet(cfg: DuetConfig) -> dict:
         finished_reason = FINISHED_MAX_TURNS
 
     forced_verify_state = None
-    if finished_reason not in (FINISHED_TIMEOUT, FINISHED_AGENT_ERROR):
+    if finished_reason not in (FINISHED_TIMEOUT, FINISHED_AGENT_ERROR, FINISHED_SETUP_ERROR):
         finished_reason, forced_verify_state = ask_force(
             cfg, history, transcript_path, state_path,
             last_msg, speaker_idx, seen_first_turn,
             finished_reason, wt_path, wt_branch, stop=stop,
+            last_verify_state=last_verify_state,
         )
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
@@ -5670,108 +5703,24 @@ def _print_run_end_notes(cfg: DuetConfig, finished_reason: str, history: list) -
 
 
 def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
-                     forced_msg: str, first_turn_for_agent: bool,
-                     transcript_path: pathlib.Path,
+                     forced_msg: str, transcript_path: pathlib.Path,
+                     state_path: pathlib.Path,
                      wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                      history: list, seen_first_turn: dict,
                      last_verify_state: Optional[dict]) -> _TurnResult:
-    """Run one human-forced continuation turn (the body of `ask_force`'s loop).
-
-    Mirrors `_execute_turn` but with the `-forced` turn labels, a "forced"
-    history flag, and the recap.md path derived from the transcript dir.
-    Mutates `history`/`seen_first_turn`, prints the reply/recap, and returns the
-    outcome `ask_force` needs to decide whether to keep prompting.
-    """
     run_dir = transcript_path.parent
-    label = f"{forced_turn:02d}-forced"
-    t0 = time.time()
-    measured_start = time.monotonic()
-    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
-    if cfg.recap:
-        inflight = _start_recap_inflight(forced_turn, next_speaker.name,
-                                         next_speaker.role, t0)
-    call_succeeded = False
-    failure_reason: Optional[str] = None
-    failure_message: Optional[str] = None
-    try:
-        reply = call_agent(next_speaker, forced_msg, cfg,
-                           first_turn_for_agent=first_turn_for_agent,
-                           run_dir=run_dir, turn_label=label)
-        call_succeeded = True
-    except Exception as e:
-        failure_reason = _agent_finished_reason(e)
-        failure_message = str(e)
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-            inflight = None
-            elapsed = time.monotonic() - measured_start
-            print(f"Turn {forced_turn:02d} | {next_speaker.name} "
-                  f"({next_speaker.role}) · ERROR after "
-                  f"{int(round(elapsed))}s — see "
-                  f"turn-{label}-{next_speaker.name}.stderr.log")
-        reply = _agent_failure_block(failure_reason, e, label, next_speaker, run_dir)
-    if cfg.recap and inflight is not None:
-        _stop_recap_inflight(*inflight)
-    if call_succeeded:
-        guard_cwd_keyed_resume_after_call(cfg, next_speaker, first_turn_for_agent)
-        # Seen only on success — mirrors _execute_turn so a failed forced turn
-        # keeps the agent's first-turn guards intact on the next attempt.
-        seen_first_turn[next_speaker.name] = True
-    elapsed = time.monotonic() - measured_start
-    raw_reply = reply
-    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
-        cfg, raw_reply, call_succeeded, run_dir, label, wt_path)
-    if verify_state is not None:
-        last_verify_state = verify_state
-    reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
-    before_handoff_bytes = len(reply.encode("utf-8"))
-    if wt_path is not None and next_speaker.cwd_override == wt_path:
-        reply = append_worktree_diff(reply, wt_path, wt_branch)
-    recap_block = ""
-    if cfg.recap:
-        # Recap describes the agent's own reply, so parse raw_reply — before any
-        # verify block / worktree diff was appended to `reply` (matches
-        # _execute_turn; otherwise FILES and byte/line counts pick up the diff).
-        parsed = parse_recap_headers(raw_reply)
-        files = extract_files_heuristic(raw_reply)
-        fallbacks = {
-            "recap": _derive_recap_heuristic(raw_reply),
-            "files": ", ".join(files) if files else "none",
-            "status": derive_status_heuristic(next_speaker.role, convergence_hit),
-        }
-        recap_block = format_recap_block(
-            forced_turn, next_speaker.name, next_speaker.role, elapsed,
-            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
-            parsed, fallbacks, convergence_hit,
-        )
-        append_text_atomic(run_dir / "recap.md", recap_block)
-    append_text_atomic(
-        transcript_path,
-        f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
+
+    def log(name: str, role: str, reply: str, kind: str) -> None:
+        append_text_atomic(transcript_path, f"\n## {name} ({role}) — {kind}\n\n{reply}\n")
+
+    return _execute_turn(
+        cfg, turn=forced_turn, speaker=next_speaker, last_msg=forced_msg,
+        run_dir=run_dir, transcript_path=transcript_path,
+        recap_path=run_dir / "recap.md", state_path=state_path,
+        history=history, seen_first_turn=seen_first_turn,
+        wt_path=wt_path, wt_branch=wt_branch,
+        last_verify_state=last_verify_state, forced=True, log=log,
     )
-    history_entry = {"turn": forced_turn, "agent": next_speaker.name,
-                     "forced": True, "len_chars": len(reply), "elapsed_s": elapsed,
-                     "session_id": next_speaker.session_id,
-                     **({"verify": verify_state} if verify_state is not None else {})}
-    _record_tool_denials(history_entry, tool_denials)
-    history_entry["metrics"] = _record_turn_metrics(
-        next_speaker, raw_reply, reply, convergence_hit, cfg,
-        len(reply.encode("utf-8")) - before_handoff_bytes)
-    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
-    if revision is not None:
-        history_entry["approval_revision"] = revision
-    if failure_reason is not None:
-        history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
-        history_entry["stderr_log_path"] = str(
-            run_dir / f"turn-{label}-{next_speaker.name}.stderr.log")
-    history.append(history_entry)
-    if cfg.recap:
-        print(_format_live_recap_block(recap_block), end="")
-    else:
-        print(reply)
-    return _TurnResult(reply, convergence_hit, failure_reason,
-                       last_verify_state, recap_block)
 
 
 def _confirm_final_revision(cfg: DuetConfig, reason: str, history: list,
@@ -5800,13 +5749,13 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               seen_first_turn: dict, reason: str,
               wt_path: Optional[pathlib.Path] = None,
               wt_branch: Optional[str] = None,
-              stop: Optional[StopFlag] = None) -> tuple[str, Optional[dict]]:
+              stop: Optional[StopFlag] = None, *,
+              last_verify_state: Optional[dict] = None) -> tuple[str, Optional[dict]]:
     """Post-loop interactive prompt: human can push another turn or accept."""
     if stop is not None and stop.requested:
         return FINISHED_FORCE_STOP, None
     if not sys.stdin.isatty():
         return reason, None
-    last_verify_state: Optional[dict] = None
     while True:
         waiting = _build_run_state(
             cfg,
@@ -5834,8 +5783,6 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         if not line:
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
-        first_turn_for_agent = not seen_first_turn[next_speaker.name]
-        guard_cwd_keyed_resume_before_call(cfg, next_speaker, first_turn_for_agent)
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
         forced_msg = (
@@ -5845,30 +5792,23 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         )
         result = _run_forced_turn(
             cfg, forced_turn=_loop_turn_count(history) + 1, next_speaker=next_speaker,
-            forced_msg=forced_msg, first_turn_for_agent=first_turn_for_agent,
-            transcript_path=transcript_path, wt_path=wt_path, wt_branch=wt_branch,
+            forced_msg=forced_msg, transcript_path=transcript_path,
+            state_path=state_path, wt_path=wt_path, wt_branch=wt_branch,
             history=history, seen_first_turn=seen_first_turn,
             last_verify_state=last_verify_state,
         )
         last_verify_state = result.last_verify_state
-        forced_reason = result.failure_reason
         if stop is not None and stop.requested:
-            forced_reason = FINISHED_FORCE_STOP
-        # Persist each forced turn so a crash at the next force> prompt doesn't
-        # lose it (the --status/--continue durability contract). finished_reason
-        # stays None mid-loop (duet is alive at the prompt); run_duet writes the
-        # final state with the real reason once ask_force returns.
-        forced_state = _build_run_state(
-            cfg, turns_used=_loop_turn_count(history), history=history,
-            finished_reason=forced_reason,
-            transcript_path=transcript_path,
-            recap_path=transcript_path.parent / "recap.md",
-            last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
-            phase="awaiting_force",
-        )
-        _write_run_state(state_path, forced_state)
-        if forced_reason is not None:
-            return forced_reason, last_verify_state
+            stopped = _build_run_state(
+                cfg, turns_used=_loop_turn_count(history), history=history,
+                finished_reason=FINISHED_FORCE_STOP, transcript_path=transcript_path,
+                recap_path=transcript_path.parent / "recap.md",
+                last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+            )
+            _write_run_state(state_path, stopped)
+            return FINISHED_FORCE_STOP, last_verify_state
+        if result.failure_reason is not None:
+            return result.failure_reason, last_verify_state
         last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
@@ -8041,22 +7981,50 @@ def _agents_from_state(state: dict,
     return agents
 
 
+def _continue_loop_history(state: dict) -> Iterator[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind in _NON_LOOP_HISTORY_KINDS:
+            continue
+        if "turn" in item and _positive_int_or_none(item["turn"]) is None:
+            continue
+        yield item
+
+
 def _next_speaker_idx_from_state(agents: list[Agent], state: dict) -> int:
-    history = state.get("history") or []
-    if isinstance(history, list):
-        for item in reversed(history):
-            if not isinstance(item, dict):
-                continue
-            last_agent = item.get("agent")
-            for idx, agent in enumerate(agents):
-                if agent.name == last_agent:
-                    return 1 - idx
+    for item in _continue_loop_history(state):
+        for idx, agent in enumerate(agents):
+            if agent.name == item.get("agent"):
+                return 1 - idx
     try:
         turns_used = int(state.get("turns_used") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         turns_used = 0
-    # Normal runs start with agent[1], so even turns mean agent[1] is next.
-    return 1 if turns_used % 2 == 0 else 0
+    opening = state.get("start_speaker_idx")
+    if type(opening) is not int or opening not in (0, 1):
+        # The default Codex review task identifies old recipe runs without a saved slot.
+        legacy_review = (not state.get("continue_from")
+                         and state.get("task") == DEFAULT_CODEX_REVIEW_TASK)
+        opening = 0 if legacy_review else 1
+    return 1 - opening if turns_used % 2 else opening
+
+
+def _restore_legacy_codex_sessions(agents: list[Agent], state: dict) -> None:
+    successful = [item for item in _continue_loop_history(state)
+                  if item.get("finished_reason") is None and not item.get("error")]
+    for agent in agents:
+        if agent.backend != "codex" or agent.session_id:
+            continue
+        previous = next((item for item in successful if item.get("agent") == agent.name), None)
+        if previous is not None:
+            pin = previous.get("session_id")
+            agent.session_id = (pin if isinstance(pin, str) and _CODEX_UUID_RE.fullmatch(pin)
+                                else "codex-current")
 
 
 def _continue_note_from_args(
@@ -8087,7 +8055,7 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
                               user_note: Optional[str],
                               worktree_path: Optional[pathlib.Path]) -> str:
     history = state.get("history") or []
-    last = history[-1] if isinstance(history, list) and history else {}
+    last = next(_continue_loop_history(state), None)
     transcript = state.get("transcript_path") or str(run_dir / "transcript.md")
     recap = state.get("recap_path")
     finished = state.get("finished_reason")
@@ -8107,7 +8075,7 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
         lines.append(f"Recap: {recap}")
     if worktree_path is not None:
         lines.append(f"Worktree: {worktree_path}")
-    if isinstance(last, dict) and last:
+    if last:
         lines.append(
             f"Last completed turn: {last.get('turn')} by {last.get('agent')}"
         )
@@ -8196,20 +8164,7 @@ def build_continue_config(run_arg: str,
         permission_mode=permission_mode,
         add_dirs=add_dirs,
     )
-    # Older runs (or runs that crashed before the first state.json roll) may
-    # have Codex agents that already spoke but have no saved session_id. Without
-    # a marker, run_duet would treat the next turn as a fresh `codex exec` and
-    # lose the prior session. Plant the legacy "codex-current" sentinel so
-    # call_codex resumes via `--last` keyed on cwd.
-    history = state.get("history") or []
-    if isinstance(history, list):
-        codex_speakers = {item.get("agent") for item in history
-                          if isinstance(item, dict)}
-        for agent in agents:
-            if (agent.backend == "codex"
-                    and not agent.session_id
-                    and agent.name in codex_speakers):
-                agent.session_id = "codex-current"
+    _restore_legacy_codex_sessions(agents, state)
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
     timeout = _state_int_or_arg(
         args.timeout, state, "per_turn_timeout",
@@ -8285,10 +8240,13 @@ def build_continue_config(run_arg: str,
 
 
 def _humanize_age(seconds: int) -> str:
-    if seconds < 60:           return f"{seconds}s ago"
-    if seconds < 3600:         return f"{seconds // 60}m ago"
-    if seconds < 86400:        return f"{seconds // 3600}h ago"
-    if seconds < 7 * 86400:    return f"{seconds // 86400}d ago"
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
     return f"{seconds // 86400}d ago"
 
 

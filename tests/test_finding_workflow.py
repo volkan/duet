@@ -207,7 +207,7 @@ class TestFindingWorkflow(unittest.TestCase):
                         contextlib.redirect_stdout(io.StringIO()):
                     duet._run_forced_turn(
                         cfg, forced_turn=3, next_speaker=cfg.agents[0], forced_msg="check again",
-                        first_turn_for_agent=True, transcript_path=transcript,
+                        transcript_path=transcript, state_path=run / "state.json",
                         wt_path=None, wt_branch=None, history=history,
                         seen_first_turn={agent.name: False for agent in cfg.agents}, last_verify_state=None)
                 self.assertTrue(history[0]["forced"])
