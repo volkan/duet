@@ -209,7 +209,9 @@ resolved findings) derives from the same latest-assessment data as the
 disposition, and `unresolved_reasons` counts it. `render_finding_report` takes
 an optional run directory: `--report` passes the directory it read, `review.md`
 its own directory, and `_announce_finding_report` prints the counts plus one
-shell-quoted `duet --continue` command with at most five IDs. Without a known
+shell-quoted `duet --continue` command with at most five IDs. A known directory
+also adds `--runs-dir` set to its parent, because `choose_runs_dir` would
+otherwise place the continued run in `./runs`. Without a known
 directory the placeholder `<run>` stays; a dry-run (`state["dry_run"]`) passes no
 directory and prints no command, and an incomplete ledger gets no command. The
 `--continue` kickoff JSON omits `unresolved_reason` so agent-facing text is

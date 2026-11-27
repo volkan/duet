@@ -263,14 +263,15 @@ class TestFindingWorkflow(unittest.TestCase):
                           runs_dir=self.root / "runs with space")
         run = pathlib.Path(state["transcript_path"]).parent
         quoted = shlex.quote(str(run.resolve()))
-        self.assertIn(f"duet --continue {quoted} --resolve L1 --turns 2",
+        quoted_parent = shlex.quote(str(run.resolve().parent))
+        self.assertIn(f"duet --continue {quoted} --runs-dir {quoted_parent} --resolve L1 --turns 2",
                       (run / "review.md").read_text(encoding="utf-8"))
         code, out, err = self._cli("--report", str(run))
         self.assertEqual(code, 0, err)
         line = next(row for row in out.splitlines() if row.startswith("duet --continue"))
         argv = shlex.split(line)
         self.assertEqual(argv[:2], ["duet", "--continue"])
-        cfg = self._continue(pathlib.Path(argv[2]), *argv[3:], "--runs-dir", str(self.root / "continued"))
+        cfg = self._continue(pathlib.Path(argv[2]), *argv[3:])
         self.assertEqual(cfg.resolve_findings, ["L1"])
 
     def test_report_on_a_copied_run_names_the_copy(self) -> None:
@@ -296,7 +297,17 @@ class TestFindingWorkflow(unittest.TestCase):
         self.assertTrue(lines[1].startswith(prefix))
         self.assertEqual(shlex.split(lines[1][len(prefix):]),
                          ["duet", "--continue", str(run.resolve()),
+                          "--runs-dir", str(run.resolve().parent),
                           "--resolve", "L1", "--resolve", "L2", "--resolve", "L3"])
+
+    def test_printed_command_continues_beside_the_source_run(self) -> None:
+        run = self._saved_run("source run", history=self._history(), turns_used=2)
+        lines = self._announce(self._announce_state(run, {"L1": ("supported", None)}))
+        argv = shlex.split(lines[1].split(": ", 1)[1])
+        self.assertEqual(argv[3], "--runs-dir")
+        self.assertEqual(pathlib.Path(argv[4]), run.resolve().parent)
+        cfg = self._continue(pathlib.Path(argv[2]), *argv[3:])
+        self.assertEqual(cfg.runs_dir, run.resolve().parent)
 
     def test_end_of_run_command_lists_at_most_five_ids(self) -> None:
         run = self.root / "many"
@@ -304,7 +315,7 @@ class TestFindingWorkflow(unittest.TestCase):
         lines = self._announce(self._announce_state(run, ids))
         self.assertEqual(len(lines), 3, lines)
         self.assertIn("(8 unresolved: 8 single_assessment, 0 disputed, 0 open)", lines[0])
-        resolved = shlex.split(lines[1].split(": ", 1)[1])[3:]
+        resolved = shlex.split(lines[1].split(": ", 1)[1])[5:]
         self.assertEqual(resolved, [part for number in range(1, 6) for part in ("--resolve", f"L{number}")])
         self.assertIn("3 more unresolved findings are not in this command", lines[2])
         self.assertIn(str(run / "review.md"), lines[2])

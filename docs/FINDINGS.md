@@ -101,12 +101,14 @@ duet --continue RUN_DIR_OR_ID --resolve L1 --resolve P2 --turns 4
 
 The examples above use the placeholder `RUN_DIR_OR_ID`. When a run ends with
 unresolved findings, Duet prints a command that runs as written. It names the
-real run directory, shell-quoted, and the line before it gives the counts per
-reason:
+real run directory and passes the parent of that directory as `--runs-dir`, both
+shell-quoted. The continued run is stored beside the source run. Without
+`--runs-dir`, `--continue` picks its own location, such as `./runs` of the
+current directory. The line before the command gives the counts per reason:
 
 ```text
-[duet] finding report: /path/to/run/review.md (3 unresolved: 2 single_assessment, 1 disputed, 0 open)
-[duet] continue unresolved findings: duet --continue /path/to/run --resolve L1 --resolve L2 --resolve L3
+[duet] finding report: /path/to/runs/run/review.md (3 unresolved: 2 single_assessment, 1 disputed, 0 open)
+[duet] continue unresolved findings: duet --continue /path/to/runs/run --runs-dir /path/to/runs --resolve L1 --resolve L2 --resolve L3
 ```
 
 The command lists at most five IDs, in report order. When more are unresolved,

@@ -7368,8 +7368,12 @@ def _finding_code(value: object) -> str:
 
 def _finding_continue_command(run_dir: Optional[pathlib.Path], ids: list[str],
                               *, turns: Optional[int] = None) -> str:
-    target = shlex.quote(str(run_dir)) if run_dir is not None else "<run>"
-    words = ["duet", "--continue", target]
+    words = ["duet", "--continue"]
+    if run_dir is None:
+        words.append("<run>")
+    else:
+        # Without --runs-dir the continued run lands in ./runs, not beside its source run.
+        words.extend([shlex.quote(str(run_dir)), "--runs-dir", shlex.quote(str(run_dir.parent))])
     for identity in ids:
         words.extend(["--resolve", shlex.quote(identity)])
     if turns is not None:

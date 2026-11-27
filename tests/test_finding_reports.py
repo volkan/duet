@@ -347,7 +347,8 @@ class TestContinuationCommand(unittest.TestCase):
                 self.assertNotIn("<run>", rendered)
                 line = next(row for row in rendered.splitlines() if row.startswith("duet --continue"))
                 self.assertEqual(shlex.split(line),
-                                 ["duet", "--continue", str(run_dir), "--resolve", "L1", "--turns", "2"])
+                                 ["duet", "--continue", str(run_dir), "--runs-dir", str(run_dir.parent),
+                                  "--resolve", "L1", "--turns", "2"])
 
     def test_incomplete_history_offers_no_command(self):
         with mock.patch.object(duet, "_FINDING_EVENT_LIMIT", 1):
