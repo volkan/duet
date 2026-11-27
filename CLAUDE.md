@@ -149,6 +149,8 @@ parsing preserves JSONC comments and OpenCode trailing commas without changing
 quoted strings. `_check_opencode_subagent_policy` checks native resolved config
 before every invocation and refuses managed overrides or unknown depth values;
 the quiet probe shares the turn budget and never logs raw config output.
+OpenCode passes run options separately from the prompt so the v1 probe sees
+the same options when the prompt uses standard input.
 Do not remove these controls on retries or continuations.
 The default Claude review kickoff must deny delegation tools too. Custom
 kickoff/verification shell commands remain explicit caller responsibility.

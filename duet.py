@@ -1697,12 +1697,12 @@ def _delegation_safe_extra_args(agent: Agent) -> list[str]:
     return kept
 
 
-def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
+def _opencode_probe_cwd(run_options: list[str], cwd: pathlib.Path) -> pathlib.Path:
     """Match run's v1 --dir, including an explicit extra-argument override."""
     directory = str(cwd)
-    for index, arg in enumerate(cmd[2:-1], 2):
-        if arg == "--dir" and index + 1 < len(cmd) - 1:
-            directory = cmd[index + 1]
+    for index, arg in enumerate(run_options):
+        if arg == "--dir" and index + 1 < len(run_options):
+            directory = run_options[index + 1]
         elif arg.startswith("--dir="):
             directory = arg.partition("=")[2]
     return (cwd / directory).resolve()
@@ -1828,10 +1828,11 @@ def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
         probe = ["opencode", "debug", "config", "--standalone"]
         probe_cwd = cwd
     else:
+        run_options = cmd[2:]
         probe = ["opencode", "debug", "config"]
-        if "--pure" in cmd[2:-1]:
+        if "--pure" in run_options:
             probe.append("--pure")
-        probe_cwd = _opencode_probe_cwd(cmd, cwd)
+        probe_cwd = _opencode_probe_cwd(run_options, cwd)
     rc, out, _ = _run(probe, cwd=probe_cwd, stdin="",
                       timeout=min(timeout, 30), env_overrides=env_overrides,
                       pid_file_path=pid_file_path, mirror_stderr=False)
@@ -1853,7 +1854,8 @@ def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                stdin: Optional[str], timeout: int,
                stderr_log_path: Optional[pathlib.Path],
                pid_file_path: Optional[pathlib.Path],
-               worktree_confined: bool = False) -> tuple[int, str, str]:
+               worktree_confined: bool = False,
+               prompt_args: Iterable[str] = ()) -> tuple[int, str, str]:
     try:
         with _agent_environment(backend, cwd=cwd,
                                 worktree_confined=worktree_confined) as env_overrides:
@@ -1867,7 +1869,7 @@ def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                 if timeout <= 0:
                     raise subprocess.TimeoutExpired(cmd, 0)
             return _run(
-                cmd,
+                [*cmd, *prompt_args],
                 cwd=cwd,
                 stdin=stdin,
                 timeout=timeout,
@@ -3377,7 +3379,6 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
     cmd = _opencode_run_cmd(agent, eff_cwd, reasoning)
     cmd += _delegation_safe_extra_args(agent)
     prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt)
-    cmd += prompt_args
     rc, out, err = _agent_run(
         cmd,
         backend="opencode",
@@ -3387,6 +3388,7 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
         worktree_confined=bool(agent.cwd_override),
+        prompt_args=prompt_args,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR

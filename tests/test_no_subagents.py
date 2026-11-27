@@ -247,7 +247,7 @@ class TestNoSubagents(unittest.TestCase):
                         self.assertEqual(run.call_args.args[0], probe)
 
     def test_opencode_preflight_uses_child_environment_cwd_and_turn_budget(self):
-        cmd = ["opencode", "run", "--dir", "/original", "--dir=relative", "--pure", "task"]
+        cmd = ["opencode", "run", "--dir", "/original", "--dir=relative", "--pure"]
         env = {"OPENCODE_CONFIG_CONTENT": '{"subagent_depth":0}'}
         with mock.patch.object(duet, "_run", side_effect=[(0, "opencode 1.2.3", ""),
                                                         (0, '{"subagent_depth": 0}', ""),
@@ -256,7 +256,8 @@ class TestNoSubagents(unittest.TestCase):
                 mock.patch.object(duet, "_agent_environment", return_value=contextlib.nullcontext(env)), \
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]):
             result = duet._agent_run(cmd, backend="opencode", cwd=pathlib.Path("/project"),
-                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None)
+                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None,
+                                     prompt_args=("task",))
         self.assertEqual(result, (0, "reply", ""))
         probe, agent = run.call_args_list[1:]
         self.assertEqual(probe.args[0], ["opencode", "debug", "config", "--pure"])
@@ -266,6 +267,34 @@ class TestNoSubagents(unittest.TestCase):
         self.assertEqual(probe.kwargs["env_overrides"], agent.kwargs["env_overrides"])
         self.assertEqual(probe.kwargs["timeout"], 30)
         self.assertEqual(agent.kwargs["timeout"], 58)
+
+    def test_opencode_v1_preflight_uses_run_options_for_both_prompt_transports(self):
+        cwd = pathlib.Path("/project")
+        reply = '{"type":"text","sessionID":"ses_fixture","part":{"id":"p","type":"text","text":"ok"}}'
+        cases = (
+            (["--pure"], ["--pure"], cwd),
+            (["--dir", "nested"], [], cwd / "nested"),
+            (["--dir=nested"], [], cwd / "nested"),
+        )
+        for extra_args, probe_flags, expected_cwd in cases:
+            for use_stdin in (False, True):
+                message = "x" * (64 * 1024) if use_stdin else "hello"
+                with self.subTest(extra_args=extra_args, use_stdin=use_stdin), \
+                        mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 1), \
+                        mock.patch.object(duet, "_run", side_effect=[
+                            (0, '{"subagent_depth": 0}', ""), (0, reply, "")]) as run:
+                    agent = duet.Agent("peer", "opencode", extra_args=extra_args)
+                    self.assertEqual(duet.call_opencode(agent, "system", message, cwd, 60,
+                                                        False, first_turn=True), ("ok", "ses_fixture"))
+                    probe, invocation = run.call_args_list
+                    self.assertEqual(probe.args[0], ["opencode", "debug", "config", *probe_flags])
+                    self.assertEqual(probe.kwargs["cwd"], expected_cwd)
+                    self.assertEqual(probe.kwargs["stdin"], "")
+                    full_prompt = f"=== ROLE ===\nsystem\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+                    command = ["opencode", "run", "--format", "json", "--auto", "--dir", str(cwd),
+                               *extra_args]
+                    self.assertEqual(invocation.args[0], command if use_stdin else [*command, full_prompt])
+                    self.assertEqual(invocation.kwargs["stdin"], full_prompt if use_stdin else None)
 
     def test_opencode_v2_policy_matches_simple_action_wildcards_in_all_scopes(self):
         cases = (
@@ -295,7 +324,7 @@ class TestNoSubagents(unittest.TestCase):
                                 duet._check_opencode_v2_policy_documents(raw)
 
     def test_opencode_v2_preflight_probes_standalone_and_keeps_budget(self):
-        cmd = ["opencode", "run", "--standalone", "--auto", "task"]
+        cmd = ["opencode", "run", "--standalone", "--auto"]
         env = {"OPENCODE_CONFIG_CONTENT": '{"experimental": {"subagent_depth": 0}}'}
         docs = '[{"info": {"experimental": {"subagent_depth": 0}, "permissions": [{"action": "subagent", "resource": "*", "effect": "deny"}]}}]'
         with mock.patch.object(duet, "_run", side_effect=[(0, docs, ""), (0, "reply", "")]) as run, \
@@ -303,7 +332,8 @@ class TestNoSubagents(unittest.TestCase):
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
                 mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
             result = duet._agent_run(cmd, backend="opencode", cwd=pathlib.Path("/project"),
-                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None)
+                                     stdin=None, timeout=60, stderr_log_path=None, pid_file_path=None,
+                                     prompt_args=("task",))
         self.assertEqual(result, (0, "reply", ""))
         probe, agent = run.call_args_list
         self.assertEqual(probe.args[0], ["opencode", "debug", "config", "--standalone"])
@@ -366,7 +396,7 @@ class TestNoSubagents(unittest.TestCase):
                     mock.patch.object(duet, "_run", return_value=(
                         rc, "private-config-content", "private-config-error")) as run:
                 with self.assertRaises(duet.AgentRunError) as error:
-                    duet._agent_run(["opencode", "run", "task"], backend="opencode",
+                    duet._agent_run(["opencode", "run"], backend="opencode",
                                      cwd=pathlib.Path.cwd(), stdin=None, timeout=60,
                                      stderr_log_path=None, pid_file_path=None)
                 self.assertEqual(error.exception.finished_reason, reason)
@@ -379,7 +409,7 @@ class TestNoSubagents(unittest.TestCase):
                 mock.patch.object(duet.time, "monotonic", side_effect=[10.0, 12.0]), \
                 mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
             with self.assertRaises(duet.AgentRunError) as error:
-                duet._agent_run(["opencode", "run", "task"], backend="opencode",
+                duet._agent_run(["opencode", "run"], backend="opencode",
                                  cwd=pathlib.Path.cwd(), stdin=None, timeout=1,
                                  stderr_log_path=None, pid_file_path=None)
             self.assertEqual(error.exception.finished_reason, duet.FINISHED_TIMEOUT)

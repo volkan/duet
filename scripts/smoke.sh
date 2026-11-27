@@ -98,6 +98,47 @@ expect_stdout "copilot dry-run accepted"     0 "dry-run copilot/copilot-partner"
 expect_stdout "copilot reasoning accepted"   0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner copilot:coder --turns 1 --reasoning max
 expect_stdout "opencode dry-run accepted"    0 "dry-run opencode/opencode-partner" "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1
 expect_stdout "opencode reasoning accepted"  0 "reasoning=max"      "$DUET" --task "x" --dry-run --cwd "$TMPD" --partner opencode:coder --turns 1 --reasoning max
+expect "opencode v1 stdin preserves the probe options" 0 python3 - "$DUET_ABS" "$TMPD" <<'PY'
+import json
+import os
+import pathlib
+import subprocess
+import sys
+
+duet, tmp = sys.argv[1:]
+root = pathlib.Path(tmp) / "opencode-stdin"
+root.mkdir()
+shim = root / "opencode"
+shim.write_text(
+    '#!/bin/sh\n'
+    'case "$1" in\n'
+    '  --version) printf "1.18.12\\n";;\n'
+    '  debug) test "$2 $3" = "config --pure" || exit 1;\n'
+    '         printf \'{"subagent_depth":0,"fixture":"mock-config-output"}\\n\';\n'
+    '         printf "mock-config-stderr\\n" >&2;;\n'
+    '  run) test "$7" = "--pure" && test "$#" = 7 || exit 1;\n'
+    '       grep -q "fixture-message-tail$" || exit 1;\n'
+    '       printf \'{"type":"text","sessionID":"ses_smoke","part":{"id":"p","type":"text","text":"opencode-stub-reply"}}\\n\';;\n'
+    '  *) exit 1;;\n'
+    'esac\n',
+    encoding="utf-8",
+)
+shim.chmod(0o755)
+config = root / "config.json"
+config.write_text(json.dumps({
+    "cwd": str(root), "max_turns": 1,
+    "task": "x" * (64 * 1024) + "\nfixture-message-tail",
+    "agents": [{"name": name, "backend": "opencode", "role": "reviewer",
+                "extra_args": ["--pure"]} for name in ("lead", "partner")],
+}), encoding="utf-8")
+env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+           OPENCODE_CONFIG_CONTENT="{}")
+result = subprocess.run([duet, "--config", str(config), "--no-metrics"], env=env,
+                        text=True, capture_output=True, timeout=30)
+assert result.returncode == 0, result.stderr
+assert "opencode-stub-reply" in result.stdout
+assert "mock-config-" not in result.stdout + result.stderr
+PY
 # --on-turn-timeout is a choices flag: bad values must die in argparse (rc=2).
 expect "on-turn-timeout bad value"           2 "$DUET" --task "x" --dry-run --cwd "$TMPD" --on-turn-timeout sometimes
 # Reasoning-scaled default per-turn timeout: without --timeout, max reasoning
