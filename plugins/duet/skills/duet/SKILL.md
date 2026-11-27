@@ -308,8 +308,9 @@ Run it, or any `--continue`, only when the user asked for the follow-up or said
 yes to your offer: it is a new run that resumes the same agents and worktree,
 costs model turns, and sends repository content out again. `--resolve` takes two
 turns by default (`--turns N`, N at least 2) and promises no agreement. Always
-pass `--runs-dir` set to the directory that holds the source run: older releases
-write the new run to `./runs/<id>` without it. If `--continue` refuses
+pass `--runs-dir` set to the directory that holds the source run: without it,
+Duet can write the new run to `./runs/<id>` in the current directory instead of
+beside the source run. If `--continue` refuses
 state-sourced settings (saved `verify_cmd`, `extra_args`, access roots), report
 the message; add `--trust-state` only when the user asks after seeing it,
 because it replays saved commands and wider access. A dry-run does not show this

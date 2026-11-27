@@ -265,8 +265,8 @@ end of the run.
 For a custom launch, the skill reads flags from `duet --help`, adds
 `--finding-reports`, and puts context in a `--task @FILE` brief. After a run, it
 relays findings as assessments, not proof. It runs `duet --continue --resolve`
-only after you agree, with `--runs-dir`: older releases write the new run to
-`./runs/<id>` in the project root. See
+only after you agree, with `--runs-dir`: without it, Duet can write the new run
+to `./runs/<id>` in the current directory instead of beside the source run. See
 [Custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches),
 [After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
 [FINDINGS.md](FINDINGS.md#continue-an-unresolved-finding), and [USAGE.md](USAGE.md#after-a-run-finishes).
