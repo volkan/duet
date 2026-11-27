@@ -272,7 +272,7 @@ class TestUnresolvedReasons(unittest.TestCase):
         self.assertEqual((report["schema_version"], report["kind"]), (1, "duet.finding.report"))
         schema_one = {"schema_version", "kind", "enabled", "available", "phase", "finished_reason",
                       "events", "findings", "summary", "structured_turns", "executed_checks",
-                      "truncated"}
+                      "execution_limits", "truncated"}
         self.assertEqual(set(report), schema_one | {"unresolved_reasons"})
         finding_schema_one = {"id", "claim", "disposition", "assessment_basis", "assessments",
                               "missing_evidence_slots", "last_open_objection"}
