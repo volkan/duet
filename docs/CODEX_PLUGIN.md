@@ -332,6 +332,46 @@ See [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
 Review or merge from the host repository using the commands duet prints at the
 end of the run.
 
+## Approval and escalation
+
+Duet starts other model CLIs, so Codex runs each Duet launch as an escalated
+command. This includes `duet --continue`. Escalation of the launch is the normal
+path. `duet --status` and `duet --report` send nothing to a model service. They
+need no content approval and normally run without escalation.
+
+Codex auto-review can deny a launch. A typical reason is that the run sends
+repository content to external model services without your explicit approval for
+that transfer. If auto-review denies a launch, the skill does this:
+
+1. It stops. It does not retry, rephrase, or split the command. A changed command
+   sends the same content.
+2. It tells you about the denial. It names the content that the run sends (task
+   text, files, or a diff) and the model services behind the two peers, for
+   example Anthropic for Claude and OpenAI for Codex. It asks you to approve.
+3. It waits for your approval. The approval must be your affirmative reply to that
+   question. You send it after the denial. Your original request to run Duet does
+   not count. A question or a message from before the denial does not count.
+4. It launches the run after that approval. After a second denial, it stops and
+   reports.
+
+After a denial, the skill does not change the launch to get it accepted. It
+does not use wider peer access, another sandbox, or another permission mode. You
+approved that launch only. The skill also never adds `--sandbox
+danger-full-access` or `--permission-mode bypassPermissions` unless you name
+those exact flags. Both flags remove the sandbox and permission checks of the
+peers. The skill rule is in [Codex host approval](../plugins/duet/skills/duet/SKILL.md#codex-host-approval).
+
+## Custom launches and results
+
+For a custom launch, the skill reads flags from `duet --help`, adds
+`--finding-reports`, and puts context in a `--task @FILE` brief. After a run, it
+relays findings as assessments, not proof. It runs `duet --continue --resolve`
+only after you agree, with `--runs-dir`: without it, Duet can write the new run
+to `./runs/<id>` in the current directory instead of beside the source run. See
+[Custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches),
+[After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
+[FINDINGS.md](FINDINGS.md#continue-an-unresolved-finding), and [USAGE.md](USAGE.md#after-a-run-finishes).
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -343,6 +383,7 @@ end of the run.
 | The default recipe says `claude` is not on PATH | The missing binary is `claude`; install or authenticate Claude Code for the default `/review` recipe, or explicitly choose `--recipe codex-review` for the Codex-only path. |
 | The default recipe says `codex` is not on PATH | Install Codex, or use a custom partner/config that does not require Codex. |
 | No run metadata appears | Check the original duet process. A valid launch atomically creates the requested run-info file before `/review`; never scrape banners as a fallback. |
+| Auto-review denies a Duet launch | Follow [Approval and escalation](#approval-and-escalation). Do not retry or rephrase the command. Answer the skill's question with an affirmative reply that you send after the denial. The skill then launches the run. After a second denial, the skill stops and reports. |
 | The upstream command exits non-zero or prints no stdout | `duet --task-from-cmd` fails loud. Run that shell command directly in the target repo and fix its output first. |
 
 For a ZCode model peer, use the [native ZCode backend](ZCODE.md).

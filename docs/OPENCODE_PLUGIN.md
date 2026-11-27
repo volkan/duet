@@ -260,6 +260,17 @@ See [worktree access](USAGE.md#access-to-the-worktree-from-the-other-agent).
 Review or merge from the host repository using the commands duet prints at the
 end of the run.
 
+## Custom launches and results
+
+For a custom launch, the skill reads flags from `duet --help`, adds
+`--finding-reports`, and puts context in a `--task @FILE` brief. After a run, it
+relays findings as assessments, not proof. It runs `duet --continue --resolve`
+only after you agree, with `--runs-dir`: without it, Duet can write the new run
+to `./runs/<id>` in the current directory instead of beside the source run. See
+[Custom launches](../plugins/duet/skills/duet/SKILL.md#custom-launches),
+[After the run ends](../plugins/duet/skills/duet/SKILL.md#after-the-run-ends),
+[FINDINGS.md](FINDINGS.md#continue-an-unresolved-finding), and [USAGE.md](USAGE.md#after-a-run-finishes).
+
 ## Troubleshooting
 
 | Symptom | Fix |
