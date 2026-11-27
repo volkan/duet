@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import subprocess
 import sys
 import tempfile
-import venv
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUN_INFO_KEYS = {
@@ -37,10 +37,31 @@ def _source_version() -> str:
     raise RuntimeError("duet.py has no literal __version__")
 
 
-def _run(command: list[str], cwd: pathlib.Path) -> subprocess.CompletedProcess:
+def _check_environment(home: pathlib.Path) -> dict[str, str]:
+    env = dict(os.environ)
+    for key in ("PYTHONHOME", "PYTHONPATH"):
+        env.pop(key, None)
+    env.update(
+        HOME=str(home),
+        USERPROFILE=str(home),
+        APPDATA=str(home / "appdata"),
+        LOCALAPPDATA=str(home / "local-appdata"),
+        XDG_CACHE_HOME=str(home / ".cache"),
+        XDG_CONFIG_HOME=str(home / ".config"),
+        XDG_DATA_HOME=str(home / ".local" / "share"),
+        XDG_STATE_HOME=str(home / ".local" / "state"),
+        PIP_CONFIG_FILE=os.devnull,
+    )
+    return env
+
+
+def _run(
+    command: list[str], cwd: pathlib.Path, env: dict[str, str],
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -57,16 +78,20 @@ def check(dist_dir: pathlib.Path) -> None:
         raise RuntimeError(f"missing wheel: {wheel}")
     with tempfile.TemporaryDirectory(prefix="duet-wheel-check-") as raw:
         root = pathlib.Path(raw)
+        home = root / "home"
+        home.mkdir()
+        env = _check_environment(home)
         env_dir = root / "venv"
-        venv.EnvBuilder(with_pip=True).create(env_dir)
+        _run([sys.executable, "-m", "venv", str(env_dir)], root, env)
         bin_dir = env_dir / ("Scripts" if sys.platform == "win32" else "bin")
         python = bin_dir / ("python.exe" if sys.platform == "win32" else "python")
         duet = bin_dir / ("duet.exe" if sys.platform == "win32" else "duet")
         _run([
-            str(python), "-m", "pip", "install", "--no-deps", str(wheel),
-        ], root)
+            str(python), "-m", "pip", "--isolated", "install", "--no-index", "--no-deps",
+            str(wheel),
+        ], root, env)
 
-        version_result = _run([str(duet), "--version"], root)
+        version_result = _run([str(duet), "--version"], root, env)
         if version_result.stdout.strip() != f"duet {version}":
             raise RuntimeError(f"unexpected --version output: {version_result.stdout!r}")
 
@@ -77,7 +102,7 @@ def check(dist_dir: pathlib.Path) -> None:
             str(duet), "--dry-run", "--recap", "--task", "installed wheel smoke",
             "--cwd", str(target_cwd), "--runs-dir", "relative-runs",
             "--run-info-file", str(info_path),
-        ], root)
+        ], root, env)
         launch = json.loads(info_path.read_text(encoding="utf-8"))
         state = json.loads(
             pathlib.Path(launch["state_path"]).read_text(encoding="utf-8")
@@ -93,7 +118,7 @@ def check(dist_dir: pathlib.Path) -> None:
             raise RuntimeError(f"installed supervisor identity missing: {state}")
         status_result = _run([
             str(duet), "--status", launch["run_dir"], "--json",
-        ], root)
+        ], root, env)
         status = json.loads(status_result.stdout)
         if set(launch) != RUN_INFO_KEYS:
             raise RuntimeError(f"bad installed run-info keys: {sorted(launch)}")

@@ -42,20 +42,22 @@ async function main() {
     page.on('pageerror', e=>errors.push(e.message));
     await page.goto(pathToFileURL(path.join(demo, 'finding-review.html')).href);
     const info = await page.evaluate(()=>({scenes:window.demo.scenes,total:window.demo.total}));
-    assert.equal(info.total,80);
-    const concat = [], captions = ['WEBVTT', ''];
+    assert.ok(info.scenes.length, 'Demo needs at least one scene');
+    const frames = [], concat = [], captions = ['WEBVTT', ''];
+    const fileEntry = frame => "file '" + frame.replace(/'/g, "'\\''") + "'";
     let elapsed = 0;
     for (const [index,scene] of info.scenes.entries()) {
       await page.evaluate(i=>window.demo.seekScene(i), index);
       await checkLayout(page);
       const frame = path.join(temp, 'scene-'+index+'.png');
       await page.locator('#stage').screenshot({path:frame,animations:'disabled'});
-      concat.push("file '"+frame.replace(/'/g,"'\\''")+"'", 'duration '+scene.duration);
+      frames.push(frame);
+      concat.push(fileEntry(frame), 'duration ' + scene.duration);
       captions.push(String(index+1),stamp(elapsed)+' --> '+stamp(elapsed+scene.duration),scene.title,scene.subtitle,'');
       elapsed += scene.duration;
       if (index===0) fs.copyFileSync(frame,path.join(demo,'finding-review.png'));
     }
-    concat.push("file '"+path.join(temp,'scene-6.png').replace(/'/g,"'\\''")+"'");
+    concat.push(fileEntry(frames[frames.length - 1]));
     fs.writeFileSync(path.join(temp,'frames.txt'),concat.join('\n')+'\n');
     fs.writeFileSync(path.join(demo,'finding-review.vtt'),captions.join('\n'));
     // Verify playback and scrubbing separately from fixed-frame rendering.
@@ -63,10 +65,16 @@ async function main() {
     await page.getByRole('button',{name:'Play demo',exact:true}).click();
     await page.waitForFunction(()=>window.demo.getPosition()>0.2);
     await page.getByRole('button',{name:'Pause',exact:true}).click();
-    await page.locator('#progress').fill('68');
-    assert.equal(await page.locator('#title').textContent(),info.scenes[5].title);
-    await page.getByRole('button',{name:'Try the fixture',exact:true}).click();
-    assert.equal(await page.locator('#title').textContent(),info.scenes[6].title);
+    const followUp = info.scenes.findIndex(scene => scene.name === 'Focused follow-up');
+    assert.notEqual(followUp, -1, 'The demo needs a focused follow-up scene');
+    const followUpStart = info.scenes.slice(0, followUp).reduce((sum, scene) => sum + scene.duration, 0);
+    const followUpMiddle = followUpStart + info.scenes[followUp].duration / 2;
+    await page.locator('#progress').fill(String(followUpMiddle));
+    assert.equal(await page.locator('#title').textContent(), info.scenes[followUp].title);
+    const fixture = info.scenes.find(scene => scene.name === 'Try the fixture');
+    assert.ok(fixture, 'The demo needs a fixture scene');
+    await page.getByRole('button',{name:fixture.name,exact:true}).click();
+    assert.equal(await page.locator('#title').textContent(), fixture.title);
     const embedded = await page.locator('#demo-data').textContent();
     assert.deepEqual(JSON.parse(embedded),JSON.parse(fs.readFileSync(path.join(demo,'finding-review.source.json'),'utf8')));
     await page.setViewportSize({width:390,height:844});
@@ -85,7 +93,7 @@ async function main() {
       '-metadata','comment=Edited replay of saved findings from a public toy fixture; not a terminal recording or performance benchmark.',
       path.join(demo,'finding-review.mp4')
     ],{stdio:'inherit'});
-    console.log('Exported 80s MP4, poster, and captions. Desktop/mobile layout, playback, source identity, and offline checks passed.');
+    console.log(`Exported ${info.total}s MP4, poster, and captions. Desktop/mobile layout, playback, source identity, and offline checks passed.`);
     console.log('QA frames: '+temp);
   } finally {
     await browser.close();

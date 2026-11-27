@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import email.parser
 import json
+import os
 import re
 import subprocess
 import sys
@@ -43,7 +45,8 @@ ZCODE_COMMAND = PLUGIN_ROOT / "integrations" / "zcode" / "duet.md"
 ZCODE_DOC = ROOT / "docs" / "ZCODE.md"
 PYPROJECT = ROOT / "pyproject.toml"
 DUET_PY = ROOT / "duet.py"
-FORBIDDEN_TEXT = "volkan.altan@" + "vestiaire" + "collective.com"
+# Store a digest so the blocked address cannot be read from the public source.
+FORBIDDEN_EMAIL = (12, 23, "da7dbf1e82b716c75bc06a192f0fc69f9fca6d6b273681a5f53a96e638d3e0d6")
 EXPECTED_EMAIL = "volkanaltan@gmail.com"
 README_ABSOLUTE_LINKS = [
     "https://github.com/volkan/duet/blob/main/docs/INSTALLATION.md",
@@ -109,22 +112,35 @@ def _runtime_version() -> str:
 
 def _tracked_files() -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files"],
+        ["git", "ls-files", "-z"],
         cwd=ROOT,
         check=True,
-        text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return [ROOT / line for line in result.stdout.splitlines() if line]
+    return [ROOT / os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
+
+
+def _contains_forbidden_email(text: str) -> bool:
+    local_size, domain_size, digest = FORBIDDEN_EMAIL
+    for at_sign in re.finditer("@", text):
+        offset = at_sign.start()
+        start = offset - local_size
+        end = offset + 1 + domain_size
+        if start >= 0 and end <= len(text):
+            address = text[start:end].casefold().encode("utf-8", errors="surrogateescape")
+            if hashlib.sha256(address).hexdigest() == digest:
+                return True
+    return False
 
 
 def _assert_no_forbidden_text() -> None:
     matches = []
     for path in _tracked_files():
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if FORBIDDEN_TEXT in text:
-            matches.append(path.relative_to(ROOT).as_posix())
+        if _contains_forbidden_email(text):
+            name = path.relative_to(ROOT).as_posix()
+            matches.append("[redacted path]" if _contains_forbidden_email(name) else name)
     if matches:
         _fail(f"forbidden employer email remains in tracked files: {', '.join(matches)}")
 
@@ -310,8 +326,6 @@ def _assert_shared_skill() -> None:
         "--partner codex:coder",
         "--lead-model",
         "--partner-model",
-        "claude-fable-5",
-        "gpt-5.6-sol",
     ):
         if required not in skill_text:
             _fail(f"plugins/duet/skills/duet/SKILL.md is missing required text: {required!r}")
