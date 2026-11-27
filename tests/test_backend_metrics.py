@@ -61,6 +61,33 @@ class TestBackendMetrics(unittest.TestCase):
         self.assertEqual(high["reasoning_effective"], "high")
         self.assertEqual(high["reasoning_transport"], "prompt")
 
+    def test_opencode_v2_without_model_reports_actual_reasoning_transport(self) -> None:
+        agent = duet.Agent(name="opencode", backend="opencode", role="planner")
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 2):
+            for level, effective, transport in (
+                ("minimal", None, "native_default"), ("low", None, "native_default"),
+                ("medium", None, "native_default"), ("high", "high", "prompt"),
+                ("xhigh", "xhigh", "prompt"), ("max", "max", "prompt"),
+            ):
+                with self.subTest(level=level):
+                    profile = duet.metrics_agent_profile(agent, self._cfg(agent, reasoning=level))
+                    self.assertEqual(profile["reasoning_requested"], level)
+                    self.assertEqual(profile["reasoning_effective"], effective)
+                    self.assertIsNone(profile["reasoning_backend_value"])
+                    self.assertEqual(profile["reasoning_transport"], transport)
+        with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", 1):
+            profile = duet.metrics_agent_profile(agent, self._cfg(agent, reasoning="low"))
+        self.assertEqual(profile["reasoning_transport"], "flag")
+        self.assertEqual(profile["reasoning_backend_value"], "low")
+
+    def test_central_turn_preserves_only_known_prompt_transport_labels(self) -> None:
+        snapshot = duet._metrics_snapshot_turn(
+            {"turn": 1, "metrics": {"prompt_transport": "combined_stdin"}}, {})
+        self.assertEqual(snapshot["prompt_transport"], "combined_stdin")
+        self.assertEqual(duet._metrics_report_turn(snapshot)["prompt_transport"], "combined_stdin")
+        snapshot = duet._metrics_snapshot_turn({"metrics": {"prompt_transport": ["secret"]}}, {})
+        self.assertIsNone(snapshot["prompt_transport"])
+
     def test_profile_marks_unpersisted_extra_args_without_exposing_them(self) -> None:
         agent = duet.Agent(name="coder", backend="codex", extra_args=["-c", "x=y"])
         profile = duet.metrics_agent_profile(agent, self._cfg(agent))

@@ -155,8 +155,8 @@ Report a rejected ID without substituting another model.
 
 OpenCode v1 receives the requested effort through `--variant`. OpenCode v2
 requires an explicit model to receive effort through `-m provider/model#<level>`.
-Without a model, v2 receives only the prompt prefix and Duet prints a note.
-High, xhigh, and max add prompt nudges; other levels have no prompt nudge.
+Without a model, v2 uses native reasoning and Duet prints a note.
+Only high, xhigh, and max add prompt guidance.
 Report this limit without choosing another model or changing the requested effort.
 
 For an explicit v2 peer model, inspect its resolved variants before launch.
@@ -236,8 +236,9 @@ means the backend did not report denials.
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
 `artifacts.transcript` file and the stderr log that it names.
-For `setup_error` or `kickoff_error`, there is no such block. Report the
-full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+For `setup_error`, read the `[duet] SETUP ERROR` transcript block when present.
+Otherwise, report the `[duet] ERROR:` message from the Duet process output.
+For `kickoff_error`, read the transcript excerpt and the stderr log it names.
 
 You can also list recent runs:
 

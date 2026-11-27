@@ -16,6 +16,7 @@ level, and asserts:
   - copilot is invoked with `--effort <mapped>`
   - opencode v1 carries the level as `--variant <level>`; v2 uses
     `-m model#<level>` (identity map; v2 errors on an unknown variant)
+  - OpenCode v2 uses native defaults or prompt nudges without an explicit model
   - gemini is invoked without any effort flag, because Gemini CLI has no
     documented reasoning-effort option
   - the system-prompt prefix contains the right reasoning-nudge marker for
@@ -172,8 +173,24 @@ def main() -> int:
             )
             opencode_commands[opencode_major] = captured[-1]
 
+        unpinned = m.Agent(name="unpinned", backend="opencode", role="coder")
+        cfg = m.DuetConfig(cwd=pathlib.Path("."), agents=[a_cl, unpinned], reasoning=lvl,
+                           metrics_enabled=True)
+        captured.clear()
+        m.call_agent(unpinned, "msg", cfg, first_turn_for_agent=True)
+        unpinned_cmd = captured[-1]
+
         want = EXPECTED[lvl]
         problems: list[str] = []
+        nudged = lvl in {"high", "xhigh", "max"}
+        expected_reasoning = (lvl if nudged else None, None, "prompt" if nudged else "native_default")
+        observed_reasoning = tuple(unpinned.last_call_metrics[key] for key in (
+            "reasoning_effective", "reasoning_backend_value", "reasoning_transport"))
+        if ("-m" in unpinned_cmd or "--variant" in unpinned_cmd
+                or observed_reasoning != expected_reasoning):
+            problems.append("opencode v2 no-model reasoning command or metrics changed")
+        if nudged and want["prefix_marker"] not in unpinned_cmd[-1][:60]:
+            problems.append(f"opencode v2 no-model prompt missing {want['prefix_marker']!r}")
         if want["prefix_marker"] not in prefix[:30]:
             problems.append(f"claude prefix missing {want['prefix_marker']!r}")
         if effort != want["effort"]:

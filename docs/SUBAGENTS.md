@@ -45,9 +45,10 @@ credentials or changes the user's global configuration.
 OpenCode managed configuration can override inline settings, so the native
 configuration check must succeed before the peer starts. It uses the same
 child environment and effective working directory, runs no model request,
-and has a 30-second cap within the turn's time budget. Duet does not print or
-persist the configuration output. A failed check ends the turn; it never
-falls back to running the peer without the check.
+and has a 30-second cap within the turn's time budget. On v1, the check uses
+the run's `--dir` and `--pure` settings whether the prompt uses an argument
+or standard input. Duet does not print or persist the configuration output.
+A failed check ends the turn before the peer starts.
 
 The v2 check refuses any source with an `allow` or `ask` action matching `subagent` or `task`.
 It checks top-level and agent-scoped rules, including legacy permission maps.

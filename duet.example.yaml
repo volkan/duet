@@ -18,6 +18,7 @@ runs_dir: runs
 # Central, privacy-bounded performance snapshots. Collection is enabled by
 # default unless DUET_METRICS=0; that opt-out overrides this setting.
 # Set false to disable collection for this run without changing the environment.
+# Metrics include the prompt transport used for each launched turn.
 # metrics_enabled: true
 # Label manual evaluations separately from ordinary live runs. Dry runs are
 # always reported separately. Accepted values: live | test.
@@ -38,6 +39,7 @@ dry_run: false                # CLI --dry-run always enables preview, even when 
 # Claude: minimal maps to low.
 # Copilot: minimal maps to none.
 # Gemini: no effort flag; high/xhigh/max are prompt nudges only.
+# OpenCode v2 without a model uses native reasoning; high/xhigh/max add prompt guidance.
 # reasoning: high
 
 # Backend-specific safety:
@@ -192,8 +194,8 @@ agents:
 # comments and trailing commas. Explicit permission denials still apply.
 # --sandbox, permission_mode, and add_dirs do not apply. Reasoning maps to
 # `run --variant` on v1 and `--model provider/model#level` on v2; a v2 peer
-# needs an explicit model for reasoning, otherwise only the prompt prefix
-# carries the effort request. Models use OpenCode's provider/model form.
+# needs an explicit model to apply a reasoning variant. Without a model,
+# high/xhigh/max add prompt guidance. Models use OpenCode's provider/model form.
 # agents:
 #   - name: opencode-lead
 #     backend: opencode

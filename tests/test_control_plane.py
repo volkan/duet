@@ -7,11 +7,13 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 import duet
+from scripts.duet_loop_e2e import parse_transcript
 
 
 def _agents() -> list[duet.Agent]:
@@ -195,6 +197,25 @@ class TestCodexReviewRecipe(unittest.TestCase):
             self.assertEqual(cfg.worktree_path, pathlib.Path(raw).resolve())
             self.assertFalse(cfg.worktree)
             self.assertTrue(cfg.require_worktree)
+
+    def test_continue_keeps_reviewer_first_after_setup_failed_before_turn_one(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            cfg = self._cfg("--cwd", str(root), "--runs-dir", str(root / "runs"),
+                            "--worktree-path", str(root / "absent"), "--task", "review this",
+                            "--no-metrics")
+            with mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                state = duet.run_duet(cfg)
+                run = pathlib.Path(state["transcript_path"]).parent
+                parser = duet._build_arg_parser()
+                args = parser.parse_args(["--continue", str(run)])
+                resumed = duet.build_continue_config(str(run), args, parser, {})
+            self.assertEqual(state["finished_reason"], duet.FINISHED_SETUP_ERROR)
+            self.assertEqual(state["turns_used"], 0)
+            self.assertEqual(state["start_speaker_idx"], 0)
+            self.assertEqual(resumed.start_speaker_idx, 0)
 
     def test_two_reviewers_can_share_a_read_only_checkout(self) -> None:
         cfg = self._cfg("--partner", "codex:reviewer", "--no-worktree",
@@ -500,6 +521,192 @@ class TestRunInfoAndLaunchFailures(unittest.TestCase):
             kickoff_log = pathlib.Path(run["run_dir"]) / "turn-00-kickoff.stderr.log"
             self.assertNotIn(secret, kickoff_log.read_text(encoding="utf-8"))
 
+    def test_kickoff_failure_bounds_error_replay_and_retains_full_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw).resolve()
+            middle = "x" * (4 * duet.AGENT_ERROR_TRANSCRIPT_MAX_CHARS)
+            full_error = f"stderr-head\n{middle}\nstderr-tail\n"
+            source = ("import sys; "
+                      f"sys.stderr.write('stderr-head\\n' + 'x' * {len(middle)} + '\\nstderr-tail\\n'); "
+                      "sys.exit(1)")
+            command = duet.shlex.join([sys.executable, "-c", source])
+            cfg = self._cfg(root, root / "run.json", task_from_cmd=command,
+                            metrics_enabled=False)
+            err = io.StringIO()
+            with mock.patch.object(duet, "_register_run_in_home_index"), \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                state = duet.run_duet(cfg)
+            transcript = pathlib.Path(state["transcript_path"]).read_text()
+            log = pathlib.Path(state["history"][0]["stderr_log_path"])
+            self.assertEqual(state["finished_reason"], duet.FINISHED_KICKOFF_ERROR)
+            self.assertIn(full_error, log.read_text())
+            for output in (transcript, err.getvalue()):
+                self.assertIn("stderr-head", output)
+                self.assertIn("stderr-tail", output)
+                self.assertIn("characters omitted", output)
+                self.assertIn(str(log), output)
+                self.assertLess(len(output), duet.AGENT_ERROR_TRANSCRIPT_MAX_CHARS + 500)
+
+
+class TestCwdKeyedResumeRun(unittest.TestCase):
+    UUID = "11111111-1111-4111-8111-111111111111"
+    REPLY = "LGTM rationale: the candidate meets the review criteria.\n<<<LGTM>>>"
+
+    def _run_cli(self, root, case, answers, calls):
+        config = root / "config.json"
+        agents = [{"name": name, "backend": "codex", "role": role}
+                  for name, role in (("lead", "reviewer"), ("partner", "coder"))]
+        if case in {"seed", "force-before"}:
+            agents[0]["session_id"] = "codex-current"
+        if case == "loop-before":
+            agents[1]["session_id"] = "codex-current"
+        config.write_text(json.dumps({
+            "cwd": str(root), "agents": agents, "task": "review",
+            "kickoff": "explicit feedback" if case.startswith("force") else None,
+            "max_turns": 1, "finding_reports": True,
+        }))
+        info = root / "run.json"
+        output = io.StringIO()
+        error = io.StringIO()
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            rc, reply, stderr = answers[len(calls) - 1]
+            log = kwargs["stderr_log_path"]
+            log.write_text(stderr)
+            if "-forced-" in log.name:
+                saved = json.loads((log.parent / "state.json").read_text())
+                self.assertEqual(saved["phase"], "turn_running")
+                self.assertEqual(saved["turns_used"], 1)
+                self.assertIn("--- Turn 02-forced", output.getvalue())
+            return rc, reply, stderr
+
+        with mock.patch.object(duet.sys, "argv", ["duet", "--config", str(config),
+                               "--runs-dir", str(root / "runs"), "--run-info-file", str(info),
+                               "--no-metrics", "--quiet"]), \
+                mock.patch.object(duet, "_register_run_in_home_index"), \
+                mock.patch.object(duet, "_run", side_effect=fake_run), \
+                mock.patch.object(duet.sys.stdin, "isatty", return_value=case.startswith("force")), \
+                mock.patch("builtins.input", side_effect=["inspect again"]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            self.assertEqual(duet.main(), 1)
+        self.assertIn("cannot safely continue codex/codex", error.getvalue())
+        return pathlib.Path(json.loads(info.read_text())["run_dir"])
+
+    def test_isolation_failures_keep_terminal_state_and_audit(self) -> None:
+        pinned = (0, "first reply", f"session id: {self.UUID}\n")
+        unsafe = (0, self.REPLY, "backend diagnostic\n")
+        cases = {"seed": [], "loop-before": [], "loop-after": [unsafe],
+                 "force-before": [pinned], "force-after": [pinned, unsafe]}
+        for case, answers in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                calls = []
+                with mock.patch.object(duet, "_write_run_state",
+                                       wraps=duet._write_run_state) as write:
+                    run = self._run_cli(pathlib.Path(raw).resolve(), case, answers, calls)
+                if not answers:
+                    phases = [call.args[1]["phase"] for call in write.call_args_list]
+                    self.assertNotIn("turn_running", phases)
+                saved = json.loads((run / "state.json").read_text())
+                entry = saved["history"][-1]
+                transcript_path = run / "transcript.md"
+                transcript = transcript_path.read_text()
+                self.assertEqual(len(calls), len(answers))
+                self.assertTrue(all("resume" not in cmd for cmd in calls))
+                self.assertEqual(saved["phase"], "finished")
+                self.assertEqual(saved["finished_reason"], "setup_error")
+                self.assertEqual(saved["turns_used"], len(answers))
+                self.assertEqual(entry["finished_reason"], "setup_error")
+                self.assertIn("cannot safely continue codex/codex", entry["error"])
+                self.assertIn("cannot safely continue codex/codex", transcript)
+                self.assertNotIn("approval_revision", entry)
+                self.assertNotIn("finding_updates", entry)
+                if case.startswith("force"):
+                    self.assertTrue(entry["forced"])
+                    self.assertIn("human — force-feedback", transcript)
+                    self.assertEqual(saved["agents"][1]["session_id"], self.UUID)
+                    turns = parse_transcript(transcript_path, duet)
+                    agent_turns = [turn.kind for turn in turns if turn.kind in {"agent", "forced"}]
+                    self.assertEqual(agent_turns, ["agent", "forced"][:len(answers)])
+                    [feedback] = [turn for turn in turns if turn.kind == "force-feedback"]
+                    self.assertEqual(feedback.body, "inspect again")
+                    heading = "setup_error" if case == "force-before" else "forced"
+                    self.assertIn(f"## lead (reviewer) — {heading}", transcript)
+                parser = duet._build_arg_parser()
+                args = parser.parse_args(["--continue", str(run)])
+                restored = duet.build_continue_config(str(run), args, parser, {})
+                if case.endswith("after"):
+                    self.assertIn(self.REPLY, transcript)
+                    self.assertIn("backend diagnostic", pathlib.Path(entry["stderr_log_path"]).read_text())
+                    self.assertIsNone(entry["session_id"])
+                    slot = 0 if case.startswith("force") else 1
+                    self.assertIsNone(saved["agents"][slot]["session_id"])
+                    self.assertIsNone(restored.agents[slot].session_id)
+                    self.assertEqual(restored.start_speaker_idx, 1 - slot)
+                else:
+                    self.assertNotIn("stderr_log_path", entry)
+                    self.assertEqual(entry["kind"], "resume_refused")
+                    self.assertNotIn("turn", entry)
+                    self.assertEqual(restored.start_speaker_idx, 0 if case == "force-before" else 1)
+                status_output = io.StringIO()
+                with mock.patch.object(duet.sys, "argv", ["duet", "--status", str(run), "--json"]), \
+                        contextlib.redirect_stdout(status_output):
+                    self.assertEqual(duet.main(), 0)
+                status = json.loads(status_output.getvalue())
+                self.assertEqual(status["health"], "terminal")
+                self.assertEqual(status["finished_reason"], "setup_error")
+                self.assertEqual(status["turns_used"], len(answers))
+                completed = status["last_completed_turn"]
+                if answers:
+                    self.assertEqual(completed["turn"], len(answers))
+                    self.assertEqual(completed["agent"], "lead" if case == "force-after" else "partner")
+                    self.assertEqual(completed["finished_reason"],
+                                     "setup_error" if case.endswith("after") else None)
+                else:
+                    self.assertIsNone(completed)
+                with mock.patch.object(duet, "_metrics_project_id", return_value="a" * 64):
+                    metrics = duet.build_metrics_snapshot(saved, run / "state.json")
+                self.assertEqual(len(metrics["turns"]), len(answers))
+                coverage = duet.build_finding_report(saved)["structured_turns"]
+                self.assertEqual(coverage["failed"], int(case.endswith("after")))
+
+    def test_derive_seed_checks_the_resume_before_using_the_task(self) -> None:
+        lead = duet.Agent("lead", "codex", session_id="codex-current")
+        cfg = duet.DuetConfig(cwd=pathlib.Path.cwd(),
+                              agents=[lead, duet.Agent("partner", "codex")], task="fallback")
+        with mock.patch.object(duet, "call_agent") as call, \
+                self.assertRaises(duet.AgentRunError) as error:
+            duet.derive_seed(cfg)
+        self.assertEqual(error.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
+        call.assert_not_called()
+
+    def test_continue_retries_the_uncalled_peer_after_cwd_isolation(self) -> None:
+        for case, slot in (("loop-before", "partner"), ("force-before", "lead")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw:
+                root = pathlib.Path(raw).resolve()
+                answers = ([(0, "first reply", f"session id: {self.UUID}\n")]
+                           if case == "force-before" else [])
+                previous = self._run_cli(root, case, answers, [])
+                peer_dir = root / "isolated"
+                peer_dir.mkdir()
+                args = ["duet", "--continue", str(previous), "--turns", "1", "--no-metrics",
+                        "--worktree-path", str(peer_dir), "--worktree-for", slot,
+                        "--runs-dir", str(root / "resumed"), "--quiet"]
+                with mock.patch.object(duet.sys, "argv", args), \
+                        mock.patch.object(duet, "_register_run_in_home_index"), \
+                        mock.patch.object(duet, "_run", return_value=(0, "resumed reply", "")) as run, \
+                        mock.patch.object(duet.sys.stdin, "isatty", return_value=False), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(duet.main(), 0)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.args[0][:4], ["codex", "exec", "resume", "--last"])
+                self.assertEqual(run.call_args.kwargs["cwd"], peer_dir)
+                state_path = next((root / "resumed").glob("*/state.json"))
+                resumed = json.loads(state_path.read_text())
+                self.assertEqual(resumed["finished_reason"], "max_turns")
+                self.assertEqual(resumed["history"][0]["agent"], slot)
+
 
 class TestStatusSchema(unittest.TestCase):
     def _write_state(self, root: pathlib.Path, state: dict) -> pathlib.Path:
@@ -535,19 +742,25 @@ class TestStatusSchema(unittest.TestCase):
             self.assertIsNone(snapshot["per_turn_timeout"])
             self.assertNotIn(secret, json.dumps(snapshot))
 
-    def test_live_turn_reports_budget_and_remaining_seconds(self) -> None:
+    def test_live_turn_reports_budget_and_prior_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = pathlib.Path(raw)
             secret = "live-status-secret"
             run = self._write_state(root, {
                 "task": secret,
                 "phase": "turn_running",
-                "turns_used": 0,
+                "turns_used": 1,
                 "finished_reason": None,
-                "history": [],
+                "history": [{
+                    "turn": 1,
+                    "agent": "codex-coder",
+                    "elapsed_s": 60.2,
+                    "finished_reason": "timeout",
+                    "error": secret,
+                }],
                 "per_turn_timeout": 60,
             })
-            (run / "turn-01-codex-coder.pid").write_text("123", encoding="utf-8")
+            (run / "turn-02-claude-reviewer.pid").write_text("123", encoding="utf-8")
             started = duet.dt.datetime.fromtimestamp(1_000)
             with mock.patch.object(
                     duet, "_pid_file_snapshot", return_value=(123, started)), \
@@ -566,6 +779,8 @@ class TestStatusSchema(unittest.TestCase):
             self.assertEqual(snapshot["active_turn"]["elapsed_seconds"], 42)
             self.assertEqual(snapshot["active_turn"]["budget_seconds"], 60)
             self.assertEqual(snapshot["active_turn"]["remaining_seconds"], 18)
+            self.assertEqual(snapshot["last_timeout"]["turn"], 1)
+            self.assertEqual(snapshot["last_timeout"]["finished_reason"], "timeout")
             human = io.StringIO()
             with contextlib.redirect_stdout(human):
                 duet._print_human_status(snapshot, str(run))
@@ -944,7 +1159,7 @@ class TestContinueWorktreeOverrides(unittest.TestCase):
             self.assertEqual(result, (None, None))
 
 
-class TestContinueTimeoutKnobs(unittest.TestCase):
+class TestContinueStateSettings(unittest.TestCase):
     def _write_prior_run(self, root: pathlib.Path, state_extra: dict) -> pathlib.Path:
         run = root / "prior" / "20260719-120000"
         run.mkdir(parents=True)
@@ -1007,6 +1222,44 @@ class TestContinueTimeoutKnobs(unittest.TestCase):
             )
             cfg = self._build_cfg(run, "--timeout", "700")
             self.assertEqual(cfg.per_turn_timeout, 700)
+
+    def test_legacy_codex_fallback_requires_a_successful_loop_turn(self) -> None:
+        name = _agents()[1].name
+        for history_entry, expected in (
+                ({"turn": 1}, "codex-current"),
+                ({"turn": 1, "finished_reason": "agent_error"}, None),
+                ({"turn": 1, "finished_reason": "timeout"}, None),
+                ({"turn": 1, "finished_reason": "setup_error"}, None),
+                ({"turn": 0, "kind": "seed_extract"}, None),
+                ({"turn": 0, "kind": "kickoff"}, None),
+                ({"turn": 2, "kind": "final_review"}, None),
+        ):
+            with self.subTest(history_entry=history_entry), tempfile.TemporaryDirectory() as raw:
+                run = self._write_prior_run(pathlib.Path(raw), {
+                    "history": [dict(history_entry, agent=name)],
+                })
+                self.assertEqual(self._build_cfg(run).agents[1].session_id, expected)
+
+    def test_saved_codex_uuid_takes_priority_over_history(self) -> None:
+        agents = _agents()
+        agents[1].session_id = "11111111-1111-4111-8111-111111111111"
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._write_prior_run(pathlib.Path(raw), {
+                "agents": [duet.agent_state(agent) for agent in agents],
+                "history": [{"turn": 1, "agent": agents[1].name,
+                             "finished_reason": "timeout"}],
+            })
+            self.assertEqual(self._build_cfg(run).agents[1].session_id, agents[1].session_id)
+
+    def test_legacy_codex_restores_the_uuid_from_successful_history(self) -> None:
+        pin = "11111111-1111-4111-8111-111111111111"
+        name = _agents()[1].name
+        with tempfile.TemporaryDirectory() as raw:
+            run = self._write_prior_run(pathlib.Path(raw), {"history": [
+                {"turn": 1, "agent": name, "session_id": pin, "forced": True},
+                {"turn": 3, "agent": name, "finished_reason": "timeout"},
+            ]})
+            self.assertEqual(self._build_cfg(run).agents[1].session_id, pin)
 
 
 class TestTimeoutContinueLoop(unittest.TestCase):
@@ -1218,8 +1471,11 @@ class TestTimeoutContinueLoop(unittest.TestCase):
                     agent.session_id = "codex-current"
                 return self._ok_reply()
 
-            with self.assertRaises(SystemExit):
-                self._run(cfg, side_effect)
+            state, calls, _ = self._run(cfg, side_effect)
+            self.assertEqual(len(calls), 3)
+            self.assertTrue(calls[-1]["first_turn"])
+            self.assertEqual(state["finished_reason"], "setup_error")
+            self.assertIsNone(state["agents"][1]["session_id"])
 
     def test_worktree_timeout_handoff_includes_diff_block(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1421,7 +1677,7 @@ class TestToolDenialLoop(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()):
                 result = duet._run_forced_turn(
                     cfg, forced_turn=1, next_speaker=agents[0], forced_msg="fix",
-                    first_turn_for_agent=False, transcript_path=transcript,
+                    transcript_path=transcript, state_path=root / "state.json",
                     wt_path=None, wt_branch=None, history=history,
                     seen_first_turn={a.name: True for a in agents},
                     last_verify_state=None)

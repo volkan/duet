@@ -136,7 +136,7 @@ class TestMetricsLifecycle(unittest.TestCase):
                 duet._begin_run_metrics(cfg)
                 duet._run_forced_turn(
                     cfg, forced_turn=1, next_speaker=next_speaker, forced_msg="x",
-                    first_turn_for_agent=True, transcript_path=transcript,
+                    transcript_path=transcript, state_path=root / "state.json",
                     wt_path=next_speaker.cwd_override, wt_branch="branch", history=history,
                     seen_first_turn={agent.name: False for agent in cfg.agents},
                     last_verify_state=None,

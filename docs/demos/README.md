@@ -110,8 +110,9 @@ These are optional documentation tools, not Duet runtime dependencies. The
 renderer accepts `DUET_CHROMIUM` for an existing browser executable, `PYTHON`
 for the Python executable, and `FFMPEG` for ffmpeg. It checks all scenes at
 desktop and mobile widths, playback controls, source identity, and absence of
-network requests before exporting. Browser screenshots remain in a temporary
-QA directory printed by the renderer.
+network requests before exporting. The scene order and durations set the export
+timeline. The renderer checks scrubbing to **Focused follow-up** and navigation
+to **Try the fixture**. It prints the temporary directory with the screenshots.
 
 Preparation checks also verified that the published reports exactly match the
 original saved reports, the fixture hashes match, and the portable config

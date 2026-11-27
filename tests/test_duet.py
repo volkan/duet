@@ -5,8 +5,8 @@ can't observe through exit codes alone: convergence detection, codex/copilot
 session-id parsing, recap header parsing, file-path heuristics, reasoning
 mappings, partner-spec parsing, markdown-fence sizing, age formatting, and
 bounded agent-error transcript formatting, continuation-state validation, and
-status fallbacks. They are pure-function tests — no subprocesses, no filesystem
-writes, no agent CLIs.
+status fallbacks. Subprocess cases use local Python fixtures and temporary files.
+The suite makes no model calls.
 
 Run via:
     DUET_METRICS=0 python3 -m unittest discover -s tests
@@ -17,14 +17,20 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import fcntl
 import io
 import json
+import os
 import pathlib
+import pty
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -330,6 +336,99 @@ class TestAgentFinishReasons(unittest.TestCase):
                 self.assertNotIn(message, command)
                 self.assertEqual(kwargs["stdin"], message)
                 self.assertEqual("--resume" in command, sid is not None)
+
+    def test_claude_rejects_failed_and_invalid_json_envelopes(self) -> None:
+        for payload in (
+            {"is_error": True, "result": "failed", "session_id": "foreign-session"},
+            {"is_error": "true", "result": "ok", "session_id": "foreign-session"},
+            {"session_id": "foreign-session"},
+            {"result": [], "session_id": "foreign-session"},
+            [],
+        ):
+            with self.subTest(payload=payload):
+                agent = duet.Agent("claude", "claude", "reviewer", session_id="saved-session")
+                peer = duet.Agent("peer", "codex", "coder")
+                cfg = duet.DuetConfig(cwd=_ROOT, agents=[agent, peer], metrics_enabled=False)
+                with mock.patch.object(duet, "_run", return_value=(0, json.dumps(payload), "")):
+                    with self.assertRaises(duet.AgentRunError) as error:
+                        duet.call_agent(agent, "hello", cfg, first_turn_for_agent=False)
+                self.assertEqual(error.exception.finished_reason, duet.FINISHED_AGENT_ERROR)
+                self.assertEqual(agent.session_id, "saved-session")
+                self.assertIsNone(agent.last_tool_denials)
+
+    def test_claude_large_role_prompt_stays_in_system_channel(self) -> None:
+        agent = duet.Agent("claude", "claude", "reviewer", session_id="saved-session")
+        system = "α" * (200 * 1024)
+        message = "- message"
+        observed = {}
+
+        def fake_run(cmd, **kwargs):
+            path = pathlib.Path(cmd[cmd.index("--append-system-prompt-file") + 1])
+            observed["path"] = path
+            self.assertEqual(path.read_text(encoding="utf-8"), system)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertNotIn("--append-system-prompt", cmd)
+            self.assertEqual(cmd[cmd.index("--resume") + 1], "saved-session")
+            self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "plan")
+            self.assertEqual(kwargs["stdin"], message)
+            return 0, '{"result":"ok","session_id":"new-session"}', ""
+
+        with mock.patch.object(duet, "_run", side_effect=fake_run):
+            output = duet.call_claude(agent, system, message, _ROOT, "plan", 5, False)
+        self.assertEqual(output, ("ok", "new-session"))
+        self.assertFalse(observed["path"].exists())
+        self.assertEqual(agent.last_call_metrics["prompt_transport"], "system_file_and_message")
+
+    def test_large_combined_prompts_use_native_stdin(self) -> None:
+        message = "α" * (200 * 1024) + "\nfinal line"
+        full_prompt = f"=== ROLE ===\nsystem\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+        codex_session = "019e16c2-635e-7802-83e8-400e93533d2f"
+        cases = (
+            ("codex", None, None, ("exec",), ("-",), {"--sandbox": "read-only"}),
+            ("codex", codex_session, None, ("exec", "resume", codex_session), ("-",),
+             {"-c": 'sandbox_mode="read-only"'}),
+            ("codex", "codex-current", None, ("exec", "resume", "--last"), ("-",),
+             {"-c": 'sandbox_mode="read-only"'}),
+            ("gemini", "gemini-session", None, (), (),
+             {"-p": "", "--resume": "gemini-session", "--approval-mode": "plan"}),
+            ("copilot", "copilot-session", None, (), (), {}),
+            ("opencode", "opencode-session", 1, ("run",), (), {"-s": "opencode-session", "--dir": str(_ROOT)}),
+            ("opencode", "opencode-session", 2, ("run",), (), {"-s": "opencode-session"}),
+        )
+        for backend, session, major, prefix, suffix, expected in cases:
+            with self.subTest(backend=backend, session=session, major=major):
+                agent = duet.Agent(backend, backend, "reviewer", session_id=session)
+                cases_reply = {
+                    "codex": "ok",
+                    "gemini": '{"response":"ok","session_id":"gemini-session"}',
+                    "copilot": '{"type":"assistant.message","data":{"content":"ok"}}\n'
+                               '{"type":"result","sessionId":"copilot-session"}',
+                    "opencode": '{"type":"text","sessionID":"opencode-session",'
+                                '"part":{"type":"text","text":"ok","id":"p1"}}',
+                }
+                cfg = duet.DuetConfig(cwd=_ROOT, agents=[agent, duet.Agent("peer", "claude")],
+                                      permission_mode="plan", sandbox="read-only")
+                with mock.patch.object(duet, "_OPENCODE_CLI_MAJOR", major), \
+                        mock.patch.object(duet, "_agent_run", return_value=(0, cases_reply[backend], "")) as run:
+                    output, _ = duet.backend_adapter(backend).call(
+                        agent, "system", message, cfg, session is None, None, None, None)
+                self.assertEqual(output, "ok")
+                cmd = run.call_args.args[0]
+                self.assertEqual(cmd[:1 + len(prefix)], [backend, *prefix])
+                if suffix:
+                    self.assertEqual(cmd[-len(suffix):], list(suffix))
+                for flag, value in expected.items():
+                    self.assertIn((flag, value), zip(cmd, cmd[1:]))
+                self.assertNotIn(full_prompt, cmd)
+                if backend == "copilot":
+                    self.assertNotIn("-p", cmd)
+                    self.assertIn("--resume=copilot-session", cmd)
+                    self.assertIn("--allow-all-tools", cmd)
+                if backend == "opencode":
+                    self.assertEqual("--standalone" in cmd, major == 2)
+                    self.assertIn("--auto", cmd)
+                self.assertEqual(run.call_args.kwargs["stdin"], full_prompt)
+                self.assertEqual(agent.last_call_metrics["prompt_transport"], "combined_stdin")
 
     def test_codex_rc_124_maps_to_timeout(self) -> None:
         def fake_run(cmd, **kwargs):
@@ -642,6 +741,7 @@ class TestAgentFinishReasons(unittest.TestCase):
             backend="opencode",
             role="coder",
             model="anthropic/claude-sonnet-4-6",
+            extra_args=["--agent", "build"],
         )
         with mock.patch.object(duet, "_run", fake_run):
             # First turn: no session_id yet.
@@ -671,6 +771,7 @@ class TestAgentFinishReasons(unittest.TestCase):
             self.assertEqual(reasoned[reasoned.index("-m") + 1],
                              "anthropic/claude-sonnet-4-6#max")
             self.assertNotIn("--variant", reasoned)
+            self.assertIn("ultrathink", reasoned[-1])
 
             # Second turn: resume by the parsed session id.
             agent.session_id = "ses_prev"
@@ -679,6 +780,11 @@ class TestAgentFinishReasons(unittest.TestCase):
             second = captured[-1]
             self.assertIn("-s", second)
             self.assertEqual(second[second.index("-s") + 1], "ses_prev")
+
+        for command in (first, reasoned, second):
+            self.assertIn(("--agent", "build"), zip(command, command[1:]))
+            self.assertNotIn("--sandbox", command)
+            self.assertNotIn("--permission-mode", command)
 
     def test_opencode_v2_error_payload_maps_to_agent_error(self) -> None:
         # v2 puts the human cause directly in error.message (no data wrapper).
@@ -2044,10 +2150,11 @@ class TestCwdKeyedResumeGuards(unittest.TestCase):
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
         partner.session_id = "codex-current"
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(duet.AgentRunError) as caught:
             duet.guard_cwd_keyed_resume_after_call(
                 cfg, partner, first_turn_for_agent=True
             )
+        self.assertEqual(caught.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
 
     def test_missing_uuid_allowed_when_codex_peers_have_different_cwds(self) -> None:
         lead = duet.Agent(name="codex-lead", backend="codex", role="planner")
@@ -2074,10 +2181,11 @@ class TestCwdKeyedResumeGuards(unittest.TestCase):
         )
         cfg = duet.DuetConfig(cwd=_ROOT, agents=[lead, partner], task="x")
 
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(duet.AgentRunError) as caught:
             duet.guard_cwd_keyed_resume_before_call(
                 cfg, partner, first_turn_for_agent=False
             )
+        self.assertEqual(caught.exception.finished_reason, duet.FINISHED_SETUP_ERROR)
 
 
 # ---------- _markdown_fence ----------
@@ -2113,6 +2221,9 @@ class TestMarkdownFence(unittest.TestCase):
 
 
 class TestHumanizeAge(unittest.TestCase):
+    def test_future_activity_is_clamped_to_zero(self) -> None:
+        self.assertEqual(duet._humanize_age(-2), "0s ago")
+
     def test_seconds_bucket(self) -> None:
         self.assertEqual(duet._humanize_age(0), "0s ago")
         self.assertEqual(duet._humanize_age(59), "59s ago")
@@ -2208,6 +2319,26 @@ class TestNextSpeakerIdx(unittest.TestCase):
         agents = self._agents()
         self.assertEqual(
             duet._next_speaker_idx_from_state(agents, {"turns_used": "x"}), 1)
+
+    def test_setup_and_final_review_entries_do_not_choose_the_next_speaker(self) -> None:
+        agents = self._agents()
+        state = {"history": [
+            {"turn": 1, "agent": agents[1].name, "forced": True},
+            {"turn": 2, "agent": agents[0].name, "kind": "final_review"},
+            {"turn": 0, "agent": agents[0].name, "kind": "kickoff"},
+            {"turn": 0, "agent": agents[0].name, "kind": "seed_extract"},
+        ]}
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 0)
+
+    def test_zero_turns_use_saved_opening_slot_or_legacy_recipe_default(self) -> None:
+        agents = self._agents()
+        failed_seed = {"turn": 0, "agent": agents[1].name, "kind": "seed_extract"}
+        state = {"turns_used": 0, "history": [failed_seed]}
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 1)
+        state["task"] = duet.DEFAULT_CODEX_REVIEW_TASK
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 0)
+        state["start_speaker_idx"] = 1
+        self.assertEqual(duet._next_speaker_idx_from_state(agents, state), 1)
 
 
 # ---------- _resolve_opt_path ----------
@@ -2722,6 +2853,251 @@ class TestNormalizeVerifyCmd(unittest.TestCase):
         with self.assertRaises(SystemExit), \
                 contextlib.redirect_stderr(io.StringIO()):
             duet.normalize_verify_cmd(123, self.parser)
+
+
+class TestChildProcessIO(unittest.TestCase):
+    def test_drains_large_stdin_and_concurrent_output(self) -> None:
+        message = "α" * (240 * 1024)
+        script = (
+            "import os, sys; "
+            "os.write(2, b'line\\r\\n' * 20000 + b'last:\\xff'); "
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            log_path = cwd / "stderr.log"
+            rc, stdout, stderr = duet._run([sys.executable, "-c", script],
+                                            cwd=cwd, stdin=message, timeout=5,
+                                            stderr_log_path=log_path)
+            self.assertEqual(rc, 0)
+            self.assertEqual(stdout, message)
+            self.assertEqual(stderr, "line\n" * 20000 + "last:�")
+            self.assertTrue(log_path.read_text().endswith(stderr))
+
+    def test_timeout_remains_armed_when_child_does_not_read_stdin(self) -> None:
+        script = "import time; print('ready', flush=True); time.sleep(10)"
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            pid_path = cwd / "turn.pid"
+            rc, stdout, stderr = duet._run([sys.executable, "-c", script],
+                                            cwd=cwd, stdin="x" * 400_000, timeout=0.5,
+                                            pid_file_path=pid_path)
+            self.assertEqual((rc, stdout), (124, "ready\n"))
+            self.assertIn("TIMEOUT", stderr)
+            self.assertFalse(pid_path.exists())
+
+    def test_child_deadline_survives_blocked_sidecar_write(self) -> None:
+        class SlowLog(io.StringIO):
+            content = ""
+            stalled = False
+
+            def write(self, text):
+                if text == "ready\n":
+                    self.stalled = True
+                    time.sleep(0.85)
+                return super().write(text)
+
+            def close(self):
+                self.content = self.getvalue()
+                super().close()
+
+        script = (
+            "import pathlib, sys, time; "
+            "print('ready', file=sys.stderr, flush=True); "
+            "time.sleep(.6); pathlib.Path('too-late').touch()"
+        )
+        log = SlowLog()
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            with mock.patch.object(duet, "open", return_value=log, create=True):
+                rc, _, stderr = duet._run([sys.executable, "-c", script], cwd=cwd,
+                                          stdin=None, timeout=0.35, stderr_log_path=cwd / "stderr.log")
+            self.assertTrue(log.stalled)
+            self.assertEqual(rc, 124)
+            self.assertFalse((cwd / "too-late").exists())
+            self.assertIn("ready\n", stderr)
+            self.assertTrue(log.content.endswith("ready\n"))
+
+    def test_full_terminal_preserves_deadline_capture_and_stderr_flags(self) -> None:
+        master, slave = pty.openpty()
+        try:
+            with os.fdopen(slave, "w", encoding="utf-8") as original, \
+                    os.fdopen(os.dup(original.fileno()), "w", encoding="utf-8") as alias, \
+                    tempfile.TemporaryDirectory() as temp:
+                cwd = pathlib.Path(temp)
+                flags = fcntl.fcntl(alias.fileno(), fcntl.F_GETFL)
+                helper = """\nimport contextlib, fcntl, os, pathlib, sys, threading
+import duet
+with os.fdopen(int(sys.argv[1]), "w", encoding="utf-8") as tty:
+    flags = fcntl.fcntl(tty.fileno(), fcntl.F_GETFL)
+    with contextlib.redirect_stderr(tty):
+        result = duet._run(
+            [sys.executable, "-c", sys.argv[2]], cwd=pathlib.Path.cwd(),
+            stdin=None, timeout=.4, stderr_log_path=pathlib.Path("trace.log"),
+            mirror_stdout=True, live_prefix="prefix ",
+        )
+    assert result[0] == 124, result[0]
+    assert result[1] == "stdout record\\n"
+    assert result[2].startswith("stderr record\\n" * 8000)
+    assert pathlib.Path("trace.log").read_text().endswith("stderr record\\n" * 8000)
+    assert not pathlib.Path("too-late").exists()
+    assert fcntl.fcntl(tty.fileno(), fcntl.F_GETFL) == flags
+    assert not any(t.name == "duet-child-deadline" for t in threading.enumerate())
+"""
+                script = (
+                    "import pathlib, sys, time; print('stdout record', flush=True); "
+                    "time.sleep(.05); sys.stderr.write('stderr record\\n' * 8000); sys.stderr.flush(); "
+                    "time.sleep(.7); pathlib.Path('too-late').touch()"
+                )
+                subprocess.run([sys.executable, "-c", helper, str(alias.fileno()), script],
+                               cwd=cwd, env={**os.environ, "PYTHONPATH": str(_ROOT)},
+                               pass_fds=(alias.fileno(),), check=True, timeout=5)
+                self.assertEqual(fcntl.fcntl(original.fileno(), fcntl.F_GETFL), flags)
+                os.set_blocking(master, False)
+                self.assertIn(b"prefix stdout record", os.read(master, 65536))
+        finally:
+            os.close(master)
+
+    def test_stop_waits_for_watcher_to_publish_exit(self) -> None:
+        poll_started = threading.Event()
+        publish_exit = threading.Event()
+        stop_started = threading.Event()
+        stop_returned = threading.Event()
+        proc = mock.Mock(returncode=None)
+
+        def poll():
+            poll_started.set()
+            if not publish_exit.wait(3):
+                raise AssertionError("test did not release the watcher")
+            proc.returncode = 0
+            return proc.returncode
+
+        def stop():
+            stop_started.set()
+            duet._signal_proc_tree(proc, signal.SIGKILL)
+            stop_returned.set()
+
+        proc.poll.side_effect = poll
+        deadline = duet._ChildDeadline(proc, time.monotonic() + 60)
+        watcher = threading.Thread(target=deadline.watch)
+        stopper = threading.Thread(target=stop)
+        duet._register_proc(proc, watched=True)
+        with mock.patch.object(duet.os, "killpg") as killpg:
+            try:
+                watcher.start()
+                self.assertTrue(poll_started.wait(3))
+                stopper.start()
+                self.assertTrue(stop_started.wait(3))
+                self.assertFalse(stop_returned.wait(0.05))
+            finally:
+                publish_exit.set()
+                watcher.join(timeout=3)
+                if stopper.ident is not None:
+                    stopper.join(timeout=3)
+                duet._unregister_proc(proc)
+            self.assertTrue(stop_returned.is_set())
+            self.assertTrue(deadline.finished.is_set())
+            self.assertIsNone(deadline.error)
+            killpg.assert_not_called()
+
+    def test_fast_non_terminal_call_joins_deadline_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, contextlib.redirect_stderr(io.StringIO()) as stderr:
+            rc, out, err = duet._run([sys.executable, "-c", "print('ok')"],
+                                     cwd=pathlib.Path(temp), stdin=None, timeout=60,
+                                     mirror_stdout=True)
+        self.assertEqual((rc, out, err), (0, "ok\n", ""))
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertFalse(any(thread.name == "duet-child-deadline" for thread in threading.enumerate()))
+
+    def test_captures_delayed_descendant_output_within_drain_window(self) -> None:
+        grandchild = """
+import os, sys, time
+while os.getppid() == int(sys.argv[1]):
+    time.sleep(0.005)
+time.sleep(0.08)
+print("trailing output", flush=True)
+print("trailing diagnostic", file=sys.stderr, flush=True)
+"""
+        script = (
+            "import os, subprocess, sys; print('initial output', flush=True); "
+            "subprocess.Popen([sys.executable, '-c', sys.argv[1], str(os.getpid())])"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            log_path = cwd / "stderr.log"
+            rc, stdout, stderr = duet._run([sys.executable, "-c", script, grandchild],
+                                            cwd=cwd, stdin=None, timeout=5,
+                                            stderr_log_path=log_path)
+            self.assertEqual((rc, stdout, stderr),
+                             (0, "initial output\ntrailing output\n", "trailing diagnostic\n"))
+            self.assertTrue(log_path.read_text().endswith(stderr))
+
+    def test_post_exit_drain_keeps_buffered_output_after_slow_sidecar_write(self) -> None:
+        stdout_fd, stdout_writer = os.pipe()
+        stderr_fd, stderr_writer = os.pipe()
+        self.addCleanup(os.close, stdout_writer)
+        self.addCleanup(os.close, stderr_writer)
+        now = 0.0
+        reply = '{"ok":true}\n'
+
+        def write_sidecar(text):
+            nonlocal now
+            if text == "diagnostic\n":
+                os.write(stdout_writer, reply.encode("utf-8"))
+                os.write(stderr_writer, b"queued diagnostic\n")
+                now += duet._CHILD_DRAIN_TIMEOUT + 1
+
+        def mirror_output(_terminal, text):
+            if text == reply:
+                os.write(stdout_writer, b"late output\n")
+                os.write(stderr_writer, b"late diagnostic\n")
+
+        log = mock.Mock()
+        log.write.side_effect = write_sidecar
+        stdout = duet._ChildOutput(1, "")
+        stderr = duet._ChildOutput(None, "", log)
+        finished = threading.Event()
+        finished.set()
+        os.write(stderr_writer, b"diagnostic\n")
+        with os.fdopen(stdout_fd, "rb") as stdout_pipe, os.fdopen(stderr_fd, "rb") as stderr_pipe:
+            proc = mock.Mock(stdin=io.BytesIO(), stdout=stdout_pipe, stderr=stderr_pipe)
+            with mock.patch.object(duet.time, "monotonic", side_effect=lambda: now), \
+                    mock.patch.object(duet, "_mirror_child_output", side_effect=mirror_output):
+                duet._pump_child_io(proc, None, finished, stdout, stderr)
+
+        self.assertEqual("".join(stdout.chunks), reply)
+        self.assertEqual("".join(stderr.chunks), "diagnostic\nqueued diagnostic\n")
+        log.write.assert_any_call("queued diagnostic\n")
+
+    def test_detached_pipe_holder_cannot_write_after_run_returns(self) -> None:
+        grandchild = """
+import os, pathlib, sys, time
+time.sleep(0.7)
+try:
+    os.write(2, b"late-output")
+except BrokenPipeError:
+    pass
+pathlib.Path("done").touch()
+"""
+        script = (
+            "import subprocess, sys; print('initial output', flush=True); "
+            "subprocess.Popen([sys.executable, '-c', sys.argv[1]], start_new_session=True)"
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            cwd = pathlib.Path(temp)
+            log_path = cwd / "stderr.log"
+            rc, stdout, stderr = duet._run([sys.executable, "-c", script, grandchild],
+                                            cwd=cwd, stdin=None, timeout=5,
+                                            stderr_log_path=log_path)
+            marker = cwd / "done"
+            self.assertFalse(marker.exists())
+            self.assertEqual((rc, stdout, stderr), (0, "initial output\n", ""))
+            log = log_path.read_text()
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists())
+            self.assertEqual(log_path.read_text(), log)
 
 
 if __name__ == "__main__":

@@ -148,6 +148,13 @@ and paste the command and output.
 
 `--task` and `--kickoff` accept literal text, `@file`, or `@-` for stdin. `--task-from-cmd` runs a shell command in the target `--cwd` and uses stdout as the kickoff task, while streaming the command's stderr live.
 
+Duet sends combined prompts over 64 KiB through standard input for Codex,
+Gemini, Copilot, and OpenCode. Gemini CLI limits this input to 8 MiB.
+Claude always receives the partner message through standard input. Duet uses
+a private temporary file for Claude system prompts over 64 KiB. ZCode uses one
+native argument. Its size limit depends on the platform and environment. See
+[ZCode](ZCODE.md) for the error and available options.
+
 Canonical recipes:
 
 ```bash
@@ -695,7 +702,7 @@ worktree gated by `verify_cmd`.
 | `--allow-worktree-fallback` | allow the legacy same-repo fallback; overrides the review recipe's strict setting |
 | `--worktree-for partner\|lead` | which agent runs in the worktree (default: partner) |
 | `--worktree-root PATH` | parent dir for new worktrees; lands at `<PATH>/<run_id>/`. Default: `<runs_dir>/<run_id>/wt/` (durable across reboots & OS temp cleaners). Pass `/tmp` or `$TMPDIR` for OS-temp behavior. OpenCode v2 peers instead get an independent `git clone` at `~/.duet/worktrees/<cwd-slug>/<run_id>/`, because v2 resolves git-worktree sessions to the main checkout |
-| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. A per-agent `reasoning_effort` in a `--config` file overrides this value for that agent. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>` — an unknown variant is a model-resolution error there, so an unsupported level fails that turn instead of running at another effort — and a v2 peer without an explicit model gets only the prompt prefix plus a one-line note. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
+| `--reasoning minimal\|low\|medium\|high\|xhigh\|max` | reasoning effort for both agents. A per-agent `reasoning_effort` in a `--config` file overrides this value for that agent. **Codex:** passes every explicit value unchanged as `-c model_reasoning_effort=<v>`. Model support varies, so Codex reports an unsupported level instead of duet silently changing it. Without `--reasoning`, Codex uses the selected model's native default. **Claude:** passes `--effort <v>`; `minimal` maps to Claude's lowest documented value, `low`, while `xhigh` and `max` pass through. **Copilot:** passes `--effort <v>`; `minimal` maps to Copilot's lowest documented value, `none`. **OpenCode:** v1 passes `run --variant <v>` with the level unchanged; v2 joins the level onto the model reference as `-m provider/model#<v>`. An unknown variant fails the turn with a model-resolution error. A v2 peer without an explicit model keeps native reasoning. Only high, xhigh, and max add prompt guidance. Duet prints a note in this case. **ZCode:** writes the requested native reasoning level into a private provider profile; resumed peers retain their initial model/effort. **Gemini:** has no documented effort flag, so it emits no backend effort argument; high/xhigh/max only add prompt nudges (`think hard` / `think very hard` / `ultrathink`) for extra in-context guidance. |
 | `--codex-fast` | Codex-only fast mode: pin **codex coder turns** to `model_reasoning_effort=low` and `model_reasoning_summary=concise`, regardless of `--reasoning` or per-agent `reasoning_effort`. Role-scoped to `codex:coder` so it can't silently downgrade a `codex:planner` / `codex:reviewer`; duet prints a stderr warning and treats the flag as a no-op when no codex coder is present. Claude turns and non-coder codex agents are untouched, so `--reasoning high --codex-fast` keeps the planner deep and the coder snappy. YAML key: `codex_fast: true` |
 | `--no-codex-fast` | explicitly disable fast mode, including `codex_fast: true` from YAML/JSON or a value restored by `--continue` |
 | `--trust-state` | with `--continue`, allow `state.json`-sourced `verify_cmd`, agent `extra_args`, extra access roots, and authority-widening sandbox/permission values to be replayed after you inspect and trust that run directory. Fresh CLI values override saved settings without requiring this flag |
@@ -736,7 +743,7 @@ The snapshot is written best effort to `~/.duet/metrics/runs/<UUID>.json` using
 an atomic replace. It contains the duet version, bounded backend CLI version
 probes, role, requested model, CLI-reported model when available, reasoning
 requested/effective/backend values and transport, fast-mode effects, turn
-budget, timing fields, prompt/output/handoff byte counts, and optional
+budget, timing fields, per-turn prompt transport, prompt/output/handoff byte counts, and optional
 provider-reported token and USD cost data. Missing values remain unknown and
 are accompanied by coverage information. Codex remains on its current text
 transport: absent actual-model, token, and cost metadata stays unknown. Duet
@@ -833,7 +840,22 @@ When `--task-from-cmd` is used, `turn-00-kickoff.pid` exists while it runs and
 set, that separate caller-owned JSON file points to this run before kickoff.
 The raw shell command is never written to launch metadata or `state.json`.
 
-The per-turn `*.stderr.log` files capture exactly what duet mirrors live to your terminal during each agent invocation — codex's reasoning steps and tool calls, claude's progress markers, etc. Useful when an agent does something subtle in a 10-minute turn and you want to retrace it later. `turn-00-extract-*` is the optional seed-extraction call when resuming a prior claude session; `turn-NN-forced-*` is a human-forced post-loop turn. If an agent timeout or command error ends the run, duet writes a bounded error block to `transcript.md`, records the failing turn in `state.json["history"]`, and links the matching stderr log. The block keeps the beginning and end of the exception text, caps that excerpt at 12,000 characters, and reports how many characters were omitted; the complete subprocess stderr remains in the per-turn log.
+The per-turn `*.stderr.log` files record the stderr that Duet captures from
+each peer, including Codex reasoning summaries, tool calls, and Claude
+progress messages. If the terminal cannot keep up, the live view can skip
+output. Read the log for the captured stderr. After the peer exits, Duet
+waits up to 250 ms for inherited output. It then captures any bytes still
+queued in the pipes before closing them.
+
+`turn-00-extract-*` is the optional Claude seed-extraction call.
+`turn-NN-forced-*` is a human-forced post-loop turn. When a timeout or
+command error ends the run, Duet records it in `state.json["history"]` and
+links the stderr log from a bounded error block in `transcript.md`.
+The block includes the start and end of the error, up to 12,000 characters.
+It also reports the number of omitted characters.
+
+For a kickoff failure, the transcript and terminal error summary include a
+bounded excerpt. Read `turn-00-kickoff.stderr.log` for the full subprocess stderr.
 
 When `--verify-cmd` is configured, `turn-NN-verify.log` records the turn,
 command, cwd, exit code, stdout, and stderr for each verification run.
@@ -891,6 +913,11 @@ the conventional `<run>/wt/` directory. Use `--task`, `--kickoff`, or
 `--task-from-cmd` only when you want to append fresh human guidance to the
 generated continuation prompt.
 
+Duet picks the next speaker from loop and forced turns. If no loop turn ran,
+Duet uses the saved opening slot, including lead-first runs of `codex-review`.
+For an older Codex run without a saved session ID, Duet needs a successful
+loop or forced turn from that peer before it can infer a resume handle.
+
 ### `--status RUN_DIR_OR_ID`
 
 A one-shot health probe of any run. Read-only, suitable for cron / external pollers / Linear bots / tmux status lines. Accepts:
@@ -918,8 +945,10 @@ the compatibility boundary. `health` is `terminal`, `running`, `stuck`, or
 During a live turn, `active_turn.budget_seconds` repeats that budget and
 `active_turn.remaining_seconds` reports the budget minus elapsed time, clamped
 at zero. All three fields are `null` when saved state contains a missing or
-invalid budget; status never performs arithmetic on the raw state value. `turns_used` counts
-loop and forced turns only; kickoff and seed-extraction entries are not counted.
+invalid budget; status never performs arithmetic on the raw state value.
+`turns_used` counts loop and forced turns after the peer call ends.
+Seed extraction and forced turns enter `turn_running` after the resume check passes.
+The prompt between forced turns uses `awaiting_force`.
 `last_completed_turn.finished_reason` is that turn's sanitized outcome or
 `null`. `last_timeout` uses the same sanitized turn shape and retains the most
 recent timeout even when `--on-turn-timeout continue` absorbs it and a later
@@ -1024,7 +1053,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 
 - **Resume flag placement**: `--resume-claude` and `--resume-codex` normalize the run into the corresponding handoff workflow instead of depending on whichever slot the flags happened to use. Claude resume is normalized to `claude-lead` because duet asks Claude for the latest message before the loop. Codex resume is normalized to `codex-partner`, retaining its prior context. The recipe determines speaking order as described under [Codex-only review](#codex-only-review). If the backend was already in that conventional slot, duet preserves its role; if duet has to move/create it, the slot default role is used (`planner` for lead, `coder` for partner). Model selection stays with the declared agent before normalization; see [`--lead-model` and `--partner-model`](#cli-flags).
 - **Claude**: each call uses `claude -p ... --model <model> --output-format json` and sends the message on standard input. With the default Claude lead, an omitted model defaults to `sonnet`, including with `--resume-claude`. Pass `--lead-model <model>` to change that default. Explicit CLI or YAML model selections stay with their declared agents when slots move. Resumed calls also add `--resume <session_id>`. We capture `session_id` from the JSON wrapper and reuse it. Each turn sends only the partner's latest message, so Claude keeps the full thread in its session.
-- **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: if either peer's first turn fails to produce a UUID, duet exits immediately instead of allowing an ambiguous later `--last` resume. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
+- **Codex**: first call is `codex exec`. Duet then scans Codex's stderr for a `session id: <uuid>` line and persists the UUID to both the live `Agent` and `state.json`. Subsequent calls are `codex exec resume <uuid>` when a UUID was captured (parallel Codex sessions sharing the cwd are safe in this mode — Codex looks the session up by id, not recency). When no UUID was captured (older Codex builds, parser regressions, or continuing an older run that pre-dates UUID parsing), duet falls back to `codex exec resume --last` in the same `--cd`, which is keyed on "most recent in cwd". **In the `--last` fallback mode, don't run other codex sessions in that cwd while a duet is running** — they'd compete for recency. For `codex`/`codex` peers sharing one effective cwd, duet is stricter: Duet rejects a cwd-keyed resume before the call. If a first call returns a reply without a UUID, Duet saves the reply for diagnosis and records `setup_error`. The unsafe session handle is discarded. `--worktree` gives one duet Codex peer its own cwd; in fallback mode a parallel Codex session inside that same worktree can still race.
 - **Gemini**: each call uses `gemini -p ... --output-format json`, and resumes with `gemini --resume <session_id> -p ...`. Duet requires JSON output with `session_id`; if the installed Gemini CLI omits it, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **Copilot**: each call uses `copilot -p ... --output-format json`, and resumes with `copilot --resume=<session_id> -p ...`. Duet reads the final `result.sessionId` from Copilot's JSONL stream and persists it to the live `Agent` and `state.json`. If the installed Copilot CLI omits `sessionId`, returns malformed JSONL, or reports a nonzero `result.exitCode`, duet stops with `agent_error` because it cannot preserve multi-turn memory safely.
 - **OpenCode**: each call uses `opencode run --format json` (v1 adds `--dir <cwd>`; v2 adds `--standalone` and takes the project from the process cwd), and resumes with `opencode run -s <sessionID> ...`. Duet reads the top-level `sessionID` from OpenCode's JSONL event stream and persists it; the id is stable across turns (OpenCode does not rotate it), so resume is robustly id-keyed and two OpenCode agents can safely share one cwd. **`opencode run` exits 0 even when the model or a tool errors** — the failure is an `{"type":"error"}` event in the stream — so duet inspects the events and stops with `agent_error` on an error event or a missing `sessionID` rather than forwarding a broken reply.
@@ -1047,6 +1076,7 @@ Use `--list` to triage ("which runs are still alive?") and `--status <run-id>` t
 | per-turn agent timeout, `--on-turn-timeout stop` (default) | turn rc=124 or timeout exception, error inserted, loop stops with `reason=timeout` |
 | per-turn agent timeout, `--on-turn-timeout continue` (review recipe default) | the timeout block becomes that agent's reply and the partner takes the next turn; a second consecutive timeout, a timeout on the final turn, or a Ctrl-C during the timed-out turn still stops with `reason=timeout`. Seed extraction and forced turns are always terminal on timeout |
 | agent command failure or malformed required output | error inserted, loop stops with `reason=agent_error` |
+| Codex peers share a working directory and a peer requires a cwd-keyed resume | Duet stops with `reason=setup_error`. A refusal before the call adds a `setup_error` transcript block. The launch exits 1 and `--status` reports the terminal run with exit 0 |
 | a ZCode peer fails its launch check | error names the agent and the fix, no agent runs, run stops with `reason=setup_error` and exit code 1; for a peer in a worktree, the MCP check runs after the configured kickoff command; `--dry-run` skips the check |
 
 `force_stop` is reserved for intentional human interruption: Ctrl-C or a
@@ -1062,6 +1092,7 @@ force>
 ```
 
 Press Enter to accept; type anything to inject a synthetic human-feedback turn and force the next agent in rotation to respond. The forced prompt includes the previous agent reply plus your feedback, so the next agent can review the existing work and appended worktree handoff block without you pasting the transcript back in. Then it asks again. Each forced turn is preserved in the transcript marked `human — force-feedback` and `<agent> — forced`.
+If Duet refuses the resume before the peer call, the transcript preserves the feedback and records the refusal under `<agent> — setup_error`.
 
 A convergence proposal needs `<<<LGTM>>>` on its own line and an
 `LGTM rationale:` or `Rationale:`. Both must be outside fenced code.

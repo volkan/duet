@@ -535,7 +535,7 @@ def load_duet_module(duet_path: pathlib.Path):
 
 HEADING_RE = re.compile(
     r"^## (?:(?P<human>human) - force-feedback \(next: (?P<next>[^)]+)\)"
-    r"|(?P<speaker>.+?) \((?P<role>[^)]*)\) - (?P<kind>seed|agent|forced))\s*$",
+    r"|(?P<speaker>.+?) \((?P<role>[^)]*)\) - (?P<kind>seed|agent|forced|setup_error))\s*$",
     re.MULTILINE,
 )
 
@@ -575,6 +575,8 @@ def parse_transcript(transcript: pathlib.Path, duet_module) -> list[Turn]:
             )
             continue
         kind = match.group("kind") or ""
+        if kind == "setup_error":
+            continue
         scored_body = strip_worktree_appendix(body)
         convergence = False
         if kind in {"agent", "forced"}:
@@ -683,6 +685,39 @@ def run_duet_normal(
     return proc.returncode
 
 
+_FORCE_PROMPT = re.compile(
+    rb"\n\[duet\] loop ended \(reason=[a-z_]{1,64}\)\. "
+    rb"Press Enter to finish, or type feedback to force another turn "
+    rb"\(your text is appended as a human-feedback message and sent to the next agent\):"
+    rb"\r?\nforce> "
+)
+_FORCE_PROMPT_TAIL = 256
+
+
+def _scan_force_prompt(tail: bytes, chunk: bytes) -> tuple[bytes, bool]:
+    output = tail + chunk
+    prompt_seen = any(match.end() > len(tail) for match in _FORCE_PROMPT.finditer(output))
+    return output[-_FORCE_PROMPT_TAIL:], prompt_seen
+
+
+def _awaits_force_input(run_info: pathlib.Path, sent_inputs: int) -> bool:
+    run_dir = extract_run_dir(run_info)
+    if run_dir is None:
+        return False
+    try:
+        state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(state, dict) or state.get("phase") != "awaiting_force"
+            or state.get("finished_reason") is not None):
+        return False
+    history = state.get("history")
+    if not isinstance(history, list):
+        return False
+    completed = sum(isinstance(turn, dict) and turn.get("forced") is True for turn in history)
+    return completed == sent_inputs
+
+
 def run_duet_with_force_pty(
     duet_path: pathlib.Path,
     config_path: pathlib.Path,
@@ -690,9 +725,9 @@ def run_duet_with_force_pty(
     feedback: tuple[str, ...],
     timeout: int,
 ) -> int:
+    run_info = config_path.with_name("run-info.json")
     cmd = [sys.executable, str(duet_path), "--config", str(config_path),
-           "--metrics-kind", "test", "--run-info-file",
-           str(config_path.with_name("run-info.json"))]
+           "--metrics-kind", "test", "--run-info-file", str(run_info)]
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     master_fd, slave_fd = pty.openpty()
@@ -706,11 +741,10 @@ def run_duet_with_force_pty(
         start_new_session=True,
     )
     os.close(slave_fd)
-    deadline = time.time() + timeout
-    prompt_count = 0
+    deadline = time.monotonic() + timeout
     sent_inputs = 0
     inputs = [msg + "\n" for msg in (*feedback, "")]
-    buffer = b""
+    tail = b""
     try:
         with log_path.open("wb") as log:
             while True:
@@ -724,7 +758,7 @@ def run_duet_with_force_pty(
                             break
                         log.write(chunk)
                     return proc.returncode or 0
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     os.killpg(proc.pid, signal.SIGTERM)
                     try:
                         proc.wait(timeout=5)
@@ -745,13 +779,11 @@ def run_duet_with_force_pty(
                     continue
                 log.write(chunk)
                 log.flush()
-                buffer += chunk
-                new_prompt_count = buffer.count(b"force>")
-                if new_prompt_count > prompt_count:
-                    prompt_count = new_prompt_count
-                    if sent_inputs < len(inputs):
-                        os.write(master_fd, inputs[sent_inputs].encode("utf-8"))
-                        sent_inputs += 1
+                tail, prompt_seen = _scan_force_prompt(tail, chunk)
+                if (prompt_seen and sent_inputs < len(inputs)
+                        and _awaits_force_input(run_info, sent_inputs)):
+                    os.write(master_fd, inputs[sent_inputs].encode("utf-8"))
+                    sent_inputs += 1
     finally:
         try:
             os.close(master_fd)

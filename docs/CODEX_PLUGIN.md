@@ -181,8 +181,8 @@ another model.
 For OpenCode peers, use `provider/model` without a `#variant` suffix.
 Duet rejects that suffix. Set `--reasoning` or the agent's `reasoning_effort`
 instead. OpenCode v2 needs an explicit model to receive a backend effort
-argument. Without one, it receives only the prompt prefix and Duet prints a
-note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
+argument. Without a model, v2 uses native reasoning. Only high, xhigh, and max
+add prompt guidance. Duet prints a note. See [OpenCode peer models](OPENCODE_PLUGIN.md#opencode-peer-models).
 Preserve the requested effort when reporting this limit.
 For OpenCode clone placement and cleanup, see [worktree isolation](USAGE.md#where-the-worktree-lives).
 
@@ -296,8 +296,9 @@ means the backend did not report denials.
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in the
 `artifacts.transcript` file and the stderr log that it names.
-For `setup_error` or `kickoff_error`, there is no such block. Report the
-full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+For `setup_error`, read the `[duet] SETUP ERROR` transcript block when present.
+Otherwise, report the `[duet] ERROR:` message from the Duet process output.
+For `kickoff_error`, read the transcript excerpt and the stderr log it names.
 
 You can also list recent runs:
 

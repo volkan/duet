@@ -48,10 +48,13 @@ Stdlib only. Python 3.9+.
 from __future__ import annotations
 
 import argparse
+import codecs
 import contextlib
 import dataclasses
 import datetime as dt
+import errno
 import hashlib
+import io
 import json
 import math
 import os
@@ -71,7 +74,7 @@ import time
 import traceback
 import uuid
 import urllib.parse
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Iterator, Optional
 
 # ---------- defaults ----------
 
@@ -114,7 +117,10 @@ TASK_MAX_CHARS = 512 * 1024
 KICKOFF_ENVELOPE_MAX_CHARS = 8 * TASK_MAX_CHARS
 REVIEW_KICKOFF_KIND = "recipe_review_json"
 REVIEW_KICKOFF_AGENT = "review-kickoff"
-_NON_LOOP_HISTORY_KINDS = frozenset({"kickoff", "seed_extract", "final_review"})
+_RESUME_REFUSED_KIND = "resume_refused"
+_NON_LOOP_HISTORY_KINDS = frozenset({
+    "kickoff", "seed_extract", "final_review", _RESUME_REFUSED_KIND,
+})
 CONVERGENCE_RATIONALE_MIN_CHARS = 20
 VERIFY_OUTPUT_TAIL_CHARS = 4000
 AGENT_ERROR_TRANSCRIPT_MAX_CHARS = 12_000
@@ -733,7 +739,7 @@ def guard_cwd_keyed_resume_before_call(cfg: DuetConfig,
     if cfg.dry_run or not shared_cwd_backend_peers(cfg, agent.backend):
         return
     if not first_turn_for_agent and backend_adapter(agent.backend).resume_is_cwd_keyed(agent):
-        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
+        raise AgentRunError(FINISHED_SETUP_ERROR, cwd_keyed_resume_isolation_error(agent))
 
 
 def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
@@ -743,7 +749,7 @@ def guard_cwd_keyed_resume_after_call(cfg: DuetConfig,
         return
     if (shared_cwd_backend_peers(cfg, agent.backend)
             and backend_adapter(agent.backend).resume_is_cwd_keyed(agent)):
-        raise SystemExit(cwd_keyed_resume_isolation_error(agent))
+        raise AgentRunError(FINISHED_SETUP_ERROR, cwd_keyed_resume_isolation_error(agent))
 
 
 @dataclasses.dataclass
@@ -762,36 +768,41 @@ class VerifyResult:
 
 # ---------- active child process tracking ----------
 
-_ACTIVE_PROCS: set[subprocess.Popen] = set()
+# True means only the deadline watcher may poll while the child is registered.
+_ACTIVE_PROCS: dict[subprocess.Popen, bool] = {}
 # A signal handler can interrupt the main thread inside this lock and re-enter it.
 _ACTIVE_PROCS_LOCK = threading.RLock()
 
 
-def _register_proc(proc: subprocess.Popen) -> None:
+def _register_proc(proc: subprocess.Popen, *, watched: bool = False) -> None:
     with _ACTIVE_PROCS_LOCK:
-        _ACTIVE_PROCS.add(proc)
+        _ACTIVE_PROCS[proc] = watched
 
 
 def _unregister_proc(proc: subprocess.Popen) -> None:
     with _ACTIVE_PROCS_LOCK:
-        _ACTIVE_PROCS.discard(proc)
+        _ACTIVE_PROCS.pop(proc, None)
 
 
 def _signal_proc_tree(proc: subprocess.Popen, sig: int) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        if hasattr(os, "killpg"):
-            os.killpg(proc.pid, sig)
-        else:
-            proc.send_signal(sig)
-    except ProcessLookupError:
-        pass
-    except Exception:
+    with _ACTIVE_PROCS_LOCK:
+        watched = _ACTIVE_PROCS.get(proc)
+        if watched is None:
+            return
+        if (proc.returncode if watched else proc.poll()) is not None:
+            return
         try:
-            proc.kill()
-        except Exception:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, sig)
+            else:
+                os.kill(proc.pid, sig)
+        except ProcessLookupError:
             pass
+        except OSError:
+            try:
+                os.kill(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def _terminate_active_processes(sig: int = signal.SIGKILL) -> None:
@@ -1181,95 +1192,194 @@ LIVE_PREFIX_TASK = "  $ "
 RECAP_MODE = False
 
 
-def _stream_reader(stream, sink: list[str], mirror_to=None, prefix: str = "",
-                   tee_to=None, activity_event=None):
-    """Drain a pipe line-by-line, capture into `sink`, optionally mirror live and/or tee to file.
+_CHILD_POLL_INTERVAL = 0.1
+_CHILD_DRAIN_TIMEOUT = 0.25
+_CHILD_IO_CHUNK = 64 * 1024
+_CHILD_HEARTBEAT_INTERVAL = 20
+_CHILD_TERM_GRACE = 2
 
-    `mirror_to` is a writable text stream (typically sys.stderr) that the
-    line is echoed to with `prefix`. `tee_to` is an open file handle that
-    receives the raw line — used to persist the live stream for post-hoc
-    forensics. `activity_event`, if given, is `set()` on every received
-    line so a heartbeat thread can detect "subprocess went quiet". All
-    parameters are optional.
-    """
-    try:
-        for line in iter(stream.readline, ""):
-            sink.append(line)
-            if activity_event is not None:
-                activity_event.set()
-            if mirror_to is not None:
-                try:
-                    mirror_to.write(prefix + line if prefix else line)
-                    mirror_to.flush()
-                except Exception:
-                    pass
-            if tee_to is not None:
-                try:
-                    tee_to.write(line)
-                    tee_to.flush()
-                except Exception:
-                    pass
-    finally:
+
+def _write_child_log(target, text: str) -> None:
+    if target is not None:
         try:
-            stream.close()
+            target.write(text)
+            target.flush()
         except Exception:
             pass
 
 
-def _quiet_heartbeat(proc, mirror_to, start_monotonic: float,
-                     activity_event, interval: int = 20,
-                     prefix: str = LIVE_PREFIX) -> None:
-    """Print "[duet] still working…" when a subprocess goes quiet.
-
-    Most subprocesses emit rich stderr live (codex, gh, npm). Some don't
-    — `claude -p` is silent on stderr during the API call, so a long
-    seed-extract or claude turn can look like duet has hung. This thread
-    waits on `activity_event`; if no activity for `interval` seconds AND
-    the subprocess is still alive, it prints elapsed time and resets.
-    Mirrors duet's own stderr so it interleaves with live output.
-    """
-    if mirror_to is None:
-        return
-    while proc.poll() is None:
-        if activity_event.wait(timeout=interval):
-            activity_event.clear()
-            continue
-        if proc.poll() is not None:
-            return
-        try:
-            elapsed = int(time.monotonic() - start_monotonic)
-            mirror_to.write(f"{prefix}[duet] still working… ({elapsed}s; "
-                            "subprocess silent — typical for `claude -p`)\n")
-            mirror_to.flush()
-        except Exception:
-            return
-
-
-def _live_stream_target(enabled: bool = True):
-    return sys.stderr if enabled and LIVE_STREAM and not RECAP_MODE and sys.stderr.isatty() else None
-
-
-def _feed_stdin(proc: subprocess.Popen, text: Optional[str]) -> None:
-    """Write `text` to the child and close its stdin.
-
-    Runs on its own thread: a child that stalls before reading would block a
-    large write, and the caller must already be waiting with its timeout.
-    """
-    if proc.stdin is None:
-        return
+def _open_live_terminal() -> Optional[int]:
+    if not LIVE_STREAM or RECAP_MODE or not sys.stderr.isatty():
+        return None
     try:
-        if text is not None:
-            proc.stdin.write(text)
+        source = sys.stderr.fileno()
+        # Reopen instead of dup: O_NONBLOCK on a dup would also change sys.stderr.
+        terminal = os.open(os.ttyname(source), os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY)
     except (OSError, ValueError):
+        return None
+    try:
+        if os.path.samestat(os.fstat(source), os.fstat(terminal)):
+            return terminal
+    except OSError:
         pass
-    finally:
+    os.close(terminal)
+    return None
+
+
+def _mirror_child_output(terminal: Optional[int], text: str) -> None:
+    if terminal is not None:
         try:
-            proc.stdin.close()
-        except (OSError, ValueError):
+            os.write(terminal, text.encode("utf-8"))
+        except OSError:
             pass
 
 
-def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: int,
+@dataclasses.dataclass
+class _ChildDeadline:
+    proc: subprocess.Popen
+    expires_at: float
+    finished: threading.Event = dataclasses.field(default_factory=threading.Event)
+    expired: bool = False
+    error: Optional[Exception] = None
+
+    def watch(self) -> None:
+        signal_at = self.expires_at
+        try:
+            while not self.finished.is_set():
+                with _ACTIVE_PROCS_LOCK:
+                    if self.proc.poll() is not None:
+                        return
+                    now = time.monotonic()
+                    if now >= signal_at:
+                        _signal_proc_tree(self.proc, signal.SIGKILL if self.expired else signal.SIGTERM)
+                        signal_at = math.inf if self.expired else now + _CHILD_TERM_GRACE
+                        self.expired = True
+                self.finished.wait(min(_CHILD_POLL_INTERVAL, max(0, signal_at - time.monotonic())))
+        except Exception as exc:
+            self.error = exc
+        finally:
+            self.finished.set()
+
+
+class _ChildOutput:
+    def __init__(self, mirror, prefix: str, tee=None):
+        self.decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")("replace"), True)
+        self.chunks: list[str] = []
+        self.pending_line: list[str] = []
+        self.mirror = mirror
+        self.prefix = prefix
+        self.tee = tee
+
+    def _mirror_lines(self, text: str, final: bool) -> None:
+        lines = text.split("\n")
+        for line in lines[:-1]:
+            rendered = "".join(self.pending_line) + line + "\n"
+            self.pending_line.clear()
+            _mirror_child_output(self.mirror, self.prefix + rendered)
+        self.pending_line.append(lines[-1])
+        if final and (tail := "".join(self.pending_line)):
+            _mirror_child_output(self.mirror, self.prefix + tail)
+
+    def capture(self, data: bytes, *, final: bool = False) -> None:
+        text = self.decoder.decode(data, final)
+        self.chunks.append(text)
+        _write_child_log(self.tee, text)
+        if self.mirror is not None:
+            self._mirror_lines(text, final)
+
+
+def _write_child_stdin(selector, stream, data: memoryview) -> memoryview:
+    try:
+        count = os.write(stream.fileno(), data[:_CHILD_IO_CHUNK])
+        data = data[count:]
+    except BrokenPipeError:
+        data = data[:0]
+    except BlockingIOError:
+        return data
+    if not data:
+        selector.unregister(stream)
+        stream.close()
+    return data
+
+
+def _read_child_output(selector, stream, output: _ChildOutput, size: int = _CHILD_IO_CHUNK) -> int:
+    try:
+        chunk = os.read(stream.fileno(), size)
+    except BlockingIOError:
+        return 0
+    if chunk:
+        output.capture(chunk)
+        return len(chunk)
+    selector.unregister(stream)
+    return 0
+
+
+def _drain_buffered_child_output(selector) -> None:
+    from array import array
+    import fcntl
+    import termios
+
+    # Sample both pipes before capture can stall on a log write. Inherited
+    # writers can refill a pipe as we read, so stop at each sampled byte count.
+    buffered = []
+    count = array("i", [0])
+    for key in selector.get_map().values():
+        fcntl.ioctl(key.fd, termios.FIONREAD, count)
+        buffered.append((key, count[0]))
+    for key, unread in buffered:
+        while unread > 0:
+            size = min(unread, _CHILD_IO_CHUNK)
+            read = _read_child_output(selector, key.fileobj, key.data, size)
+            if not read:
+                break
+            unread -= read
+
+
+def _pump_child_io(proc: subprocess.Popen, stdin: Optional[str], finished: threading.Event,
+                   stdout: _ChildOutput, stderr: _ChildOutput) -> None:
+    start = time.monotonic()
+    next_heartbeat = start + _CHILD_HEARTBEAT_INTERVAL
+    data = memoryview((stdin or "").encode("utf-8", errors="replace"))
+    with selectors.DefaultSelector() as selector:
+        for stream, output in ((proc.stdout, stdout), (proc.stderr, stderr)):
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, output)
+        if data:
+            os.set_blocking(proc.stdin.fileno(), False)
+            selector.register(proc.stdin, selectors.EVENT_WRITE)
+        else:
+            proc.stdin.close()
+        while not finished.is_set():
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                _mirror_child_output(
+                    stderr.mirror,
+                    f"{stderr.prefix}[duet] still working… ({int(now - start)}s; "
+                    "subprocess silent — typical for `claude -p`)\n")
+                next_heartbeat = now + _CHILD_HEARTBEAT_INTERVAL
+            delay = min(_CHILD_POLL_INTERVAL, next_heartbeat - now)
+            for key, _ in selector.select(delay):
+                if key.data is None:
+                    data = _write_child_stdin(selector, key.fileobj, data)
+                elif _read_child_output(selector, key.fileobj, key.data):
+                    next_heartbeat = time.monotonic() + _CHILD_HEARTBEAT_INTERVAL
+        if not proc.stdin.closed:
+            selector.unregister(proc.stdin)
+            proc.stdin.close()
+        # A descendant can keep a pipe open after the tracked child exits.
+        # Give inherited writers a shared drain window, even if a pipe is idle.
+        drain_until = time.monotonic() + _CHILD_DRAIN_TIMEOUT
+        while selector.get_map() and (remaining := drain_until - time.monotonic()) > 0:
+            for key, _ in selector.select(remaining):
+                _read_child_output(selector, key.fileobj, key.data)
+        if selector.get_map():
+            _drain_buffered_child_output(selector)
+    for output in (stdout, stderr):
+        output.capture(b"", final=True)
+
+
+def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: float,
          stderr_log_path: Optional[pathlib.Path] = None,
          pid_file_path: Optional[pathlib.Path] = None,
          live_prefix: Optional[str] = None,
@@ -1280,8 +1390,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     """Run a subprocess. Returns (rc, stdout, stderr).
 
     If LIVE_STREAM is on AND stderr is a TTY, the child's stderr is mirrored
-    to our stderr line-by-line as it's produced. stdout is captured silently
-    unless `mirror_stdout` is set — duet logs agent final answers to the
+    to the terminal line-by-line when it can accept output. stdout is captured
+    silently unless `mirror_stdout` is set — duet logs agent final answers to the
     transcript afterwards.
     Set `mirror_stderr=False` for private configuration probes; their captured
     output must not reach live output or a persistent stderr log.
@@ -1296,11 +1406,8 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
     vs "agent crashed silently". Critical for agents like `claude -p` that
     emit no stderr during their long API call.
     """
-    mirror = _live_stream_target()
-    stderr_mirror = _live_stream_target(mirror_stderr)
+    terminal = None
     prefix = live_prefix if live_prefix is not None else LIVE_PREFIX
-    out_chunks: list[str] = []
-    err_chunks: list[str] = []
     stderr_file = None
     if stderr_log_path is not None:
         try:
@@ -1320,66 +1427,53 @@ def _run(cmd: list[str], *, cwd: pathlib.Path, stdin: Optional[str], timeout: in
                   file=sys.stderr)
             stderr_file = None
     try:
+        terminal = _open_live_terminal() if mirror_stdout or mirror_stderr else None
         try:
             proc = subprocess.Popen(
                 cmd, cwd=str(cwd),
                 env=None if env_overrides is None else {**os.environ, **env_overrides},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
-                bufsize=1,  # line-buffered
+                bufsize=0,
                 start_new_session=True,
             )
         except FileNotFoundError:
             return 127, "", f"[duet] command not found: {cmd[0]}"
-        _register_proc(proc)
-        if pid_file_path is not None:
-            try:
-                pid_file_path.parent.mkdir(parents=True, exist_ok=True)
-                # Write atomically so a poller never reads a half-written PID.
-                tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
-                tmp.write_text(f"{proc.pid}\n", encoding="utf-8")
-                os.replace(tmp, pid_file_path)
-            except OSError as e:
-                print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
-                      file=sys.stderr)
-        activity_event = threading.Event()
-        t_out = threading.Thread(target=_stream_reader,
-                                 args=(proc.stdout, out_chunks,
-                                       mirror if mirror_stdout else None,
-                                       prefix if mirror_stdout else "",
-                                       None, activity_event),
-                                 daemon=True)
-        t_err = threading.Thread(target=_stream_reader,
-                                 args=(proc.stderr, err_chunks, stderr_mirror, prefix,
-                                       stderr_file, activity_event),
-                                 daemon=True)
-        t_out.start(); t_err.start()
-        # Heartbeat: print elapsed-time hint when proc goes quiet (>20s no
-        # stderr/stdout). Useful for `claude -p`, which stays silent on
-        # stderr during the API call. No-op if mirror is None (--quiet).
-        t_hb = threading.Thread(target=_quiet_heartbeat,
-                                args=(proc, stderr_mirror, time.monotonic(), activity_event, 20, prefix),
-                                daemon=True)
-        t_hb.start()
-
-        t_in = threading.Thread(target=_feed_stdin, args=(proc, stdin), daemon=True)
-        t_in.start()
+        _register_proc(proc, watched=True)
+        deadline = _ChildDeadline(proc, time.monotonic() + timeout)
+        worker = threading.Thread(target=deadline.watch, name="duet-child-deadline", daemon=True)
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _signal_proc_tree(proc, signal.SIGTERM)
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                _signal_proc_tree(proc, signal.SIGKILL)
-                proc.wait()
-            t_out.join(timeout=2); t_err.join(timeout=2); t_in.join(timeout=2)
-            return 124, "".join(out_chunks), "".join(err_chunks) + f"\n[duet] TIMEOUT after {timeout}s"
+            worker.start()
+            stdout = _ChildOutput(terminal if mirror_stdout else None, prefix)
+            stderr = _ChildOutput(terminal if mirror_stderr else None, prefix, stderr_file)
+            if pid_file_path is not None:
+                try:
+                    pid_file_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Write atomically so a poller never reads a half-written PID.
+                    tmp = pid_file_path.with_name(pid_file_path.name + ".tmp")
+                    tmp.write_text(f"{proc.pid}\n", encoding="utf-8")
+                    os.replace(tmp, pid_file_path)
+                except OSError as e:
+                    print(f"[duet] warn: pid file write failed ({pid_file_path}): {e}",
+                          file=sys.stderr)
+            _pump_child_io(proc, stdin, deadline.finished, stdout, stderr)
         finally:
+            deadline.finished.set()
+            if worker.ident is not None:
+                worker.join()
+            _signal_proc_tree(proc, signal.SIGKILL)
             _unregister_proc(proc)
-        t_out.join(timeout=5); t_err.join(timeout=5); t_in.join(timeout=2)
-        return proc.returncode, "".join(out_chunks), "".join(err_chunks)
+            rc = proc.wait()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+        if deadline.error is not None:
+            raise deadline.error
+        if deadline.expired:
+            rc = 124
+            stderr.chunks.append(f"\n[duet] TIMEOUT after {timeout}s")
+        return rc, "".join(stdout.chunks), "".join(stderr.chunks)
     finally:
+        if terminal is not None:
+            os.close(terminal)
         if stderr_file is not None:
             try:
                 stderr_file.close()
@@ -1462,9 +1556,12 @@ def _opencode_note_missing_model(agent: Agent, reasoning: str) -> None:
     if agent.name in _OPENCODE_VARIANT_NOTE_AGENTS:
         return
     _OPENCODE_VARIANT_NOTE_AGENTS.add(agent.name)
-    print(f"[duet] note: opencode v2 applies reasoning '{reasoning}' only through "
-          f"model#variant; agent '{agent.name}' has no model, so only the prompt "
-          "prefix carries the effort request", file=sys.stderr)
+    adapter = backend_adapter("opencode")
+    _, transport = _prompt_reasoning(adapter, reasoning)
+    prompt_note = " with prompt guidance" if transport == "prompt" else ""
+    print(f"[duet] note: opencode v2 needs an explicit model to select reasoning "
+          f"'{reasoning}' for agent '{agent.name}'; using native reasoning{prompt_note}",
+          file=sys.stderr)
 
 
 def _opencode_policy_content(config: dict, *, worktree_confined: bool = False) -> dict:
@@ -1600,12 +1697,12 @@ def _delegation_safe_extra_args(agent: Agent) -> list[str]:
     return kept
 
 
-def _opencode_probe_cwd(cmd: list[str], cwd: pathlib.Path) -> pathlib.Path:
+def _opencode_probe_cwd(run_options: list[str], cwd: pathlib.Path) -> pathlib.Path:
     """Match run's v1 --dir, including an explicit extra-argument override."""
     directory = str(cwd)
-    for index, arg in enumerate(cmd[2:-1], 2):
-        if arg == "--dir" and index + 1 < len(cmd) - 1:
-            directory = cmd[index + 1]
+    for index, arg in enumerate(run_options):
+        if arg == "--dir" and index + 1 < len(run_options):
+            directory = run_options[index + 1]
         elif arg.startswith("--dir="):
             directory = arg.partition("=")[2]
     return (cwd / directory).resolve()
@@ -1731,10 +1828,11 @@ def _check_opencode_subagent_policy(cmd: list[str], *, cwd: pathlib.Path,
         probe = ["opencode", "debug", "config", "--standalone"]
         probe_cwd = cwd
     else:
+        run_options = cmd[2:]
         probe = ["opencode", "debug", "config"]
-        if "--pure" in cmd[2:-1]:
+        if "--pure" in run_options:
             probe.append("--pure")
-        probe_cwd = _opencode_probe_cwd(cmd, cwd)
+        probe_cwd = _opencode_probe_cwd(run_options, cwd)
     rc, out, _ = _run(probe, cwd=probe_cwd, stdin="",
                       timeout=min(timeout, 30), env_overrides=env_overrides,
                       pid_file_path=pid_file_path, mirror_stderr=False)
@@ -1756,7 +1854,8 @@ def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                stdin: Optional[str], timeout: int,
                stderr_log_path: Optional[pathlib.Path],
                pid_file_path: Optional[pathlib.Path],
-               worktree_confined: bool = False) -> tuple[int, str, str]:
+               worktree_confined: bool = False,
+               prompt_args: Iterable[str] = ()) -> tuple[int, str, str]:
     try:
         with _agent_environment(backend, cwd=cwd,
                                 worktree_confined=worktree_confined) as env_overrides:
@@ -1770,7 +1869,7 @@ def _agent_run(cmd: list[str], *, backend: str, cwd: pathlib.Path,
                 if timeout <= 0:
                     raise subprocess.TimeoutExpired(cmd, 0)
             return _run(
-                cmd,
+                [*cmd, *prompt_args],
                 cwd=cwd,
                 stdin=stdin,
                 timeout=timeout,
@@ -2333,8 +2432,22 @@ def _metrics_cli_version(binary: str) -> Optional[str]:
     return version
 
 
-def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
-        Optional[str], Optional[str], Optional[str], str, bool]:
+def _prompt_reasoning(adapter: BackendAdapter, effective: str) -> tuple[Optional[str], str]:
+    if adapter.reasoning_prompt_prefix.get(effective):
+        return effective, "prompt"
+    return None, "native_default"
+
+
+def _opencode_reasoning_major(cli_version: Optional[str]) -> Optional[int]:
+    if _OPENCODE_CLI_MAJOR is not None:
+        return _OPENCODE_CLI_MAJOR
+    match = re.match(r"([0-9]+)\.", cli_version or "")
+    return int(match.group(1)) if match else None
+
+
+def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig,
+                               cli_version: Optional[str] = None) -> tuple[
+        Optional[str], Optional[str], Optional[str], Optional[str], bool]:
     """Return requested/effective/backend reasoning and its transport."""
     requested = effective_reasoning(agent, cfg.reasoning)
     fast = bool(cfg.codex_fast and agent.backend == "codex" and agent.role == "coder")
@@ -2342,35 +2455,33 @@ def _metrics_reasoning_profile(agent: Agent, cfg: DuetConfig) -> tuple[
     if effective is None:
         return requested, None, None, "native_default", fast
     adapter = backend_adapter(agent.backend)
-    backend_value = adapter.reasoning_map.get(effective, effective)
+    if agent.backend == "opencode" and not agent.model:
+        major = _opencode_reasoning_major(cli_version)
+        if major is None:
+            return requested, None, None, None, fast
+        if major >= 2:
+            level, transport = _prompt_reasoning(adapter, effective)
+            return requested, level, None, transport, fast
     if agent.backend == "gemini":
-        if effective not in {"high", "xhigh", "max"}:
-            # Gemini has no effort flag, and its low/medium/minimal prefixes
-            # are empty. Reporting those as an effective setting would claim
-            # control the adapter did not exercise.
-            return requested, None, None, "native_default", fast
-        transport = "prompt"
-        backend_value = None
-    elif agent.backend == "zcode":
-        transport = "config_file"
-    elif agent.backend == "codex":
-        transport = "config_flag"
-    else:
-        transport = "flag"
+        level, transport = _prompt_reasoning(adapter, effective)
+        return requested, level, None, transport, fast
+    backend_value = adapter.reasoning_map.get(effective, effective)
+    transport = {"zcode": "config_file", "codex": "config_flag"}.get(agent.backend, "flag")
     return requested, effective, backend_value, transport, fast
 
 
 def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
                           probe_versions: bool = False) -> dict:
     """Return safe, non-secret backend metadata for one agent configuration."""
-    requested, effective, backend_value, transport, fast = _metrics_reasoning_profile(
-        agent, cfg,
-    )
     adapter = backend_adapter(agent.backend)
     version = None
     if (probe_versions and not cfg.dry_run
             and getattr(cfg, "metrics_enabled", True)):
         version = _metrics_cli_version(adapter.binary)
+    known_version = version or _METRICS_CLI_VERSION_CACHE.get(adapter.binary)
+    requested, effective, backend_value, transport, fast = _metrics_reasoning_profile(
+        agent, cfg, known_version,
+    )
     return {
         "backend": adapter.name,
         "role": agent.role if agent.role in _METRICS_BUILTIN_ROLES else "custom",
@@ -2383,10 +2494,21 @@ def metrics_agent_profile(agent: Agent, cfg: DuetConfig,
         "fast_mode": fast,
         "extra_args_present": bool(agent.extra_args),
         "subagent_policy": "disabled",
-        "prompt_transport": (
-            "system_flag_and_message" if agent.backend == "claude" else "combined_prompt"
-        ),
+        "prompt_transport": None,
     }
+
+
+def _refresh_opencode_reasoning_metrics(agent: Agent, cfg: DuetConfig) -> None:
+    _, effective, value, transport, _ = _metrics_reasoning_profile(
+        agent, cfg, _METRICS_CLI_VERSION_CACHE.get("opencode"),
+    )
+    update = {"reasoning_effective": effective, "reasoning_backend_value": value,
+              "reasoning_transport": transport}
+    agent.last_call_metrics.update(update)
+    for peer, profile in zip(cfg.agents, cfg._metrics_context.get("agents", [])):
+        if peer is agent:
+            profile.update(update)
+            break
 
 
 def _metrics_nonnegative_int(value: object) -> Optional[int]:
@@ -2618,6 +2740,62 @@ def _record_tool_denials(entry: dict, denials: Optional[dict]) -> None:
         entry["tool_denials"] = dict(denials)
 
 
+# Linux can limit one argument independently of the total argv/environment size.
+_PROMPT_ARG_MAX_BYTES = 64 * 1024
+_GEMINI_PROMPT_STDIN_MAX_BYTES = 8 * 1024 * 1024
+_PROMPT_TRANSPORTS = ("combined_argv", "combined_stdin",
+                      "system_flag_and_message", "system_file_and_message")
+
+
+def _prompt_fits_argv(prompt: str) -> bool:
+    return len(prompt.encode("utf-8")) <= _PROMPT_ARG_MAX_BYTES and "\0" not in prompt
+
+
+def _combined_prompt_input(agent: Agent, prompt: str, *,
+                           argv_flags: tuple[str, ...] = (),
+                           stdin_flags: tuple[str, ...] = ()) -> tuple[list[str], Optional[str]]:
+    if _prompt_fits_argv(prompt):
+        agent.last_call_metrics["prompt_transport"] = "combined_argv"
+        return [*argv_flags, prompt], None
+    if agent.backend == "gemini" and len(prompt.encode("utf-8")) > _GEMINI_PROMPT_STDIN_MAX_BYTES:
+        raise AgentRunError(FINISHED_AGENT_ERROR, "Gemini CLI stdin accepts up to 8 MiB of prompt text")
+    agent.last_call_metrics["prompt_transport"] = "combined_stdin"
+    return list(stdin_flags), prompt
+
+
+@contextlib.contextmanager
+def _claude_system_prompt_args(agent: Agent, system_prompt: str):
+    if _prompt_fits_argv(system_prompt):
+        agent.last_call_metrics["prompt_transport"] = "system_flag_and_message"
+        yield ["--append-system-prompt", system_prompt]
+    else:
+        with tempfile.TemporaryDirectory(prefix="duet-claude-") as directory:
+            path = pathlib.Path(directory) / "system-prompt.txt"
+            path.touch(mode=0o600)
+            path.write_text(system_prompt, encoding="utf-8")
+            agent.last_call_metrics["prompt_transport"] = "system_file_and_message"
+            yield ["--append-system-prompt-file", str(path)]
+
+
+def _parse_claude_turn(stdout: str) -> dict:
+    try:
+        payload = json.loads(stdout)
+    except ValueError as exc:
+        raise AgentRunError(FINISHED_AGENT_ERROR,
+                            f"claude returned malformed JSON output: {stdout[:500].strip()!r}") from exc
+    if not isinstance(payload, dict):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON result must be an object")
+    if payload.get("is_error") is True:
+        result = payload.get("result")
+        detail = f": {result[:500].strip()}" if isinstance(result, str) and result.strip() else ""
+        raise AgentRunError(FINISHED_AGENT_ERROR, f"claude reported is_error=true{detail}")
+    if "is_error" in payload and not isinstance(payload["is_error"], bool):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON is_error must be a boolean")
+    if not isinstance(payload.get("result"), str):
+        raise AgentRunError(FINISHED_AGENT_ERROR, "claude JSON result must contain text in result")
+    return payload
+
+
 def call_claude(agent: Agent, system_prompt: str, message: str,
                 cwd: pathlib.Path, perm_mode: str, timeout: int, dry: bool,
                 reasoning: Optional[str] = None,
@@ -2645,7 +2823,6 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         ), new_sid
     cmd = ["claude", "-p",
            "--output-format", "json",
-           "--append-system-prompt", system_prompt,
            "--permission-mode", perm_mode,
            *reasoning_args,
            "--add-dir", str(eff_cwd)]
@@ -2658,32 +2835,27 @@ def call_claude(agent: Agent, system_prompt: str, message: str,
         cmd += ["--resume", agent.session_id]
     if agent.model:
         cmd += ["--model", agent.model]
-    cmd += _delegation_safe_extra_args(agent)
-    rc, out, err = _agent_run(
-        cmd,
-        backend="claude",
-        cwd=eff_cwd,
-        # A positional prompt that starts with "-" is parsed as an option.
-        stdin=message,
-        timeout=timeout,
-        stderr_log_path=stderr_log_path,
-        pid_file_path=pid_file_path,
-    )
+    with _claude_system_prompt_args(agent, system_prompt) as system_args:
+        cmd += [*system_args, *_delegation_safe_extra_args(agent)]
+        rc, out, err = _agent_run(
+            cmd,
+            backend="claude",
+            cwd=eff_cwd,
+            # A positional prompt that starts with "-" is parsed as an option.
+            stdin=message,
+            timeout=timeout,
+            stderr_log_path=stderr_log_path,
+            pid_file_path=pid_file_path,
+        )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
         raise AgentRunError(reason, _agent_exit_error("claude", rc, out, err))
-    try:
-        payload = json.loads(out)
-        _metrics_record_raw_output(agent, out)
-        _metrics_record_claude_metadata(agent, payload)
-        agent.last_tool_denials = parse_claude_tool_denials(payload)
-        return (payload.get("result") or "").rstrip(), payload.get("session_id") or agent.session_id
-    except json.JSONDecodeError:
-        snippet = out[:500].strip()
-        raise AgentRunError(
-            FINISHED_AGENT_ERROR,
-            f"claude returned malformed JSON output: {snippet!r}",
-        )
+    payload = _parse_claude_turn(out)
+    _metrics_record_raw_output(agent, out)
+    _metrics_record_claude_metadata(agent, payload)
+    agent.last_tool_denials = parse_claude_tool_denials(payload)
+    return payload["result"].rstrip(), payload.get("session_id") or agent.session_id
+
 
 
 # Codex's `codex exec` prints a line like `session id: 019e12ad-0b1b-7732-bd7b-6acbbd04ab46`
@@ -2762,6 +2934,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             f"{DEFAULT_SENTINEL}"
         ), new_sid
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt, stdin_flags=("-",))
     reasoning_args: list[str] = []
     if effective:
         codex_value = backend_adapter("codex").reasoning_map.get(effective, effective)
@@ -2791,7 +2964,7 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
         exec_only_opts = ["--sandbox", sandbox, "--cd", str(eff_cwd)]
         options = [*exec_only_opts, *shared_opts, *reasoning_args,
                    *_delegation_safe_extra_args(agent), *CODEX_NO_SUBAGENT_ARGS]
-        cmd = ["codex", "exec", *options, full_prompt]
+        cmd = ["codex", "exec", *options, *prompt_args]
     else:
         # cwd is set via subprocess.Popen(cwd=…) so codex inherits the right
         # directory regardless of how we resume. Keep the supported config
@@ -2810,20 +2983,20 @@ def call_codex(agent: Agent, system_prompt: str, message: str,
             # robust to parallel codex sessions sharing the cwd because
             # codex looks up the session by id, not by recency.
             cmd = ["codex", "exec", "resume", agent.session_id,
-                   *options, full_prompt]
+                   *options, *prompt_args]
         else:
             # Sentinel value (typically "codex-current") meaning "we know a
             # prior turn happened but never captured a UUID." Fall back to
             # the most recent codex session in this cwd. Caveat: don't run
             # parallel codex sessions in the same cwd while a duet is alive.
             cmd = ["codex", "exec", "resume", "--last",
-                   *options, full_prompt]
+                   *options, *prompt_args]
     # codex exec hangs on non-TTY stdin without explicit close (issue #20919)
     rc, out, err = _agent_run(
         cmd,
         backend="codex",
         cwd=eff_cwd,
-        stdin="",
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -2887,11 +3060,14 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
         ), new_sid
 
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
+    prompt_args, prompt_stdin = _combined_prompt_input(
+        agent, full_prompt, argv_flags=("-p",), stdin_flags=("-p", ""),
+    )
     cmd = ["gemini"]
     if agent.session_id:
         cmd += ["--resume", agent.session_id]
     cmd += [
-        "-p", full_prompt,
+        *prompt_args,
         "--output-format", "json",
         "--approval-mode", _gemini_approval_mode(permission_mode),
     ]
@@ -2904,7 +3080,7 @@ def call_gemini(agent: Agent, system_prompt: str, message: str,
         cmd,
         backend="gemini",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -3032,12 +3208,13 @@ def call_copilot(agent: Agent, system_prompt: str, message: str,
     for d in (add_dirs or []):
         cmd += ["--add-dir", str(d)]
     cmd += _delegation_safe_extra_args(agent)
-    cmd += ["-p", full_prompt]
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt, argv_flags=("-p",))
+    cmd += prompt_args
     rc, out, err = _agent_run(
         cmd,
         backend="copilot",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
@@ -3201,16 +3378,17 @@ def call_opencode(agent: Agent, system_prompt: str, message: str,
     full_prompt = f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"
     cmd = _opencode_run_cmd(agent, eff_cwd, reasoning)
     cmd += _delegation_safe_extra_args(agent)
-    cmd.append(full_prompt)
+    prompt_args, prompt_stdin = _combined_prompt_input(agent, full_prompt)
     rc, out, err = _agent_run(
         cmd,
         backend="opencode",
         cwd=eff_cwd,
-        stdin=None,
+        stdin=prompt_stdin,
         timeout=timeout,
         stderr_log_path=stderr_log_path,
         pid_file_path=pid_file_path,
         worktree_confined=bool(agent.cwd_override),
+        prompt_args=prompt_args,
     )
     if rc != 0:
         reason = FINISHED_TIMEOUT if rc == 124 else FINISHED_AGENT_ERROR
@@ -3716,6 +3894,7 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
                     "--disallowed-tools", ",".join(denied)]
         if agent.session_id:
             command += ["--resume", agent.session_id]
+        agent.last_call_metrics["prompt_transport"] = "combined_argv"
         command += ["--prompt", f"=== ROLE ===\n{system_prompt}\n\n=== MESSAGE FROM PARTNER ===\n{message}"]
         with _zcode_peer_profile(selection, launch_env) as env:
             _zcode_check_permission_inputs(native_cwd, permission_inputs)
@@ -3735,6 +3914,13 @@ def call_zcode(agent: Agent, system_prompt: str, message: str,
     except AgentRunError:
         raise
     except Exception as exc:
+        if isinstance(exc, OSError) and exc.errno == errno.E2BIG:
+            raise AgentRunError(
+                FINISHED_AGENT_ERROR,
+                "ZCode headless needs the combined prompt in one argument, which exceeds "
+                "the operating system's argument limit. Use a shorter prompt or choose a "
+                "backend that accepts large prompts on stdin.",
+            ) from None
         raise AgentRunError(FINISHED_AGENT_ERROR, f"ZCode invocation failed: {exc}") from exc
     agent.zcode_selection = pin
     _metrics_record_raw_output(agent, out)
@@ -3854,19 +4040,20 @@ def call_agent(agent: Agent, message: str, cfg: DuetConfig, first_turn_for_agent
         log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
         pid_path = run_dir / f"turn-{turn_label}-{agent.name}.pid"
     adapter = backend_adapter(agent.backend)
-    text, new_sid = adapter.call(
-        agent, sys_prompt, message, cfg, first_turn_for_agent,
-        log_path, pid_path, reasoning,
-    )
-    if metrics_enabled:
-        if "raw_output_bytes" not in agent.last_call_metrics:
-            # Dry runs do not have provider stdout; their adapter result is
-            # the complete synthetic backend output for this call.
-            _metrics_record_raw_output(agent, text)
-    else:
-        # Adapters also support direct callers and therefore collect optional
-        # decoded telemetry locally. A disabled normal run must retain none.
-        agent.last_call_metrics = {}
+    try:
+        text, new_sid = adapter.call(
+            agent, sys_prompt, message, cfg, first_turn_for_agent,
+            log_path, pid_path, reasoning,
+        )
+    finally:
+        if not metrics_enabled:
+            agent.last_call_metrics = {}
+        elif agent.backend == "opencode" and not agent.model:
+            _refresh_opencode_reasoning_metrics(agent, cfg)
+    if metrics_enabled and "raw_output_bytes" not in agent.last_call_metrics:
+        # Dry runs do not have provider stdout; their adapter result is
+        # the complete synthetic backend output for this call.
+        _metrics_record_raw_output(agent, text)
     agent.session_id = new_sid
     return text
 
@@ -3904,21 +4091,25 @@ def _bounded_agent_error_excerpt(
 
 def format_agent_error_for_transcript(
     exc: Exception,
-    stderr_log_path: pathlib.Path,
+    stderr_log_path: Optional[pathlib.Path],
     max_chars: int = AGENT_ERROR_TRANSCRIPT_MAX_CHARS,
 ) -> str:
     """Format bounded error context while pointing at the complete stderr."""
     excerpt = _bounded_agent_error_excerpt(str(exc), max_chars)
-    return "\n".join([
-        f"[duet] error: {excerpt}",
-        f"[duet] stderr log: {stderr_log_path}",
-    ])
+    detail = f"[duet] error: {excerpt}"
+    if stderr_log_path is not None:
+        detail += f"\n[duet] stderr log: {stderr_log_path}"
+    return detail
 
 
 def _agent_failure_block(reason: str, exc: Exception, turn_label: str,
-                         agent: Agent, run_dir: pathlib.Path) -> str:
-    kind = "TIMEOUT" if reason == FINISHED_TIMEOUT else "AGENT ERROR"
-    log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log"
+                         agent: Agent, run_dir: pathlib.Path, *,
+                         call_started: bool = True) -> str:
+    kind = {
+        FINISHED_TIMEOUT: "TIMEOUT",
+        FINISHED_SETUP_ERROR: "SETUP ERROR",
+    }.get(reason, "AGENT ERROR")
+    log_path = run_dir / f"turn-{turn_label}-{agent.name}.stderr.log" if call_started else None
     return "\n".join([
         f"[duet] {kind}: turn {turn_label} failed for "
         f"{agent.name} ({agent.backend}/{agent.role})",
@@ -3940,8 +4131,8 @@ class StopFlag:
 def _install_sigint(stop: StopFlag) -> None:
     def handler(signum, frame):
         if stop.requested:
-            print("\n[duet] second SIGINT — exiting hard.", file=sys.stderr)
             _terminate_active_processes(signal.SIGKILL)
+            print("\n[duet] second SIGINT — exiting hard.", file=sys.stderr)
             os._exit(130)
         print("\n[duet] SIGINT received — finishing current turn, then stopping. "
               "Press Ctrl-C again to abort immediately.", file=sys.stderr)
@@ -3969,17 +4160,16 @@ def _install_run_stop_signal(stop: StopFlag) -> None:
 def _install_sigterm(stop: StopFlag) -> None:
     """Make run-scoped immediate stops durable before this process exits."""
     def handler(signum, frame):
-        if not stop.requested:
+        first = not stop.requested
+        stop.request("SIGTERM")
+        # The terminal can be full. Signal tracked child groups before writing.
+        _terminate_active_processes(signal.SIGKILL)
+        if first:
             print(
                 "\n[duet] immediate stop requested — terminating the active "
                 "child, then stopping.",
                 file=sys.stderr,
             )
-        stop.request("SIGTERM")
-        # Each tracked child is its own process-group leader. This preserves
-        # the existing descendant cleanup without signaling the supervisor's
-        # process group or any other duet run.
-        _terminate_active_processes(signal.SIGKILL)
 
     signal.signal(signal.SIGTERM, handler)
 
@@ -4179,13 +4369,15 @@ def _stop_recap_inflight(stop_event: threading.Event,
     sys.stdout.flush()
 
 
-def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
+def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None, *,
+                before_extract: Optional[Callable[[], None]] = None) -> str:
     """Figure out the first message to send to the partner agent."""
     if cfg.kickoff:
         return cfg.kickoff
     # If agent[0] has a session_id, ask it to dump its latest plan/message.
     a0 = cfg.agents[0]
     if a0.session_id:
+        guard_cwd_keyed_resume_before_call(cfg, a0, first_turn_for_agent=False)
         print(f"[duet] extracting latest message from {a0.backend} session "
               f"{a0.session_id[:8]}…")
         if a0.backend == "claude" and run_dir is not None:
@@ -4193,6 +4385,8 @@ def derive_seed(cfg: DuetConfig, run_dir: Optional[pathlib.Path] = None) -> str:
                   f"call; expect 30–120s.")
             print(f"[duet]   from another terminal: "
                   f"duet --status {run_dir.name}")
+        if before_extract is not None:
+            before_extract()
         return call_agent(a0, EXTRACT_LATEST_PROMPT, cfg,
                           first_turn_for_agent=False,
                           run_dir=run_dir, turn_label="00-extract")
@@ -4401,9 +4595,11 @@ def _metrics_timed(cfg: DuetConfig, key: str, operation: Callable[[], str]) -> s
             cfg._metrics_context[key] = max(0.0, time.monotonic() - started)
 
 
-def _metrics_derive_seed(cfg: DuetConfig, run_dir: pathlib.Path) -> str:
+def _metrics_derive_seed(cfg: DuetConfig, run_dir: pathlib.Path,
+                         before_extract: Callable[[], None]) -> str:
     extracting = not cfg.kickoff and bool(cfg.agents[0].session_id)
-    seed = _metrics_timed(cfg, "seed_elapsed_s", lambda: derive_seed(cfg, run_dir))
+    seed = _metrics_timed(cfg, "seed_elapsed_s",
+                          lambda: derive_seed(cfg, run_dir, before_extract=before_extract))
     if extracting and cfg._metrics_context:
         cfg._metrics_context["seed_entry"] = {
             "turn": 0, "kind": "seed_extract", "agent": cfg.agents[0].name,
@@ -4483,7 +4679,8 @@ def _metrics_snapshot_turn(entry: dict, state: dict) -> dict:
                 "delivered_output_bytes", "handoff_bytes"):
         value[key] = _metrics_nonnegative_int(metrics.get(key))
     for key, allowed in (("call_mode", {"fresh", "resume"}),
-                         ("usage_scope", {"invocation", "turn", "session", "unknown"})):
+                         ("usage_scope", {"invocation", "turn", "session", "unknown"}),
+                         ("prompt_transport", _PROMPT_TRANSPORTS)):
         value[key] = metrics.get(key) if metrics.get(key) in allowed else None
     usage = metrics.get("usage") if isinstance(metrics.get("usage"), dict) else {}
     value["usage"] = {key: _metrics_nonnegative_int(usage.get(key)) for key in (
@@ -4540,7 +4737,7 @@ def build_metrics_snapshot(state: dict, state_path: pathlib.Path) -> dict:
                    for slot, raw in zip(("lead", "partner"), profiles)] if recorded
                   else _metrics_legacy_profiles(state),
         "turns": [_metrics_snapshot_turn(entry, state) for entry in history
-                  if entry.get("kind") != "kickoff"],
+                  if entry.get("kind") not in ("kickoff", _RESUME_REFUSED_KIND)],
         "verification": {"attempts": len(checks), "passed": sum(checks),
                          "failed": len(checks) - sum(checks)},
     }
@@ -4681,6 +4878,7 @@ def _build_run_state(cfg: DuetConfig, *, turns_used: int, history: list,
         "cwd": str(cfg.cwd),
         "phase": effective_phase,
         "turns_used": turns_used,
+        "start_speaker_idx": cfg.start_speaker_idx,
         "agents": [agent_state(a) for a in cfg.agents],
         "history": history,
         "finished_reason": finished_reason,
@@ -4894,13 +5092,14 @@ def _run_kickoff_command(
                 wt_path=wt_path,
                 wt_branch=wt_branch,
             )
-        message = str(exc)
-        summary = _error_summary(message, type(exc).__name__)
+        log_path = run_dir / "turn-00-kickoff.stderr.log"
+        detail = format_agent_error_for_transcript(exc, log_path)
+        summary = _error_summary(str(exc), type(exc).__name__)
         log(
             "duet",
             "kickoff",
             f"[duet kickoff failed]\nfinished_reason: "
-            f"{FINISHED_KICKOFF_ERROR}\n{message}",
+            f"{FINISHED_KICKOFF_ERROR}\n{detail}",
             kind="kickoff_error",
         )
         history.append({
@@ -4910,12 +5109,12 @@ def _run_kickoff_command(
             "elapsed_s": time.monotonic() - started,
             "finished_reason": FINISHED_KICKOFF_ERROR,
             "error": summary,
-            "stderr_log_path": str(run_dir / "turn-00-kickoff.stderr.log"),
+            "stderr_log_path": str(log_path),
         })
         return _launch_failure_state(
             cfg,
             reason=FINISHED_KICKOFF_ERROR,
-            message=message,
+            message=detail.removeprefix("[duet] error: "),
             history=history,
             transcript_path=transcript_path,
             recap_path=recap_path,
@@ -4952,7 +5151,6 @@ class _TurnResult:
     convergence_hit: bool
     failure_reason: Optional[str]
     last_verify_state: Optional[dict]
-    recap_block: Optional[str]
 
 
 def _timeout_may_continue(cfg: DuetConfig, previous_turn_timed_out: bool,
@@ -5043,6 +5241,71 @@ def _has_approval_pair(history: list) -> bool:
             and current["agent"] != previous["agent"])
 
 
+def _invoke_turn(cfg: DuetConfig, *, turn: int, label: str, speaker: Agent,
+                 message: str, first_turn: bool, run_dir: pathlib.Path
+                 ) -> tuple[Optional[str], Optional[Exception], float]:
+    started = time.monotonic()
+    inflight = None
+    if cfg.recap:
+        inflight = _start_recap_inflight(turn, speaker.name, speaker.role, time.time())
+    else:
+        banner_turn = label if label.endswith("-forced") else str(turn)
+        print(f"\n--- Turn {banner_turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
+              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---", flush=True)
+
+    reply = None
+    error = None
+    previous_session_id = speaker.session_id
+    try:
+        reply = call_agent(speaker, message, cfg, first_turn_for_agent=first_turn,
+                           run_dir=run_dir, turn_label=label)
+        guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn)
+    except Exception as exc:
+        error = exc
+        if reply is not None:
+            # Retain the reply for diagnosis, but discard its unsafe resume handle.
+            speaker.session_id = previous_session_id
+    finally:
+        if inflight is not None:
+            _stop_recap_inflight(*inflight)
+    return reply, error, time.monotonic() - started
+
+
+def _turn_recap(cfg: DuetConfig, turn: int, speaker: Agent, elapsed: float,
+                raw_reply: str, convergence_hit: bool,
+                recap_path: pathlib.Path) -> Optional[str]:
+    if not cfg.recap:
+        return None
+    parsed = parse_recap_headers(raw_reply)
+    files = extract_files_heuristic(raw_reply)
+    fallbacks = {
+        "recap": _derive_recap_heuristic(raw_reply),
+        "files": ", ".join(files) if files else "none",
+        "status": derive_status_heuristic(speaker.role, convergence_hit),
+    }
+    block = format_recap_block(
+        turn, speaker.name, speaker.role, elapsed,
+        len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
+        parsed, fallbacks, convergence_hit,
+    )
+    append_text_atomic(recap_path, block)
+    return block
+
+
+def _resume_refusal_entry(speaker: Agent, error: AgentRunError, label: str,
+                          forced: bool = False) -> dict:
+    entry = {
+        "kind": _RESUME_REFUSED_KIND,
+        "agent": speaker.name,
+        "turn_label": label,
+        "finished_reason": error.finished_reason,
+        "error": _bounded_agent_error_excerpt(str(error)),
+    }
+    if forced:
+        entry["forced"] = True
+    return entry
+
+
 def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   run_dir: pathlib.Path, transcript_path: pathlib.Path,
                   recap_path: pathlib.Path, state_path: pathlib.Path,
@@ -5050,6 +5313,7 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
                   wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                   last_verify_state: Optional[dict],
                   timeout_may_continue: bool = False,
+                  forced: bool = False,
                   log: Callable[..., None]) -> _TurnResult:
     """Run a single agent turn: invoke, verify, recap, persist transcript+state.
 
@@ -5058,6 +5322,25 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
     whether to stop or rotate. Stop-flag and speaker-rotation checks stay in the
     caller — this handles only the mechanics of one turn.
     """
+    first_turn_for_agent = not seen_first_turn[speaker.name]
+    label = f"{turn:02d}-forced" if forced else f"{turn:02d}"
+    try:
+        guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
+    except AgentRunError as error:
+        failure_reason = error.finished_reason
+        reply = _agent_failure_block(failure_reason, error, label, speaker, run_dir,
+                                     call_started=False)
+        log(speaker.name, speaker.role, reply, kind=FINISHED_SETUP_ERROR)
+        history.append(_resume_refusal_entry(speaker, error, label, forced))
+        state = _build_run_state(
+            cfg, turns_used=turn - 1, history=history, finished_reason=failure_reason,
+            transcript_path=transcript_path, recap_path=recap_path,
+            last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+        )
+        _write_run_state(state_path, state)
+        print(reply, file=sys.stderr)
+        return _TurnResult(reply, False, failure_reason, last_verify_state)
+
     running_state = _build_run_state(
         cfg,
         turns_used=turn - 1,
@@ -5071,89 +5354,50 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         phase="turn_running",
     )
     _write_run_state(state_path, running_state)
-    first_turn_for_agent = not seen_first_turn[speaker.name]
-    guard_cwd_keyed_resume_before_call(cfg, speaker, first_turn_for_agent)
-    t0 = time.time()
-    measured_start = time.monotonic()
-    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
-    if cfg.recap:
-        inflight = _start_recap_inflight(turn, speaker.name, speaker.role, t0)
-    else:
-        # Print BEFORE the subprocess starts so the terminal user sees something
-        # happen instantly. claude -p emits nothing on stderr during its API
-        # call; without this banner the user thinks duet hung.
-        print(f"\n--- Turn {turn} :: {speaker.name} ({speaker.backend}/{speaker.role}) "
-              f"[started {dt.datetime.now().strftime('%H:%M:%S')}] ---")
-        sys.stdout.flush()
-    call_succeeded = False
-    failure_reason: Optional[str] = None
-    failure_message: Optional[str] = None
-    try:
-        reply = call_agent(speaker, last_msg, cfg,
-                           first_turn_for_agent=first_turn_for_agent,
-                           run_dir=run_dir, turn_label=f"{turn:02d}")
-        call_succeeded = True
-    except Exception as e:
-        failure_reason = _agent_finished_reason(e)
-        failure_message = str(e)
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-            inflight = None
-            elapsed = time.monotonic() - measured_start
-            print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
-                  f"ERROR after {int(round(elapsed))}s — "
-                  f"see turn-{turn:02d}-{speaker.name}.stderr.log")
-        reply = _agent_failure_block(failure_reason, e, f"{turn:02d}", speaker, run_dir)
-    if cfg.recap and inflight is not None:
-        _stop_recap_inflight(*inflight)
-    if call_succeeded:
-        guard_cwd_keyed_resume_after_call(cfg, speaker, first_turn_for_agent)
-        # Seen only on success: a timed-out/errored first turn must count as a
-        # first turn again on retry, so the same-cwd codex guards keep applying.
+    output, error, elapsed = _invoke_turn(
+        cfg, turn=turn, label=label, speaker=speaker, message=last_msg,
+        first_turn=first_turn_for_agent, run_dir=run_dir,
+    )
+    failure_reason = None
+    stderr_log_name = f"turn-{label}-{speaker.name}.stderr.log"
+    raw_reply = output or ""
+    failure_block = None
+    if error is None:
         seen_first_turn[speaker.name] = True
-    elapsed = time.monotonic() - measured_start
-    raw_reply = reply
+    else:
+        failure_reason = _agent_finished_reason(error)
+        failure_block = _agent_failure_block(failure_reason, error, label, speaker, run_dir)
+        raw_reply = f"{output}\n\n{failure_block}" if output else failure_block
+        if cfg.recap and failure_reason != FINISHED_SETUP_ERROR:
+            print(f"Turn {turn:02d} | {speaker.name} ({speaker.role}) · "
+                  f"ERROR after {int(round(elapsed))}s — see {stderr_log_name}")
     reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
-        cfg, raw_reply, call_succeeded, run_dir, f"{turn:02d}", wt_path)
+        cfg, raw_reply, error is None, run_dir, label, wt_path)
     if verify_state is not None:
         last_verify_state = verify_state
 
-    recap_block: Optional[str] = None
-    if cfg.recap:
-        parsed = parse_recap_headers(raw_reply)
-        files = extract_files_heuristic(raw_reply)
-        fallbacks = {
-            "recap": _derive_recap_heuristic(raw_reply),
-            "files": ", ".join(files) if files else "none",
-            "status": derive_status_heuristic(speaker.role, convergence_hit),
-        }
-        recap_block = format_recap_block(
-            turn, speaker.name, speaker.role, elapsed,
-            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
-            parsed, fallbacks, convergence_hit,
-        )
-        append_text_atomic(recap_path, recap_block)
+    recap_block = _turn_recap(cfg, turn, speaker, elapsed, failure_block or raw_reply,
+                              convergence_hit, recap_path)
 
-    reply, tool_denials = _append_tool_denial_note(reply, speaker, call_succeeded)
+    reply, tool_denials = _append_tool_denial_note(reply, speaker, output is not None)
     before_handoff_bytes = len(reply.encode("utf-8"))
     if wt_path is not None and speaker.cwd_override == wt_path:
         reply = append_worktree_diff(reply, wt_path, wt_branch)
 
-    log(speaker.name, speaker.role, reply)
+    log(speaker.name, speaker.role, reply, kind="forced" if forced else "agent")
     history_entry = {"turn": turn, "agent": speaker.name, "elapsed_s": elapsed,
                      "len_chars": len(reply), "session_id": speaker.session_id}
+    if forced:
+        history_entry["forced"] = True
     _record_tool_denials(history_entry, tool_denials)
     history_entry["metrics"] = _record_turn_metrics(
-        speaker, raw_reply, reply, convergence_hit, cfg,
+        speaker, output if output is not None else raw_reply, reply, convergence_hit, cfg,
         len(reply.encode("utf-8")) - before_handoff_bytes)
-    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
-    if failure_reason is not None:
+    _record_finding_updates(history_entry, raw_reply, error is None, cfg)
+    if error is not None:
         history_entry["finished_reason"] = failure_reason
-        # Bounded like the transcript block — a raw xhigh-codex stderr dump
-        # once ballooned state.json to 437KB. The stderr log stays complete.
-        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
-        history_entry["stderr_log_path"] = str(
-            run_dir / f"turn-{turn:02d}-{speaker.name}.stderr.log")
+        history_entry["error"] = _bounded_agent_error_excerpt(str(error))
+        history_entry["stderr_log_path"] = str(run_dir / stderr_log_name)
     if verify_state is not None:
         history_entry["verify"] = verify_state
     if revision is not None:
@@ -5169,10 +5413,16 @@ def _execute_turn(cfg: DuetConfig, *, turn: int, speaker: Agent, last_msg: str,
         cfg, turns_used=turn, history=history, finished_reason=persisted_reason,
         transcript_path=transcript_path, recap_path=recap_path,
         last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+        phase="awaiting_force" if forced else None,
     )
     _write_run_state(state_path, turn_state)
-    return _TurnResult(reply, convergence_hit, failure_reason,
-                       last_verify_state, recap_block)
+    if failure_reason == FINISHED_SETUP_ERROR:
+        print(failure_block, file=sys.stderr)
+    if cfg.recap:
+        print(_format_live_recap_block(recap_block), end="")
+    elif failure_reason != FINISHED_SETUP_ERROR:
+        print(reply)
+    return _TurnResult(reply, convergence_hit, failure_reason, last_verify_state)
 
 
 def _runs_ignore_overlaps_candidate(cfg: DuetConfig) -> bool:
@@ -5264,25 +5514,23 @@ def _derive_seed_or_failure(
     prints the done banner, and returns (None, state) so `run_duet` can return
     immediately.
     """
+    def mark_seed_running() -> None:
+        extracting = _build_run_state(
+            cfg,
+            turns_used=0,
+            history=history,
+            finished_reason=None,
+            transcript_path=transcript_path,
+            recap_path=recap_path,
+            wt_path=wt_path,
+            wt_branch=wt_branch,
+            phase="turn_running",
+        )
+        _write_run_state(state_path, extracting)
+
     seed_t0 = time.monotonic()
     try:
-        if not cfg.kickoff and cfg.agents[0].session_id:
-            extracting = _build_run_state(
-                cfg,
-                turns_used=0,
-                history=history,
-                finished_reason=None,
-                transcript_path=transcript_path,
-                recap_path=recap_path,
-                wt_path=wt_path,
-                wt_branch=wt_branch,
-                phase="turn_running",
-            )
-            _write_run_state(state_path, extracting)
-            guard_cwd_keyed_resume_before_call(
-                cfg, cfg.agents[0], first_turn_for_agent=False
-            )
-        return _metrics_derive_seed(cfg, run_dir), None
+        return _metrics_derive_seed(cfg, run_dir, mark_seed_running), None
     except Exception as e:
         if stop.requested and stop.reason == "SIGTERM":
             log("duet", "stop", "[duet] immediate stop requested", kind="stop")
@@ -5298,31 +5546,35 @@ def _derive_seed_or_failure(
             return None, state
         failure_reason = _agent_finished_reason(e)
         seed_agent = cfg.agents[0]
+        resume_refused = isinstance(e, AgentRunError) and failure_reason == FINISHED_SETUP_ERROR
         reply = _agent_failure_block(
-            failure_reason, e, "00-extract", seed_agent, run_dir
+            failure_reason, e, "00-extract", seed_agent, run_dir,
+            call_started=not resume_refused,
         )
-        log(seed_agent.name, seed_agent.role, reply, kind="agent_error")
-        history.append({
-            "turn": 0,
-            "agent": seed_agent.name,
-            "kind": "seed_extract",
-            "elapsed_s": time.monotonic() - seed_t0,
-            "metrics": _record_turn_metrics(seed_agent, "", reply, False, cfg),
-            "len_chars": len(reply),
-            "session_id": seed_agent.session_id,
-            "finished_reason": failure_reason,
-            "error": _bounded_agent_error_excerpt(str(e)),
-            "stderr_log_path": str(
-                run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"
-            ),
-        })
+        log(seed_agent.name, seed_agent.role, reply, kind=failure_reason if resume_refused else "agent_error")
+        if resume_refused:
+            entry = _resume_refusal_entry(seed_agent, e, "00-extract")
+        else:
+            entry = {
+                "turn": 0,
+                "agent": seed_agent.name,
+                "kind": "seed_extract",
+                "elapsed_s": time.monotonic() - seed_t0,
+                "metrics": _record_turn_metrics(seed_agent, "", reply, False, cfg),
+                "len_chars": len(reply),
+                "session_id": seed_agent.session_id,
+                "finished_reason": failure_reason,
+                "error": _bounded_agent_error_excerpt(str(e)),
+                "stderr_log_path": str(run_dir / f"turn-00-extract-{seed_agent.name}.stderr.log"),
+            }
+        history.append(entry)
         state = _build_run_state(
             cfg, turns_used=0, history=history, finished_reason=failure_reason,
             transcript_path=transcript_path, recap_path=recap_path,
             wt_path=wt_path, wt_branch=wt_branch,
         )
         _write_run_state(state_path, state)
-        print(reply)
+        print(reply, file=sys.stderr if failure_reason == FINISHED_SETUP_ERROR else sys.stdout)
         print(f"\n[duet] done. reason={failure_reason}. transcript: {transcript_path}")
         if cfg.recap:
             print(f"[duet] recap: {recap_path}")
@@ -5588,10 +5840,6 @@ def run_duet(cfg: DuetConfig) -> dict:
             timeout_may_continue=may_continue, log=log,
         )
         last_verify_state = result.last_verify_state
-        if cfg.recap:
-            print(_format_live_recap_block(result.recap_block), end="")
-        else:
-            print(result.reply)
 
         if stop.requested and stop.reason == "SIGTERM":
             finished_reason = FINISHED_FORCE_STOP
@@ -5624,11 +5872,12 @@ def run_duet(cfg: DuetConfig) -> dict:
         finished_reason = FINISHED_MAX_TURNS
 
     forced_verify_state = None
-    if finished_reason not in (FINISHED_TIMEOUT, FINISHED_AGENT_ERROR):
+    if finished_reason not in (FINISHED_TIMEOUT, FINISHED_AGENT_ERROR, FINISHED_SETUP_ERROR):
         finished_reason, forced_verify_state = ask_force(
             cfg, history, transcript_path, state_path,
             last_msg, speaker_idx, seen_first_turn,
             finished_reason, wt_path, wt_branch, stop=stop,
+            last_verify_state=last_verify_state,
         )
     if forced_verify_state is not None:
         last_verify_state = forced_verify_state
@@ -5670,108 +5919,24 @@ def _print_run_end_notes(cfg: DuetConfig, finished_reason: str, history: list) -
 
 
 def _run_forced_turn(cfg: DuetConfig, *, forced_turn: int, next_speaker: Agent,
-                     forced_msg: str, first_turn_for_agent: bool,
-                     transcript_path: pathlib.Path,
+                     forced_msg: str, transcript_path: pathlib.Path,
+                     state_path: pathlib.Path,
                      wt_path: Optional[pathlib.Path], wt_branch: Optional[str],
                      history: list, seen_first_turn: dict,
                      last_verify_state: Optional[dict]) -> _TurnResult:
-    """Run one human-forced continuation turn (the body of `ask_force`'s loop).
-
-    Mirrors `_execute_turn` but with the `-forced` turn labels, a "forced"
-    history flag, and the recap.md path derived from the transcript dir.
-    Mutates `history`/`seen_first_turn`, prints the reply/recap, and returns the
-    outcome `ask_force` needs to decide whether to keep prompting.
-    """
     run_dir = transcript_path.parent
-    label = f"{forced_turn:02d}-forced"
-    t0 = time.time()
-    measured_start = time.monotonic()
-    inflight: Optional[tuple[threading.Event, threading.Thread]] = None
-    if cfg.recap:
-        inflight = _start_recap_inflight(forced_turn, next_speaker.name,
-                                         next_speaker.role, t0)
-    call_succeeded = False
-    failure_reason: Optional[str] = None
-    failure_message: Optional[str] = None
-    try:
-        reply = call_agent(next_speaker, forced_msg, cfg,
-                           first_turn_for_agent=first_turn_for_agent,
-                           run_dir=run_dir, turn_label=label)
-        call_succeeded = True
-    except Exception as e:
-        failure_reason = _agent_finished_reason(e)
-        failure_message = str(e)
-        if cfg.recap and inflight is not None:
-            _stop_recap_inflight(*inflight)
-            inflight = None
-            elapsed = time.monotonic() - measured_start
-            print(f"Turn {forced_turn:02d} | {next_speaker.name} "
-                  f"({next_speaker.role}) · ERROR after "
-                  f"{int(round(elapsed))}s — see "
-                  f"turn-{label}-{next_speaker.name}.stderr.log")
-        reply = _agent_failure_block(failure_reason, e, label, next_speaker, run_dir)
-    if cfg.recap and inflight is not None:
-        _stop_recap_inflight(*inflight)
-    if call_succeeded:
-        guard_cwd_keyed_resume_after_call(cfg, next_speaker, first_turn_for_agent)
-        # Seen only on success — mirrors _execute_turn so a failed forced turn
-        # keeps the agent's first-turn guards intact on the next attempt.
-        seen_first_turn[next_speaker.name] = True
-    elapsed = time.monotonic() - measured_start
-    raw_reply = reply
-    reply, convergence_hit, verify_state, revision = _check_convergence_proposal(
-        cfg, raw_reply, call_succeeded, run_dir, label, wt_path)
-    if verify_state is not None:
-        last_verify_state = verify_state
-    reply, tool_denials = _append_tool_denial_note(reply, next_speaker, call_succeeded)
-    before_handoff_bytes = len(reply.encode("utf-8"))
-    if wt_path is not None and next_speaker.cwd_override == wt_path:
-        reply = append_worktree_diff(reply, wt_path, wt_branch)
-    recap_block = ""
-    if cfg.recap:
-        # Recap describes the agent's own reply, so parse raw_reply — before any
-        # verify block / worktree diff was appended to `reply` (matches
-        # _execute_turn; otherwise FILES and byte/line counts pick up the diff).
-        parsed = parse_recap_headers(raw_reply)
-        files = extract_files_heuristic(raw_reply)
-        fallbacks = {
-            "recap": _derive_recap_heuristic(raw_reply),
-            "files": ", ".join(files) if files else "none",
-            "status": derive_status_heuristic(next_speaker.role, convergence_hit),
-        }
-        recap_block = format_recap_block(
-            forced_turn, next_speaker.name, next_speaker.role, elapsed,
-            len(raw_reply.encode("utf-8")), raw_reply.count("\n") + 1,
-            parsed, fallbacks, convergence_hit,
-        )
-        append_text_atomic(run_dir / "recap.md", recap_block)
-    append_text_atomic(
-        transcript_path,
-        f"\n## {next_speaker.name} ({next_speaker.role}) — forced\n\n{reply}\n",
+
+    def log(name: str, role: str, reply: str, kind: str) -> None:
+        append_text_atomic(transcript_path, f"\n## {name} ({role}) — {kind}\n\n{reply}\n")
+
+    return _execute_turn(
+        cfg, turn=forced_turn, speaker=next_speaker, last_msg=forced_msg,
+        run_dir=run_dir, transcript_path=transcript_path,
+        recap_path=run_dir / "recap.md", state_path=state_path,
+        history=history, seen_first_turn=seen_first_turn,
+        wt_path=wt_path, wt_branch=wt_branch,
+        last_verify_state=last_verify_state, forced=True, log=log,
     )
-    history_entry = {"turn": forced_turn, "agent": next_speaker.name,
-                     "forced": True, "len_chars": len(reply), "elapsed_s": elapsed,
-                     "session_id": next_speaker.session_id,
-                     **({"verify": verify_state} if verify_state is not None else {})}
-    _record_tool_denials(history_entry, tool_denials)
-    history_entry["metrics"] = _record_turn_metrics(
-        next_speaker, raw_reply, reply, convergence_hit, cfg,
-        len(reply.encode("utf-8")) - before_handoff_bytes)
-    _record_finding_updates(history_entry, raw_reply, call_succeeded, cfg)
-    if revision is not None:
-        history_entry["approval_revision"] = revision
-    if failure_reason is not None:
-        history_entry["finished_reason"] = failure_reason
-        history_entry["error"] = _bounded_agent_error_excerpt(failure_message)
-        history_entry["stderr_log_path"] = str(
-            run_dir / f"turn-{label}-{next_speaker.name}.stderr.log")
-    history.append(history_entry)
-    if cfg.recap:
-        print(_format_live_recap_block(recap_block), end="")
-    else:
-        print(reply)
-    return _TurnResult(reply, convergence_hit, failure_reason,
-                       last_verify_state, recap_block)
 
 
 def _confirm_final_revision(cfg: DuetConfig, reason: str, history: list,
@@ -5800,13 +5965,13 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
               seen_first_turn: dict, reason: str,
               wt_path: Optional[pathlib.Path] = None,
               wt_branch: Optional[str] = None,
-              stop: Optional[StopFlag] = None) -> tuple[str, Optional[dict]]:
+              stop: Optional[StopFlag] = None, *,
+              last_verify_state: Optional[dict] = None) -> tuple[str, Optional[dict]]:
     """Post-loop interactive prompt: human can push another turn or accept."""
     if stop is not None and stop.requested:
         return FINISHED_FORCE_STOP, None
     if not sys.stdin.isatty():
         return reason, None
-    last_verify_state: Optional[dict] = None
     while True:
         waiting = _build_run_state(
             cfg,
@@ -5834,8 +5999,6 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         if not line:
             return reason, last_verify_state
         next_speaker = cfg.agents[speaker_idx]
-        first_turn_for_agent = not seen_first_turn[next_speaker.name]
-        guard_cwd_keyed_resume_before_call(cfg, next_speaker, first_turn_for_agent)
         head = f"\n## human — force-feedback (next: {next_speaker.name})\n\n"
         append_text_atomic(transcript_path, head + line + "\n")
         forced_msg = (
@@ -5845,30 +6008,23 @@ def ask_force(cfg: DuetConfig, history: list, transcript_path: pathlib.Path,
         )
         result = _run_forced_turn(
             cfg, forced_turn=_loop_turn_count(history) + 1, next_speaker=next_speaker,
-            forced_msg=forced_msg, first_turn_for_agent=first_turn_for_agent,
-            transcript_path=transcript_path, wt_path=wt_path, wt_branch=wt_branch,
+            forced_msg=forced_msg, transcript_path=transcript_path,
+            state_path=state_path, wt_path=wt_path, wt_branch=wt_branch,
             history=history, seen_first_turn=seen_first_turn,
             last_verify_state=last_verify_state,
         )
         last_verify_state = result.last_verify_state
-        forced_reason = result.failure_reason
         if stop is not None and stop.requested:
-            forced_reason = FINISHED_FORCE_STOP
-        # Persist each forced turn so a crash at the next force> prompt doesn't
-        # lose it (the --status/--continue durability contract). finished_reason
-        # stays None mid-loop (duet is alive at the prompt); run_duet writes the
-        # final state with the real reason once ask_force returns.
-        forced_state = _build_run_state(
-            cfg, turns_used=_loop_turn_count(history), history=history,
-            finished_reason=forced_reason,
-            transcript_path=transcript_path,
-            recap_path=transcript_path.parent / "recap.md",
-            last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
-            phase="awaiting_force",
-        )
-        _write_run_state(state_path, forced_state)
-        if forced_reason is not None:
-            return forced_reason, last_verify_state
+            stopped = _build_run_state(
+                cfg, turns_used=_loop_turn_count(history), history=history,
+                finished_reason=FINISHED_FORCE_STOP, transcript_path=transcript_path,
+                recap_path=transcript_path.parent / "recap.md",
+                last_verify=last_verify_state, wt_path=wt_path, wt_branch=wt_branch,
+            )
+            _write_run_state(state_path, stopped)
+            return FINISHED_FORCE_STOP, last_verify_state
+        if result.failure_reason is not None:
+            return result.failure_reason, last_verify_state
         last_msg = result.reply
         speaker_idx = 1 - speaker_idx
         reason = FINISHED_FORCED_CONTINUATION
@@ -6594,7 +6750,7 @@ _STATUS_AGENT_NAME_RE = re.compile(r"[\w.:-]{1,128}")
 
 def _status_history_turn(item: object) -> Optional[dict]:
     """Sanitize one history entry for the public status contract."""
-    if not isinstance(item, dict):
+    if not isinstance(item, dict) or item.get("kind") == _RESUME_REFUSED_KIND:
         return None
     turn = item.get("turn")
     if not isinstance(turn, int) or isinstance(turn, bool):
@@ -7086,7 +7242,7 @@ def _finding_collect_history(state: dict, events: list[dict]) -> tuple[dict, lis
     slots = _finding_slot_map(state)
     truncated = len(history) > _FINDING_EVENT_LIMIT
     for entry in history[:_FINDING_EVENT_LIMIT]:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("kind") == _RESUME_REFUSED_KIND:
             continue
         agent_name = entry.get("agent")
         slot = slots.get(agent_name) if isinstance(agent_name, str) else None
@@ -7364,6 +7520,10 @@ def _metrics_report_turn_labels(payload: dict, fields: dict[str, object]) -> boo
                                   or call_mode not in {"fresh", "resume"}):
         return False
     fields["call_mode"] = call_mode
+    prompt_transport = payload.get("prompt_transport")
+    if prompt_transport is not None and prompt_transport not in _PROMPT_TRANSPORTS:
+        return False
+    fields["prompt_transport"] = prompt_transport
     usage_scope = payload.get("usage_scope")
     if usage_scope is not None and (not isinstance(usage_scope, str)
                                     or usage_scope not in {"invocation", "turn", "session", "unknown"}):
@@ -8041,22 +8201,50 @@ def _agents_from_state(state: dict,
     return agents
 
 
+def _continue_loop_history(state: dict) -> Iterator[dict]:
+    history = state.get("history")
+    if not isinstance(history, list):
+        return
+    for item in reversed(history):
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if isinstance(kind, str) and kind in _NON_LOOP_HISTORY_KINDS:
+            continue
+        if "turn" in item and _positive_int_or_none(item["turn"]) is None:
+            continue
+        yield item
+
+
 def _next_speaker_idx_from_state(agents: list[Agent], state: dict) -> int:
-    history = state.get("history") or []
-    if isinstance(history, list):
-        for item in reversed(history):
-            if not isinstance(item, dict):
-                continue
-            last_agent = item.get("agent")
-            for idx, agent in enumerate(agents):
-                if agent.name == last_agent:
-                    return 1 - idx
+    for item in _continue_loop_history(state):
+        for idx, agent in enumerate(agents):
+            if agent.name == item.get("agent"):
+                return 1 - idx
     try:
         turns_used = int(state.get("turns_used") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         turns_used = 0
-    # Normal runs start with agent[1], so even turns mean agent[1] is next.
-    return 1 if turns_used % 2 == 0 else 0
+    opening = state.get("start_speaker_idx")
+    if type(opening) is not int or opening not in (0, 1):
+        # The default Codex review task identifies old recipe runs without a saved slot.
+        legacy_review = (not state.get("continue_from")
+                         and state.get("task") == DEFAULT_CODEX_REVIEW_TASK)
+        opening = 0 if legacy_review else 1
+    return 1 - opening if turns_used % 2 else opening
+
+
+def _restore_legacy_codex_sessions(agents: list[Agent], state: dict) -> None:
+    successful = [item for item in _continue_loop_history(state)
+                  if item.get("finished_reason") is None and not item.get("error")]
+    for agent in agents:
+        if agent.backend != "codex" or agent.session_id:
+            continue
+        previous = next((item for item in successful if item.get("agent") == agent.name), None)
+        if previous is not None:
+            pin = previous.get("session_id")
+            agent.session_id = (pin if isinstance(pin, str) and _CODEX_UUID_RE.fullmatch(pin)
+                                else "codex-current")
 
 
 def _continue_note_from_args(
@@ -8087,7 +8275,7 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
                               user_note: Optional[str],
                               worktree_path: Optional[pathlib.Path]) -> str:
     history = state.get("history") or []
-    last = history[-1] if isinstance(history, list) and history else {}
+    last = next(_continue_loop_history(state), None)
     transcript = state.get("transcript_path") or str(run_dir / "transcript.md")
     recap = state.get("recap_path")
     finished = state.get("finished_reason")
@@ -8107,7 +8295,7 @@ def _default_continue_kickoff(run_dir: pathlib.Path,
         lines.append(f"Recap: {recap}")
     if worktree_path is not None:
         lines.append(f"Worktree: {worktree_path}")
-    if isinstance(last, dict) and last:
+    if last:
         lines.append(
             f"Last completed turn: {last.get('turn')} by {last.get('agent')}"
         )
@@ -8196,20 +8384,7 @@ def build_continue_config(run_arg: str,
         permission_mode=permission_mode,
         add_dirs=add_dirs,
     )
-    # Older runs (or runs that crashed before the first state.json roll) may
-    # have Codex agents that already spoke but have no saved session_id. Without
-    # a marker, run_duet would treat the next turn as a fresh `codex exec` and
-    # lose the prior session. Plant the legacy "codex-current" sentinel so
-    # call_codex resumes via `--last` keyed on cwd.
-    history = state.get("history") or []
-    if isinstance(history, list):
-        codex_speakers = {item.get("agent") for item in history
-                          if isinstance(item, dict)}
-        for agent in agents:
-            if (agent.backend == "codex"
-                    and not agent.session_id
-                    and agent.name in codex_speakers):
-                agent.session_id = "codex-current"
+    _restore_legacy_codex_sessions(agents, state)
     cwd = pathlib.Path(state.get("cwd") or ".").expanduser().resolve()
     timeout = _state_int_or_arg(
         args.timeout, state, "per_turn_timeout",
@@ -8285,10 +8460,13 @@ def build_continue_config(run_arg: str,
 
 
 def _humanize_age(seconds: int) -> str:
-    if seconds < 60:           return f"{seconds}s ago"
-    if seconds < 3600:         return f"{seconds // 60}m ago"
-    if seconds < 86400:        return f"{seconds // 3600}h ago"
-    if seconds < 7 * 86400:    return f"{seconds // 86400}d ago"
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
     return f"{seconds // 86400}d ago"
 
 

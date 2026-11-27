@@ -43,7 +43,7 @@ Each file is a JSON object with `schema_version: 1` and
 | `run_kind` | `live`, `test`, `dry_run`, or `unknown` |
 | `duet_version` | Duet version when known |
 | `phase`, `finished_reason` | Curated lifecycle outcome; missing values remain unknown |
-| `agents` | Safe profile for each slot: backend, built-in/custom role, requested model, bounded CLI version, reasoning requested/effective/backend value and transport, prompt transport, fast-mode, subagent policy, and whether unrecorded extra arguments were present |
+| `agents` | Safe profile for each slot: backend, built-in/custom role, requested model, bounded CLI version, reasoning requested/effective/backend value and transport, fast-mode, subagent policy, and whether unrecorded extra arguments were present |
 | `max_turns`, `per_turn_timeout` | Configured run budget when known |
 | `wall_elapsed_s` | End-to-end elapsed time when available |
 | `turns` | Numeric timing/byte fields and safe outcome labels for each turn |
@@ -60,6 +60,17 @@ not estimate tokens from bytes or infer prices. `system_prompt_bytes` and
 `partner_message_bytes` measure Duet's input strings before a backend adds its
 own prefix or combined-prompt framing; they are not provider input-token or
 full-wire-byte measurements.
+
+Turn attempts record the selected `prompt_transport` as `combined_argv`,
+`combined_stdin`, `system_flag_and_message`, or `system_file_and_message`.
+The last two indicate a Claude system prompt flag or file and a message on
+stdin. Synthetic turns and historical turns without this field remain unknown.
+Historical agent profiles can contain a run-level prompt transport label.
+
+Without an explicit OpenCode v2 model, `reasoning_backend_value` is unknown.
+`reasoning_transport` is `prompt` for high, xhigh, and max. It is
+`native_default` for minimal, low, and medium. If Duet cannot determine the
+OpenCode generation, the transport for a requested effort stays unknown.
 
 When available, `usage.reasoning_tokens` preserves a backend's native
 reasoning/thought counter. It is not normalized across vendors and must not be

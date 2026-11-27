@@ -68,7 +68,7 @@ details pre { font:13px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; whi
 <body>
 <main class="shell">
   <section class="stage" id="stage" aria-labelledby="title">
-    <div class="brandbar"><div class="wordmark">duet<i>.</i></div><div class="edition">Public toy fixture / 05 Sep 2026<br>Edited replay · 80 seconds</div></div>
+    <div class="brandbar"><div class="wordmark">duet<i>.</i></div><div class="edition">Public toy fixture / 05 Sep 2026<br>Edited replay<span id="duration"></span></div></div>
     <p class="eyebrow" id="eyebrow"></p>
     <h1 id="title"></h1>
     <p class="subtitle" id="subtitle"></p>
@@ -84,10 +84,10 @@ details pre { font:13px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; whi
     <div class="footer"><span><strong>Real saved findings. Edited presentation.</strong><br>Authored expectations were visible to the agents. This is a workflow demo.</span><span>Agent agreement ≠ proof<br><strong id="counter"></strong></span></div>
   </section>
   <div class="controls" aria-label="Playback controls">
-    <button type="button" class="play" id="play">Play 80s demo</button>
+    <button type="button" class="play" id="play">Play demo</button>
     <label for="progress" class="sr-only">Playback position in seconds</label>
-    <input id="progress" type="range" min="0" max="80" value="0" step="0.1">
-    <output class="time" id="time" for="progress">0:00 / 1:20</output>
+    <input id="progress" type="range" min="0" value="0" step="0.1">
+    <output class="time" id="time" for="progress">0:00</output>
   </div>
   <nav class="steps" id="steps" aria-label="Demo chapters"></nav>
   <section class="evidence" aria-labelledby="evidence-title">
@@ -126,7 +126,7 @@ function render(index) {
   if (index===sceneIndex) return;
   sceneIndex=index; const scene=scenes[index];
   for (const [id,key] of [['eyebrow','eyebrow'],['title','title'],['subtitle','subtitle'],['panel-label','label'],['command','command'],['output','output'],['note','note']]) $(id).textContent=scene[key];
-  $('counter').textContent=String(index+1).padStart(2,'0')+' / 07';
+  $('counter').textContent=String(index+1).padStart(2,'0')+' / '+String(scenes.length).padStart(2,'0');
   $('claims').replaceChildren(...review.report.findings.map(f=>{
     const card=document.createElement('div'); card.className='claim'+(scene.focus===f.id?' active':scene.focus?' dim':'');
     const row=document.createElement('div'); row.className='badge-line';
@@ -161,6 +161,9 @@ $('source').textContent=JSON.stringify({presentation:data.presentation,scope:dat
 $('fixture').textContent=JSON.stringify({fixture_sha256:data.fixture_sha256,fixture_sources:data.fixture_sources,separate_fixture_check:data.separate_fixture_check},null,2);
 $('download').href=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)+'\n'],{type:'application/json'}));
 window.demo={scenes,total,seekScene:index=>{pause();seek(starts[index]);},getPosition:()=>position};
+$('duration').textContent=' · '+total+' seconds';
+$('play').textContent='Play '+total+'s demo';
+$('progress').max=String(total);
 seek(0);
 </script>
 </body>

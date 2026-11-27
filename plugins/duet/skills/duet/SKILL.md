@@ -192,8 +192,9 @@ result; do not inspect `state.json` as a replacement interface.
 For `agent_error` or `timeout`, status reports only `inspect artifacts`.
 Read the last `[duet] AGENT ERROR` or `[duet] TIMEOUT` block in
 `artifacts.transcript` and the stderr log that it names.
-For `setup_error` or `kickoff_error`, there is no such block. Report the
-full `[duet] ERROR:` message from the Duet process output, with all of its lines.
+For `setup_error`, read the `[duet] SETUP ERROR` transcript block when present.
+Otherwise, report the `[duet] ERROR:` message from the Duet process output.
+For `kickoff_error`, read the transcript excerpt and the stderr log it names.
 
 For an active turn, also surface `budget_seconds` and `remaining_seconds`.
 When `last_timeout` is non-null, report its turn and agent; it remains present
@@ -312,9 +313,9 @@ another model. OpenCode model IDs use the `provider/model` form. Duet rejects
 a `#variant` suffix in that ID; report the validation error without changing
 the user's selection. Use `reasoning_effort` or `--reasoning` for effort.
 OpenCode v1 receives `--variant <level>`. OpenCode v2 needs an explicit model
-to receive effort through `-m provider/model#<level>`. Without a model, v2 gets
-only the prompt prefix and Duet prints a note. High/xhigh/max add prompt
-nudges; the other levels have no prompt nudge.
+to receive effort through `-m provider/model#<level>`. Without a model, v2 uses
+native reasoning and Duet prints a note. Only high, xhigh, and max add prompt
+guidance.
 Report this effort limit without inventing a model or changing the requested effort.
 
 When the user requests effort for an explicit OpenCode v2 peer model, inspect
