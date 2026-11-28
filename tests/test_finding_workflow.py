@@ -6,6 +6,8 @@ import io
 import json
 import os
 import pathlib
+import shlex
+import shutil
 import sys
 import tempfile
 import unittest
@@ -235,6 +237,150 @@ class TestFindingWorkflow(unittest.TestCase):
                 write.assert_not_called()
                 self.assertEqual((run / "state.json").read_bytes(), before)
                 self.assertFalse((run / "review.md").exists())
+
+    def _history_for(self, dispositions: dict) -> list[dict]:
+        """Build a lead turn and a partner turn; a pair is (lead, partner) or None per ID."""
+        history = []
+        for turn, (agent, slot) in enumerate((("lead", 0), ("partner", 1)), start=1):
+            items = [_assessment(identity=identity, disposition=pair[slot])
+                     for identity, pair in dispositions.items() if pair[slot] is not None]
+            history.append({"turn": turn, "agent": agent,
+                            "finding_updates": {"status": "ok", "items": items}})
+        return history
+
+    def _announce(self, state: dict) -> list[str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            duet._announce_finding_report(state)
+        return out.getvalue().splitlines()
+
+    def _announce_state(self, run: pathlib.Path, dispositions: dict) -> dict:
+        return {"finding_reports": True, "agents": [{"name": "lead"}, {"name": "partner"}],
+                "history": self._history_for(dispositions), "transcript_path": str(run / "transcript.md")}
+
+    def test_review_file_and_report_show_the_real_directory_and_it_runs_as_written(self) -> None:
+        state = self._run([_reply("supported"), _reply("unresolved")],
+                          runs_dir=self.root / "runs with space")
+        run = pathlib.Path(state["transcript_path"]).parent
+        quoted = shlex.quote(str(run.resolve()))
+        quoted_parent = shlex.quote(str(run.resolve().parent))
+        self.assertIn(f"duet --continue {quoted} --runs-dir {quoted_parent} --resolve L1 --turns 2",
+                      (run / "review.md").read_text(encoding="utf-8"))
+        code, out, err = self._cli("--report", str(run))
+        self.assertEqual(code, 0, err)
+        line = next(row for row in out.splitlines() if row.startswith("duet --continue"))
+        argv = shlex.split(line)
+        self.assertEqual(argv[:2], ["duet", "--continue"])
+        cfg = self._continue(pathlib.Path(argv[2]), *argv[3:])
+        self.assertEqual(cfg.resolve_findings, ["L1"])
+
+    def test_report_on_a_copied_run_names_the_copy(self) -> None:
+        run = self._saved_run("original run", history=self._history(), turns_used=2)
+        copied = self.root / "moved here" / "copy"
+        shutil.copytree(run, copied)
+        code, out, err = self._cli("--report", str(copied))
+        self.assertEqual(code, 0, err)
+        self.assertIn(shlex.quote(str(copied.resolve())), out)
+        self.assertNotIn(str(run.resolve()), out)
+        self.assertNotIn("<run>", out)
+
+    def test_end_of_run_lines_show_counts_and_a_runnable_command(self) -> None:
+        run = self.root / "finished run"
+        state = self._announce_state(run, {
+            "L1": ("supported", None), "L2": ("supported", "refuted"),
+            "L3": ("unresolved", "unresolved"), "L4": ("supported", "supported")})
+        lines = self._announce(state)
+        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(lines[0], f"[duet] finding report: {run / 'review.md'} "
+                                   "(3 unresolved: 1 single_assessment, 1 disputed, 1 open)")
+        prefix = "[duet] continue unresolved findings: "
+        self.assertTrue(lines[1].startswith(prefix))
+        self.assertEqual(shlex.split(lines[1][len(prefix):]),
+                         ["duet", "--continue", str(run.resolve()),
+                          "--runs-dir", str(run.resolve().parent),
+                          "--resolve", "L1", "--resolve", "L2", "--resolve", "L3"])
+
+    def test_printed_command_continues_beside_the_source_run(self) -> None:
+        run = self._saved_run("source run", history=self._history(), turns_used=2)
+        lines = self._announce(self._announce_state(run, {"L1": ("supported", None)}))
+        argv = shlex.split(lines[1].split(": ", 1)[1])
+        self.assertEqual(argv[3], "--runs-dir")
+        self.assertEqual(pathlib.Path(argv[4]), run.resolve().parent)
+        cfg = self._continue(pathlib.Path(argv[2]), *argv[3:])
+        self.assertEqual(cfg.runs_dir, run.resolve().parent)
+
+    def test_end_of_run_command_lists_at_most_five_ids(self) -> None:
+        run = self.root / "many"
+        ids = {f"L{number}": ("supported", None) for number in range(1, 9)}
+        lines = self._announce(self._announce_state(run, ids))
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("(8 unresolved: 8 single_assessment, 0 disputed, 0 open)", lines[0])
+        resolved = shlex.split(lines[1].split(": ", 1)[1])[5:]
+        self.assertEqual(resolved, [part for number in range(1, 6) for part in ("--resolve", f"L{number}")])
+        self.assertIn("3 more unresolved findings are not in this command", lines[2])
+        self.assertIn(str(run / "review.md"), lines[2])
+        one_more = {f"L{number}": ("supported", None) for number in range(1, 7)}
+        lines = self._announce(self._announce_state(run, one_more))
+        self.assertEqual(len(lines), 3, lines)
+        self.assertIn("1 more unresolved finding is not in this command", lines[2])
+        self.assertNotIn("findings are", lines[2])
+        exactly = {f"L{number}": ("supported", None) for number in range(1, 6)}
+        self.assertEqual(len(self._announce(self._announce_state(run, exactly))), 2)
+
+    def test_end_of_run_has_no_command_without_unresolved_findings(self) -> None:
+        run = self.root / "clean"
+        with_open = self._announce(self._announce_state(run, {"L1": ("supported", None)}))
+        self.assertTrue(any("duet --continue" in line for line in with_open), with_open)
+        lines = self._announce(self._announce_state(run, {"L1": ("supported", "supported")}))
+        self.assertEqual(lines, [f"[duet] finding report: {run / 'review.md'} (0 unresolved)"])
+
+    def test_end_of_run_prints_nothing_when_reports_are_off(self) -> None:
+        self.assertEqual(self._announce({"finding_reports": False}), [])
+
+    def test_end_of_run_has_no_command_when_the_history_is_incomplete(self) -> None:
+        state = self._announce_state(self.root / "partial", {"L1": ("supported", None)})
+        with mock.patch.object(duet, "_FINDING_EVENT_LIMIT", 1):
+            lines = self._announce(state)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("(1 unresolved: 1 single_assessment, 0 disputed, 0 open)", lines[0])
+        self.assertNotIn("duet --continue", lines[0])
+
+    def test_dry_run_continuation_prints_counts_but_no_command(self) -> None:
+        run = self._saved_run(history=self._history(), turns_used=2)
+        cfg = self._continue(run, "--resolve", "L1", "--dry-run", "--runs-dir", str(self.root / "continued"))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            state = duet.run_duet(cfg)
+        self.assertIs(state["dry_run"], True)
+        lines = self._announce(state)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("(1 unresolved: 0 single_assessment, 0 disputed, 1 open)", lines[0])
+        dry_dir = pathlib.Path(state["transcript_path"]).parent
+        review = (dry_dir / "review.md").read_text(encoding="utf-8")
+        self.assertIn("duet --continue <run> --resolve L1 --turns 2", review)
+        self.assertNotIn(shlex.quote(str(dry_dir.resolve())), review)
+        code, out, err = self._cli("--report", str(dry_dir))
+        self.assertEqual(code, 0, err)
+        self.assertIn("duet --continue <run> --resolve L1 --turns 2", out)
+        live_state = self._announce_state(self.root / "live", {"L1": ("supported", None)})
+        self.assertEqual(len(self._announce(dict(live_state, dry_run=False))), 2)
+
+    def test_continuation_kickoff_is_free_of_report_only_keys(self) -> None:
+        run = self._saved_run(history=self._history(), turns_used=2)
+        lead = {"id": "L1", "claim": "A partial batch is counted as full",
+                "disposition": "supported",
+                "evidence": ["toy.py:18; five items produce three batches"],
+                "objection": None, "slot": "lead", "turn": 1, "inherited": False}
+        partner = dict(lead, disposition="unresolved", slot="partner", turn=2,
+                       objection="Need the partner to check the contract")
+        focus = [{"id": "L1", "claim": lead["claim"], "disposition": "unresolved",
+                  "assessment_basis": "agent_assessment", "assessments": [lead, partner],
+                  "missing_evidence_slots": [],
+                  "last_open_objection": "Need the partner to check the contract"}]
+        for extra in (["--resolve", "L1"], []):
+            with self.subTest(extra=extra):
+                kickoff = self._continue(run, *extra).kickoff
+                self.assertNotIn("unresolved_reason", kickoff)
+                self.assertTrue(kickoff.endswith(json.dumps(focus, ensure_ascii=True)), kickoff)
 
     def test_resolve_defaults_two_turns_and_preserves_inherited_identity(self) -> None:
         run = self._saved_run(history=self._history(), turns_used=2)

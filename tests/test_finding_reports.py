@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shlex
 import sys
 import unittest
+from unittest import mock
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -206,6 +208,154 @@ class TestFindingRendering(unittest.TestCase):
                 self.assertIn(f"## `{identity}` \u2014 unresolved (agent assessment)\n", rendered)
                 self.assertEqual(report["findings"][0]["id"], identity)
                 self.assertIn(f"--resolve {identity} --turns 2", rendered)
+
+
+def assessed(identity, lead=None, partner=None):
+    """Return one lead turn and one partner turn, skipping a slot given as None."""
+    history = []
+    if lead is not None:
+        history.append(turn(1, "reviewer", [item(identity, lead)]))
+    if partner is not None:
+        history.append(turn(2, "coder", [item(identity, partner)]))
+    return history
+
+
+class TestUnresolvedReasons(unittest.TestCase):
+    CASES = (
+        ("S1", "supported", None, "unresolved", "single_assessment"),
+        ("S2", None, "unresolved", "unresolved", "single_assessment"),
+        ("S3", None, "refuted", "unresolved", "single_assessment"),
+        ("D1", "supported", "refuted", "unresolved", "disputed"),
+        ("D2", "refuted", "supported", "unresolved", "disputed"),
+        ("O1", "unresolved", "unresolved", "unresolved", "open"),
+        ("O2", "supported", "unresolved", "unresolved", "open"),
+        ("O3", "unresolved", "refuted", "unresolved", "open"),
+        ("R1", "supported", "supported", "supported", None),
+        ("R2", "refuted", "refuted", "refuted", None),
+    )
+
+    def report(self):
+        history = []
+        for identity, lead, partner, _, _ in self.CASES:
+            history.extend(assessed(identity, lead, partner))
+        return duet.build_finding_report(state(history))
+
+    def test_each_reason_follows_the_latest_assessments(self):
+        found = {finding["id"]: finding for finding in self.report()["findings"]}
+        for identity, _, _, disposition, reason in self.CASES:
+            with self.subTest(identity=identity):
+                self.assertEqual(found[identity]["disposition"], disposition)
+                self.assertEqual(found[identity]["unresolved_reason"], reason)
+
+    def test_reassessment_changes_the_reason_with_the_disposition(self):
+        history = assessed("L1", "supported", "refuted")
+        self.assertEqual(duet.build_finding_report(state(history))["findings"][0]["unresolved_reason"],
+                         "disputed")
+        history.append(turn(3, "coder", [item("L1", "supported")]))
+        finding = duet.build_finding_report(state(history))["findings"][0]
+        self.assertEqual((finding["disposition"], finding["unresolved_reason"]), ("supported", None))
+        history = [turn(1, "reviewer", [item("L1", "supported")]),
+                   turn(2, "reviewer", [item("L1", "refuted")])]
+        finding = duet.build_finding_report(state(history))["findings"][0]
+        self.assertEqual(finding["unresolved_reason"], "single_assessment")
+
+    def test_summary_counts_each_reason_and_keeps_the_existing_summary(self):
+        report = self.report()
+        self.assertEqual(report["unresolved_reasons"],
+                         {"single_assessment": 3, "disputed": 2, "open": 3})
+        self.assertEqual(report["summary"], {"supported": 1, "refuted": 1, "unresolved": 8})
+        empty = duet.build_finding_report(state())
+        self.assertEqual(empty["unresolved_reasons"], {"single_assessment": 0, "disputed": 0, "open": 0})
+
+    def test_json_keeps_schema_one_and_adds_only_new_keys(self):
+        report = json.loads(json.dumps(self.report(), sort_keys=True))
+        self.assertEqual((report["schema_version"], report["kind"]), (1, "duet.finding.report"))
+        schema_one = {"schema_version", "kind", "enabled", "available", "phase", "finished_reason",
+                      "events", "findings", "summary", "structured_turns", "executed_checks",
+                      "execution_limits", "truncated"}
+        self.assertEqual(set(report), schema_one | {"unresolved_reasons"})
+        finding_schema_one = {"id", "claim", "disposition", "assessment_basis", "assessments",
+                              "missing_evidence_slots", "last_open_objection"}
+        for finding in report["findings"]:
+            self.assertEqual(set(finding), finding_schema_one | {"unresolved_reason"})
+
+    def test_markdown_gives_one_sentence_per_reason_and_the_counts(self):
+        rendered = duet.render_finding_report(self.report())
+        self.assertIn("Unresolved findings by reason: 3 single_assessment", rendered)
+        self.assertIn("2 disputed", rendered)
+        self.assertIn("3 open", rendered)
+        for sentence in (
+                "Only the lead has an accepted assessment of this claim.",
+                "Only the partner has an accepted assessment of this claim.",
+                "The lead assessed this claim as supported and the partner assessed it as refuted.",
+                "The lead assessed this claim as refuted and the partner assessed it as supported.",
+                "Both agents have an accepted assessment of this claim, "
+                "and at least one still marks it unresolved."):
+            with self.subTest(sentence=sentence):
+                self.assertIn("\n\n" + sentence + "\n\n", rendered)
+
+    def test_rejected_reply_leaves_the_earlier_accepted_assessment_in_charge(self):
+        rejected = {"turn": 3, "agent": "reviewer",
+                    "finding_updates": duet.parse_finding_updates("```duet-findings\nnot JSON\n```")}
+        history = assessed("L1", "supported", "refuted") + [rejected]
+        report = duet.build_finding_report(state(history))
+        self.assertEqual(report["structured_turns"]["malformed"], 1)
+        self.assertEqual(report["findings"][0]["unresolved_reason"], "disputed")
+        history = [turn(1, "reviewer", [item("L1", "supported")]),
+                   {"turn": 2, "agent": "coder",
+                    "finding_updates": duet.parse_finding_updates("```duet-findings\nnot JSON\n```")}]
+        report = duet.build_finding_report(state(history))
+        self.assertEqual(report["findings"][0]["unresolved_reason"], "single_assessment")
+        rendered = duet.render_finding_report(report)
+        self.assertIn("Only the lead has an accepted assessment of this claim.", rendered)
+
+    def test_reason_covers_inherited_baseline_events(self):
+        baseline = duet.build_finding_report(state(assessed("L1", "supported") + assessed("L2", "supported")))
+        self.assertEqual(baseline["unresolved_reasons"]["single_assessment"], 2)
+        history = [turn(3, "coder", [item("L1", "refuted")])]
+        report = duet.build_finding_report(state(history, finding_baseline=baseline["events"]))
+        found = {finding["id"]: finding["unresolved_reason"] for finding in report["findings"]}
+        self.assertEqual(found, {"L1": "disputed", "L2": "single_assessment"})
+        self.assertEqual([event["inherited"] for event in report["events"]], [True, True, False])
+        self.assertEqual(report["unresolved_reasons"],
+                         {"single_assessment": 1, "disputed": 1, "open": 0})
+
+    def test_markdown_omits_reasons_when_nothing_is_unresolved(self):
+        report = duet.build_finding_report(state(assessed("L1", "supported", "supported")))
+        rendered = duet.render_finding_report(report)
+        self.assertEqual(report["unresolved_reasons"], {"single_assessment": 0, "disputed": 0, "open": 0})
+        self.assertIsNone(report["findings"][0]["unresolved_reason"])
+        self.assertNotIn("Unresolved findings by reason", rendered)
+
+
+class TestContinuationCommand(unittest.TestCase):
+    def unresolved(self, **overrides):
+        return duet.build_finding_report(state(assessed("L1", "supported", "refuted"), **overrides))
+
+    def test_placeholder_remains_when_the_run_directory_is_unknown(self):
+        self.assertEqual(duet._finding_continue_command(None, ["L1"], turns=2),
+                         "duet --continue <run> --resolve L1 --turns 2")
+        self.assertIn("duet --continue <run> --resolve L1 --turns 2",
+                      duet.render_finding_report(self.unresolved()))
+
+    def test_real_directory_replaces_placeholder_and_is_shell_quoted(self):
+        for name in ("plain", "with space", "it's here"):
+            with self.subTest(name=name):
+                run_dir = pathlib.Path("/tmp/duet runs") / name
+                rendered = duet.render_finding_report(self.unresolved(), run_dir)
+                self.assertNotIn("<run>", rendered)
+                line = next(row for row in rendered.splitlines() if row.startswith("duet --continue"))
+                self.assertEqual(shlex.split(line),
+                                 ["duet", "--continue", str(run_dir), "--runs-dir", str(run_dir.parent),
+                                  "--resolve", "L1", "--turns", "2"])
+
+    def test_incomplete_history_offers_no_command(self):
+        with mock.patch.object(duet, "_FINDING_EVENT_LIMIT", 1):
+            report = duet.build_finding_report(state(assessed("L1", "supported", "refuted")))
+        self.assertTrue(report["truncated"])
+        rendered = duet.render_finding_report(report, pathlib.Path("/tmp/run"))
+        self.assertNotIn("duet --continue", rendered)
+        self.assertIn("Continuation is unavailable", rendered)
 
 
 if __name__ == "__main__":

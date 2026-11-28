@@ -204,6 +204,18 @@ and seed/kickoff extraction cannot establish assessments. `parse_finding_updates
 `build_finding_report`, and `render_finding_report` validate and project local
 claim data. `_write_run_state` publishes best-effort atomic `review.md`; the
 read-only `--report` command can render it from state without agent calls.
+`unresolved_reason` (`single_assessment`, `disputed`, `open`, or `null` for
+resolved findings) derives from the same latest-assessment data as the
+disposition, and `unresolved_reasons` counts it. `render_finding_report` takes
+an optional run directory: `--report` passes the directory it read, `review.md`
+its own directory, and `_announce_finding_report` prints the counts plus one
+shell-quoted `duet --continue` command with at most five IDs. A known directory
+also adds `--runs-dir` set to its parent, because `choose_runs_dir` would
+otherwise place the continued run in `./runs`. Without a known
+directory the placeholder `<run>` stays; a dry-run (`state["dry_run"]`) passes no
+directory and prints no command, and an incomplete ledger gets no command. The
+`--continue` kickoff JSON omits `unresolved_reason` so agent-facing text is
+unchanged. The announced command never adds `--trust-state`.
 `--continue` inherits validated `finding_baseline` events; `--resolve` selects
 unresolved IDs with a two-turn default and refuses an incomplete ledger. None
 of these helpers changes convergence or promotes agent evidence to executed
